@@ -11,6 +11,7 @@ rm -rf $OUT
 mkdir -p $OUT
 cp LICENSE $OUT
 cp -R liblean-ftl/include $OUT
+cp -R liblean-ftl/source $OUT
 mv build $OUT
 git status
 git diff package.json

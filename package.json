@@ -1,0 +1,106 @@
+{
+  "name": "lean-ftl",
+  "version": "0.0.1",
+  "description": "A source xPack with lean-ftl",
+  "main": "",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sebastien-riou/lean-ftl.git"
+  },
+  "homepage": "https://github.com/sebastien-riou/lean-ftl/",
+  "bugs": {
+    "url": "https://github.com/sebastien-riou/lean-ftl/issues/"
+  },
+  "keywords": [
+    "xpack"
+  ],
+  "author": {
+    "name": "Sebastien Riou",
+    "email": "<author-email>",
+    "url": "<author-url>"
+  },
+  "license": "Apache",
+  "config": {},
+  "devDependencies": {},
+  "xpack": {
+    "minimumXpmRequired": "0.16.3",
+    "dependencies": {},
+    "devDependencies": {
+      "@xpack-dev-tools/arm-none-eabi-gcc": {
+        "specifier": "13.3.1-1.1.1",
+        "local": "link",
+        "platforms": "all"
+      },
+      "@xpack-dev-tools/cmake": {
+        "specifier": "3.28.6-1.1",
+        "local": "link",
+        "platforms": "all"
+      }
+    },
+    "properties": {
+      "buildFolderRelativePath": "{{ 'build' | path_join: configuration.name | to_filename }}",
+      "buildFolderRelativePathPosix": "{{ 'build' | path_posix_join: configuration.name }}",
+      "commandCMakePrepare": "{{ properties.commandCMakeReconfigure }} --log-level=VERBOSE",
+      "commandCMakePrepareWithToolchain": "{{ properties.commandCMakePrepare }} -D CMAKE_TOOLCHAIN_FILE={{ properties.toolchainFileName }} --preset {{ properties.buildType }}",
+      "commandCMakeReconfigure": "cmake -S . -B {{ properties.buildFolderRelativePathPosix }}  -D PLATFORM_NAME={{ properties.platformName }}",
+      "commandCMakeBuild": "cmake --build {{ properties.buildFolderRelativePathPosix }}",
+      "commandCMakeBuildVerbose": "cmake --build {{ properties.buildFolderRelativePathPosix }} --verbose",
+      "commandCMakeClean": "cmake --build  --target clean",
+      "commandCMakePerformTests": "cd {{ properties.buildFolderRelativePath }} && ctest -V"
+    },
+    "actions": {
+      "test-linux-debug": [
+        "xpm run prepare --config linux-debug",
+        "xpm run build --config linux-debug",
+        "xpm run test --config linux-debug"
+      ],
+      "test-linux-minSizeRel": [
+        "xpm run prepare --config linux-minSizeRel",
+        "xpm run build --config linux-minSizeRel",
+        "xpm run test --config linux-minSizeRel"
+      ],
+      "test-all": [
+        "xpm run test-linux-debug",
+        "xpm run test-linux-minSizeRel"
+      ],
+      "clean-all": [
+        "xpm run clean --config linux-debug",
+        "xpm run clean --config linux-minSizeRel"
+      ]
+    },
+    "buildConfigurations": {
+      "base": {
+        "actions": {
+          "prepare": "{{ properties.commandCMakePrepareWithToolchain }}",
+          "build": [
+            "{{ properties.commandCMakeReconfigure }}",
+            "{{ properties.commandCMakeBuild }}"
+          ],
+          "test": "{{ properties.commandCMakePerformTests }}",
+          "clean": "{{ properties.commandCMakeClean }}"
+        }
+      },
+      "linux-debug": {
+        "inherit": [
+          "base"
+        ],
+        "properties": {
+          "buildType": "debug",
+          "platformName": "linux",
+          "toolchainFileName": "linux.cmake"
+        }
+      },
+      "linux-minSizeRel": {
+        "inherit": [
+          "linux-debug"
+        ],
+        "properties": {
+          "buildType": "minSizeRel"
+        }
+      }
+    }
+  }
+}

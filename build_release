@@ -1,0 +1,21 @@
+#!/bin/bash
+
+set -ex
+
+PRESET=${1:-minSizeRel}
+
+
+./testit linux.cmake $PRESET
+OUT=dist/$PRESET/liblean-ftl
+rm -rf $OUT
+mkdir -p $OUT
+cp LICENSE $OUT
+cp -R liblean-ftl/include $OUT
+mv build $OUT
+git status
+git diff package.json
+sha256sum package.json
+git describe --tags --always --dirty --match "v*" > $OUT/version.txt
+cd dist
+7z a liblean-ftl-$PRESET.7z $PRESET/liblean-ftl
+sha512sum liblean-ftl-$PRESET.7z > liblean-ftl-$PRESET.7z.sha512sum

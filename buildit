@@ -1,0 +1,10 @@
+#!/bin/bash
+
+set -ex
+
+OUTDIR="build/build-"$1
+rm -rf $OUTDIR
+mkdir -p $OUTDIR
+
+cmake -B $OUTDIR -DCMAKE_TOOLCHAIN_FILE=$1 ${@:3} --preset $2 .
+cmake --build $OUTDIR --verbose --clean-first 

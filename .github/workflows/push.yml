@@ -1,0 +1,57 @@
+name: Push
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install 7z
+      shell: bash
+      run: |
+        sudo apt update
+        sudo apt -yq install p7zip-full
+    #workaround for package.json: it gets modified during "xpm install" somehow, so we backup it and restore it before launching the build
+    - name: Install xpm
+      run: |
+        sha256sum package.json
+        cp package.json package.bu
+        npm install --no-save --global xpm@latest
+        xpm install --no-save  @xpack-dev-tools/arm-none-eabi-gcc@latest
+        xpm install --no-save  @xpack-dev-tools/cmake@latest
+        sha256sum package.json
+    - name: Satisfy project dependencies
+      run: xpm install --no-save 
+    - name: build
+      shell: bash
+      run: |
+        echo before restoration
+        sha256sum package.json
+        ls -l
+        rm package.json
+        mv package.bu package.json
+        echo after restoration
+        sha256sum package.json
+        ls -l
+        PATH=xpacks/.bin/:$PATH
+        ./build_release minSizeRel
+        ./build_release debug
+        echo after build
+        sha256sum package.json
+        ls -l
+    - name: Archive temp artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-preview
+        path: dist
+        compression-level: 0 # no compression
+
+  

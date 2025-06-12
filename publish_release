@@ -1,0 +1,8 @@
+#!/bin/bash
+
+set -ex
+
+TAG=$1
+
+git tag $TAG 
+git push origin --tags

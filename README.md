@@ -43,3 +43,16 @@ You need CMake and arm-none-eabi toolchain in your path.
 Notes: 
 - replace `linux.cmake` by any other top level `.cmake` file to target another platform.
 - replace `debug` by `minSizeRel` to build with size optimizations.
+
+### Local test
+```
+./testit linux.cmake debug
+```
+
+Note: this does not work with embedded targets.
+
+### Make a new release
+Release are created for each tag formatted as `v*.*.*`
+```
+./publish_release v1.2.3
+```

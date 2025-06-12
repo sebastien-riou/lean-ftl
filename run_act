@@ -1,0 +1,8 @@
+#! /bin/bash 
+
+set -ex
+
+rm -rf act_artifacts
+mkdir act_artifacts
+#gh act --artifact-server-path act_artifacts $*
+act --artifact-server-path act_artifacts $*

@@ -1,0 +1,3 @@
+set(DEVICE STM32U5A5ZJTXQ)
+set(DEVICE_FAMILY STM32U5xx)
+include("${CMAKE_CURRENT_LIST_DIR}/target/stm32/nucleo.cmake")

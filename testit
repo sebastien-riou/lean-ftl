@@ -5,4 +5,5 @@ set -ex
 OUTDIR="build/build-"$1
 ./buildit $*
 cd $OUTDIR
-make test
+#make test #sometime that hangs
+./lean-ftl-test

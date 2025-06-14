@@ -59,7 +59,7 @@ You can verify support for your platform by compiling hello.c from the example/h
 
 .. code-block:: bash
 
-  7z x  ~/Downloads/lean-ftl-v0.0.1.7z
+  7z x  ~/Downloads/lean-ftl-v0.0.4.7z
   gcc examples/hello/hello.c -o hello -Idist/debug/liblean-ftl/include \
     -Ldist/debug/liblean-ftl/build/build-linux.cmake/liblean-ftl -llean-ftl 
   ./hello
@@ -68,7 +68,7 @@ You should get something like:
 
 .. code-block:: bash
 
-  Hello from lean-ftl 0.0.1
+  Hello from lean-ftl 0.0.4
 
 
 Troubleshooting

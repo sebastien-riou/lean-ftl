@@ -7,3 +7,7 @@ OUTDIR="build/build-"$1
 cd $OUTDIR
 #make test #sometime that hangs
 ./lean-ftl-test
+
+gcc ../../examples/hello/hello.c -o hello -I../../liblean-ftl/include \
+    -Lliblean-ftl -llean-ftl 
+./hello

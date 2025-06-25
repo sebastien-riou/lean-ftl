@@ -1,6 +1,16 @@
 #pragma once
 #include "error.h"
 #include <stdbool.h>
+#ifdef LINUX
+  #if LINUX
+    #include <stdio.h>
+  #endif
+#endif
+#ifdef HAS_PRINTF
+  #if HAS_PRINTF
+    #include <stdio.h>
+  #endif
+#endif
 
 void ui_show_idle(){
   led1(1);

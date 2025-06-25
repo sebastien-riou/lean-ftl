@@ -106,7 +106,7 @@ it make sense to declare one LFTL area for each process:
 - *lean-ftl* is not thread safe.
 - A single transaction is supported at any time for a given LFTL area.
 
-.. note:: Even one using one LFTL area for each process, the 
+.. note:: Even when using one LFTL area for each process, the 
   user need to take care about synchronization either at the 
   call back level or at the application level.
 
@@ -195,6 +195,11 @@ Each LFTL area must be formatted before being used. This is done using the :func
 
   lftl_format(&nvma);
   lftl_format(&nvmb);
+
+
+.. note::
+  LFTL does not provide a way to know if an area has been already formated or not.
+  The application shall track that by maintaining a flag in NVM.
 
 Updating a single variable atomically
 --------------------------------------

@@ -56,3 +56,8 @@ Release are created for each tag formatted as `v*.*.*`
 ```
 ./publish_release v1.2.3
 ```
+
+### Make the doc
+```
+./build-doc
+```

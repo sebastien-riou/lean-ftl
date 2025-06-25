@@ -44,7 +44,7 @@ If you want to build just for linux, result is in "build/build-linux.cmake" fold
 Linking with lean-ftl
 ---------------------
 
-You can verify support for your platform by compiling hello.c from the example/hello folder:
+You can verify support for your platform by compiling main.c from the example/hello folder:
 
 .. code-block:: c
 
@@ -60,7 +60,7 @@ You can verify support for your platform by compiling hello.c from the example/h
 .. code-block:: bash
 
   7z x  ~/Downloads/lean-ftl-v0.0.4.7z
-  gcc examples/hello/hello.c -o hello -Idist/debug/liblean-ftl/include \
+  gcc examples/hello/main.c -o hello -Idist/debug/liblean-ftl/include \
     -Ldist/debug/liblean-ftl/build/build-linux.cmake/liblean-ftl -llean-ftl 
   ./hello
 

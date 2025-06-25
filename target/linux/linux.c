@@ -88,8 +88,24 @@ static bool test_mode = 0;
 extern data_flash_t nvm __attribute__ ((section (".data_flash")));
 const char*save_nvm_file_name = 0;
 
+uint32_t nvm_alignement;
+
+uint32_t get_nvm_alignement(){
+  const uint32_t max_alignement = 1<<31;
+  uintptr_t base = ((uintptr_t)&nvm);
+  if(0==base) return max_alignement;
+  uintptr_t alignement = 1;
+  while(0 == (base & 1)){
+    alignement = alignement << 1;
+    base = base >> 1;
+  };
+  if(alignement>max_alignement) return max_alignement;
+  return (uint32_t)alignement;
+}
+
 //Application level HAL
 void init(int argc, const char*argv[]){
+  nvm_alignement = get_nvm_alignement();
   for(int i=1;i<argc;i++){
     const char*test_mode_str = "--test-mode";
     const char*nvm_file_str = "--nvm-file=";
@@ -228,11 +244,18 @@ lftl_nvm_props_t nvm_props = {
     .erase_size = nvm_erase_size,
   };
 
+uint32_t get_alignement_requirement(uint32_t original_req){
+  if(original_req > nvm_alignement) return nvm_alignement;
+  return original_req;
+}
+
 uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   const uintptr_t size = n_pages * nvm_erase_size;
   if(base_address < (void*)&nvm) return 1;
   if(((uintptr_t)base_address + size) > ((uintptr_t)&nvm + sizeof(nvm))) return 2;
-  if(0 != ((uintptr_t)base_address % nvm_erase_size)) return 3;
+  //Linux makes it hard to get nvm aligned to large units like 4k or 8k, so we check against the minimum between the original constraint and the alignement of nvm
+  if(0 != ((uintptr_t)base_address % get_alignement_requirement(nvm_erase_size))) return 3;
+  
   memset(base_address, 0xFF, size);
   bool tearing = tearing_sim(base_address,size);
   if(save_nvm_file_name){

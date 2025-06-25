@@ -314,6 +314,7 @@ void exception_handler(uint32_t err_code){
     format_func(&nvmb);
   } else {
     //a real error, that's unexpected
+    printf("ERROR: test failed with error code 0x%08x\n",err_code);
     ui_wait_button();
   }
   #else

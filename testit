@@ -3,11 +3,22 @@
 set -ex
 
 OUTDIR="build/build-"$1
+
 ./buildit $*
+
 cd $OUTDIR
+
+#examples are always built for linux regardless of the selected target
+
+gcc -Og ../../examples/hello/main.c -o hello -I../../liblean-ftl/include -Lliblean-ftl -llean-ftl 
+
+gcc -O0 -g3 -ggdb ../../examples/single_area/main.c ../../target/linux/linux.c -o single_area -DLINUX=1 -I../../examples/single_area -I../../examples/include -I../../liblean-ftl/include -Lliblean-ftl -llean-ftl 
+
+
+
 #make test #sometime that hangs
 ./lean-ftl-test
 
-gcc ../../examples/hello/hello.c -o hello -I../../liblean-ftl/include \
-    -Lliblean-ftl -llean-ftl 
 ./hello
+
+./single_area

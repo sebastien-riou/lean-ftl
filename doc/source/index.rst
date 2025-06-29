@@ -1,7 +1,7 @@
 lean-ftl
 ===================================
 
-.. comment::
+.. 
    Documentation for version |release|, updated on |today|.
 
 

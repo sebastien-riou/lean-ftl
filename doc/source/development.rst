@@ -36,7 +36,7 @@ Simplicity
 **Rational** 
 
 - Minimal code base ease code reviews.
-- Complexity is the main source of bugs and security vulnerability. 
+- Complexity is the main source of bugs and security vulnerabilities. 
 
 Self-contained
 ^^^^^^^^^^^^^^^^^^^^^^

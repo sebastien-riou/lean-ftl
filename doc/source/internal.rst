@@ -22,6 +22,14 @@ all errors are treated.
 This does not force the user to use ``set_jump``: 
 the error handler can also just wait for reset or trigger an internal reset.
 
+Expansion of variables to full write units
+------------------------------------------
+The helper macro ``LFTL_ARRAY`` expand each array item to the width of a write unit.
+This wastes storage area but that allows to update each variable independantly without any
+buffer in RAM.
+If the user desire to optimize storage footprint, the way to go is to use ``LFTL_COMPACT_ARRAY``
+and use a buffer in RAM to group write operations as demonstrated in the ``single_area`` example.
+
 Memory layout
 ---------------
 TODO

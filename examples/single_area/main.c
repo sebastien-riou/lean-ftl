@@ -53,6 +53,47 @@ lftl_ctx_t nvdata = {
   .transaction_tracker = LFTL_INVALID_POINTER
 };
 
+#define NVM_OFFSET(x) ((uintptr_t)&x - (uintptr_t)&nvm)
+#define PRINT_NVM_VAR_INFO(x) \
+  printf("INFO: offset of %12s = 0x%04lx, size = %4ld, physical size = %4ld\n",#x,NVM_OFFSET(x),sizeof(x),sizeof(x ## _phy));
+
+void display_nvdata_state(){
+  uint32_t cnt0;
+  lftl_read(&nvdata,&cnt0,&nvm.cnt0,sizeof(nvm.cnt0));
+  printf("INFO: %12s = 0x%08x\n","cnt0",cnt0);
+}
+
+void single_area_demo(){
+  // Display info about our data in NVM
+  PRINT_NVM_VAR_INFO(nvm.cnt0);
+  PRINT_NVM_VAR_INFO(nvm.array0);
+  PRINT_NVM_VAR_INFO(nvm.cnt1);
+  PRINT_NVM_VAR_INFO(nvm.array1);
+  PRINT_NVM_VAR_INFO(nvm.dat1);
+
+  // LFTL operations
+
+  // Detect if we need to format the NVM (first use)
+  if (nvm_data_state != NVM_DATA_STATE_INITIALIZED){ // Note that we do NOT use LFTL to read/write nvm_data_state
+    printf("INFO: NVM not initialized, calling lftl_format\n");
+    lftl_format(&nvdata);
+    const uint64_t init = NVM_DATA_STATE_INITIALIZED;
+    nvm_write(&nvm_data_state, &init, sizeof(init)); 
+    // initialize all data to 0 (default state is erased state, typically 0xFF but that may vary depending on NVM technology)
+    LFTL_MEMSET_WHOLE_AREA(nvdata,0);
+  } else {
+    printf("INFO: NVM already initialized\n");
+  }
+  
+  // Read NVM
+  display_nvdata_state();
+
+  // Update each variable atomically
+  //lftl_write(&nvm.cnt0,)
+  
+}
+
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_PRINTF
   printf("ERROR: test failed with error code 0x%08x\n",err_code);
@@ -65,14 +106,7 @@ int main(int argc, const char*argv[]){
   led1(1);
   uint32_t err_code=-1;
   if(0 == (err_code = setjmp(exception_ctx))){
-    //LFTL operations
-    //detect if we need to format the NVM (first use)
-    if (nvm_data_state != NVM_DATA_STATE_INITIALIZED){
-        lftl_format(&nvdata);
-        const uint64_t init = NVM_DATA_STATE_INITIALIZED;
-        nvm_write(&nvm_data_state, &init, sizeof(init));
-    }
-
+    single_area_demo();
     err_code = 0;
     led1(0);
   } else {

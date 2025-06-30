@@ -379,6 +379,30 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 //WU_SIZE shall be the size of write unit, in bytes
 //FLASH_SW_PAGE_SIZE shall be the size of the page unit, in bytes, or a multiple of it
 
+#ifndef STR
+  #define STR_INNER(x) # x
+  #define STR(x) STR_INNER(x)
+#endif
+
+#ifndef CONCAT
+  #define CONCAT_INNER(x,y) x ## y
+  #define CONCAT(x,y) CONCAT_INNER(x,y)
+#endif
+
+#ifndef EVAL
+  #define EVAL(...) EVAL1024(__VA_ARGS__)
+  #define EVAL1024(...) EVAL512(EVAL512(__VA_ARGS__))
+  #define EVAL512(...) EVAL256(EVAL256(__VA_ARGS__))
+  #define EVAL256(...) EVAL128(EVAL128(__VA_ARGS__))
+  #define EVAL128(...) EVAL64(EVAL64(__VA_ARGS__))
+  #define EVAL64(...) EVAL32(EVAL32(__VA_ARGS__))
+  #define EVAL32(...) EVAL16(EVAL16(__VA_ARGS__))
+  #define EVAL16(...) EVAL8(EVAL8(__VA_ARGS__))
+  #define EVAL8(...) EVAL4(EVAL4(__VA_ARGS__))
+  #define EVAL4(...) EVAL2(EVAL2(__VA_ARGS__))
+  #define EVAL2(...) EVAL1(EVAL1(__VA_ARGS__))
+  #define EVAL1(...) __VA_ARGS__
+#endif
 
 #ifndef SIZE64
 /// Convert a size in bytes into the minimum number of ``uint64_t``.
@@ -390,9 +414,28 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 #define BITS_PER_BYTE 8
 #endif
 
-typedef uint64_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[SIZE64(FLASH_SW_PAGE_SIZE)];
+#if WU_SIZE > 8
+  #define LFTL_DAT_TYPE_WIDTH 64
+  #define DAT_PER_WU (SIZE64(WU_SIZE))
+  #define SIZE_LFTL_DAT(size) SIZE64(size)
+#else
+  #define LFTL_DAT_TYPE_SIZE (WU_SIZE)
+  #define LFTL_DAT_TYPE_WIDTH (LFTL_DAT_TYPE_SIZE * BITS_PER_BYTE)
+  #define DAT_PER_WU 1
+  #define SIZE_LFTL_DAT(size) (((size)+LFTL_DAT_TYPE_SIZE-1)/LFTL_DAT_TYPE_SIZE)
+#endif
 
+#define LFTL_DAT_TYPE_BUILDER(VAL) uint ## VAL ## _t
+#define LFTL_DAT_TYPE_BUILDER2(VAL) LFTL_DAT_TYPE_BUILDER(VAL)
+#define LFTL_DAT_TYPE LFTL_DAT_TYPE_BUILDER2(LFTL_DAT_TYPE_WIDTH)
 
+typedef LFTL_DAT_TYPE lftl_dat_t;
+
+typedef struct {
+  lftl_dat_t dat[DAT_PER_WU];
+} lftl_wu_t;
+
+typedef lftl_dat_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[SIZE_LFTL_DAT(FLASH_SW_PAGE_SIZE)];
 
 /// Division with rounding to ceiling.
 #define LFTL_DIV_CEIL(d,q) (((d)+(q)-1)/(q))
@@ -402,6 +445,10 @@ typedef uint64_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[
 
 /// Convert a size into the minimum number of write units and then convert to number of ``uint64_t``.
 #define LFTL_WU64(size) (SIZE64(LFTL_ROUND_UP(size,WU_SIZE)))
+
+/// Convert a size into the minimum number of write units and then convert to number of ``lftl_dat_t``.
+#define LFTL_WU_DAT(size) (SIZE_LFTL_DAT(LFTL_ROUND_UP(size,WU_SIZE)))
+
 
 #define LFTL_PAGES(size) (LFTL_DIV_CEIL(size,FLASH_SW_PAGE_SIZE))
 
@@ -416,8 +463,35 @@ typedef uint64_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[
   struct {area_content} _##name##_data;\
   };
 
+/// Macro to declare the wear leveling factor of an area
+#define LFTL_WEAR_LEVELING_FACTOR(x) x
+
+/// Legacy
+#define LFTL_DATA(name, size) lftl_dat_t name[LFTL_WU_DAT(size)]
+
+/// Declare raw data within an LFTL area.
+#define LFTL_RAW_DATA(name, size) union {\
+  lftl_dat_t name##_phy[LFTL_WU_DAT(size)];\
+  uint8_t name[size];\
+};
+
 /// Declare a variable within an LFTL area.
-#define LFTL_DATA(name, size) uint64_t name[LFTL_WU64(size)]
+#define LFTL_VAR(type, name) union {\
+  lftl_dat_t name##_phy[LFTL_WU_DAT(sizeof(type))];\
+  type name;\
+};
+
+/// Declare an array within an LFTL area.
+#define LFTL_ARRAY(type, name, n_elem) union {\
+  lftl_dat_t name##_phy[LFTL_WU_DAT(sizeof(type))*n_elem];\
+  type name[n_elem];\
+};
+
+/// Declare compact within an LFTL area.
+#define LFTL_COMPACT_ARRAY(type, name, n_elem) union {\
+  lftl_dat_t name##_phy[LFTL_WU_DAT(sizeof(type)*n_elem)];\
+  type name[n_elem];\
+};
 
 /// Read an entire LFTL area and increment destination buffer.
 #define LFTL_READ_WHOLE_DATA(dst,area) do{\
@@ -434,4 +508,23 @@ typedef uint64_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[
     lftl_write(&area,&nvm. _## area ## _data,__src8,__size);\
     src = __src8+__size;\
   }while(0)
+
+/// Set the same byte value on an entire LFTL area.
+#define LFTL_MEMSET_WHOLE_AREA(area,value) do{ \
+  uint8_t transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&area)]; \
+  lftl_transaction_start(&area, transaction_tracker); \
+  flash_sw_page_t buf; \
+  memset(buf,value,sizeof(buf)); \
+  const unsigned int n_loops = area.data_size / sizeof(buf); \
+  uint32_t remaining = area.data_size; \
+  flash_sw_page_t*wr_addr = area.data; \
+  for(unsigned int i=0;i<n_loops;i++){ \
+    lftl_transaction_write(&area,wr_addr,buf,sizeof(buf)); \
+    remaining -= sizeof(buf); \
+    wr_addr++; \
+  } \
+  lftl_transaction_write(&area,wr_addr,buf,remaining); \
+  lftl_transaction_commit(&area); \
+}while(0)
+
 #endif

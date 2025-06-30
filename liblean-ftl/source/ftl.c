@@ -2,8 +2,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #define LFTL_DEFINE_HELPERS
-#define WU_SIZE 1 //dummy value, not used
-#define FLASH_SW_PAGE_SIZE 1 //dummy value, not used
+#define WU_SIZE 16 //dummy value, not used
+#define FLASH_SW_PAGE_SIZE 256 //dummy value, not used
 #include "lean-ftl.h"
 
 static void nvm_erase(lftl_ctx_t*ctx, void*base_address, unsigned int n_pages){

@@ -6,6 +6,10 @@
 /// Value used for invalid pointers.
 #define LFTL_INVALID_POINTER ((void*)-1)
 
+#ifndef LFTL_WU_MAX_SIZE
+  #define LFTL_WU_MAX_SIZE 128 
+#endif
+
 /// Compute the size required for ``transaction_tracker``. 
 /// See ::lftl_transaction_start.
 /// \param data_size   Size of the data in the target LFTL area, in bytes
@@ -45,7 +49,7 @@
 #define LFTL_ERROR_NO_TRANSACTION 0x08
 /// Error: the same address is written twice during a transaction
 #define LFTL_ERROR_TRANSACTION_OVERWRITE 0x09
-/// Error: the write unit size is too large, max is 128 bits
+/// Error: the write unit size is too large, max is defined by LFTL_WU_MAX_SIZE
 #define LFTL_ERROR_WU_SIZE_TOO_LARGE 0x0A
 /// Base value for errors reported by the erase function. Bits 0 to 7 may give more details.
 #define LFTL_ERROR_LOW_LEVEL_ERASE 0x0100
@@ -146,10 +150,11 @@ typedef struct lftl_ctx_struct {
   nvm_read_t read;                /**< Read function for this area. */
   error_handler_t error_handler;  /**< Error handler function for this area. */
   void *transaction_tracker;      /**< Initialize it ::LFTL_INVALID_POINTER. */
+  void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
 } lftl_ctx_t;
 
 /** @name Meta information API
- *
+ * Functions in this group can be called at any time.
  * @{
  */
 
@@ -199,6 +204,30 @@ const char* lftl_build_type();
  * 
  * @{
  */
+
+////////////////////////////////////////////////////////////
+/// \brief Initialize LFTL library
+///
+/// This un-register any previously registered areas.
+/// Call this before any other function  (except the Meta information API group).
+///
+////////////////////////////////////////////////////////////
+void lftl_init_lib();
+
+////////////////////////////////////////////////////////////
+/// \brief Register an LFTL area
+///
+/// Register and LFTL area. This allows to 
+/// be able to copy data from the LFTL area into 
+/// another by using the write functions, i.e., without
+/// intermediate buffering.
+/// Call this for each area, after ::lftl_init_lib
+/// and before any other function (except the Meta information API group).
+/// \param ctx Context of the LFTL area to register
+///
+////////////////////////////////////////////////////////////
+void lftl_register_area(lftl_ctx_t*ctx);
+
 ////////////////////////////////////////////////////////////
 /// \brief Format an LFTL area
 ///
@@ -209,15 +238,25 @@ const char* lftl_build_type();
 ///
 ////////////////////////////////////////////////////////////
 void lftl_format(lftl_ctx_t*ctx);//NOT covered by anti-tearing
+
 /** @} */
 
 /** @name Main API
  * All functions in this group are covered by anti-tearing.
  * They shall be called with a valid context on a properly formated LFTL area.
  * See ::lftl_format for the initial formating of an LFTL area.
- * 
+ * See ::lftl_init_lib and ::lftl_register_area for the initialization of contexts.
  * @{
  */
+
+////////////////////////////////////////////////////////////
+/// \brief Retrieve the LFTL context correponding to an 
+/// address, if any.
+///
+/// \param addr Address to search
+/// \returns a valid LFTL context or LFTL_INVALID_POINTER
+////////////////////////////////////////////////////////////
+lftl_ctx_t*lftl_get_ctx(const void*const addr);
 
 ////////////////////////////////////////////////////////////
 /// \brief Erase all the data of an LFTL area
@@ -263,19 +302,19 @@ void lftl_transaction_commit(lftl_ctx_t*ctx);
 void lftl_transaction_abort(lftl_ctx_t*ctx);
 
 ////////////////////////////////////////////////////////////
-/// \brief Write data to NVM
+/// \brief Write aligned data to NVM
 ///
 /// This function detects if the write is part of a transaction 
 /// or not.
 /// \param ctx          Context of the target LFTL area
-/// \param dst_nvm_addr Destination address, it shall be within the target LFTL area
-/// \param src          Source address, it may be in NVM
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
+/// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
-/// \brief Read data from NVM
+/// \brief Read data from LFTL area
 ///
 /// When a transaction is on-going, read the current data,
 /// i.e., the data as it was before the start of the transaction.
@@ -287,7 +326,7 @@ void lftl_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr
 void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);//read current data, i.e. latest commited version
 
 ////////////////////////////////////////////////////////////
-/// \brief Read data from NVM
+/// \brief Read data from LFTL area
 ///
 /// When a transaction is on-going, read the new data,
 /// i.e., the data written but not commited yet. Keep it mind
@@ -299,6 +338,30 @@ void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);//read "new" data or current data if no transaction
+
+////////////////////////////////////////////////////////////
+/// \brief Read data from an LFTL area, a regular NVM area or regular memory
+///
+/// When a transaction is on-going, read the current data,
+/// i.e., the data as it was before the start of the transaction.
+/// \param dst          Destination address, it shall be in a volatile memory
+/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param size         Size in bytes
+////////////////////////////////////////////////////////////
+void lftl_memread(void*dst, const void*const src, uintptr_t size);
+
+////////////////////////////////////////////////////////////
+/// \brief Read data from an LFTL area, a regular NVM area or regular memory
+///
+/// When a transaction is on-going, read the new data,
+/// i.e., the data written but not commited yet. Keep it mind
+/// that the transaction may be aborded, so the data read by that
+/// function may not be available anymore.
+/// \param dst          Destination address, it shall be in a volatile memory
+/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param size         Size in bytes
+////////////////////////////////////////////////////////////
+void lftl_memread_newer(void*dst, const void*const src, uintptr_t size);
 /** @} */
 
 /** @name Low level API
@@ -322,15 +385,15 @@ void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, ui
 /// The only exception is if size is 0, then it just returns without touching the NVM at all.
 ///
 /// \param ctx          LFTL area context
-/// \param dst_nvm_addr Destination address (in NVM)
-/// \param src          Source address (memory mapped)
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
+/// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ///
 ////////////////////////////////////////////////////////////
 void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
-/// \brief Write data to NVM in an LFTL area
+/// \brief Write aligned data to NVM in an LFTL area
 ///
 /// Update partially or totally an LFTL area. 
 /// This function is allowed only when a transaction is on-going.
@@ -339,9 +402,9 @@ void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, u
 /// Each call writes the specified number of bytes to NVM.
 ///
 /// \param ctx          LFTL area context
-/// \param dst_nvm_addr Destination address (in NVM)
-/// \param src          Source address (memory mapped)
-/// \param size         Size in bytes
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (WU_SIZE)
+/// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
+/// \param size         Size in bytes, MUST be multiple of write unit size (WU_SIZE)
 ///
 ////////////////////////////////////////////////////////////
 void lftl_transaction_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
@@ -353,14 +416,76 @@ void lftl_transaction_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const 
 /// It reads the new data, i.e., the data written but not commited yet. 
 /// Keep it mind that the transaction may be aborded, so the data read by that function may not be available anymore.
 /// \param ctx          Context of the target LFTL area
-/// \param dst          Destination address, it shall be in a volatile memory
-/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param dst          Destination address, it MUST be in a volatile memory
+/// \param src_nvm_addr Source address, it MUST be within the target LFTL area
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);//read "new" data during a transaction
 /** @} */
 
+/** @name Foot-guns API
+ * Functions in this group are useful but can break transaction mechanism
+ * if used incorrectly. They remove restrictions on data alignement and size
+ * of the regular functions. They work well as long as you do not target the 
+ * same write unit twice during a transaction. If it happens, the behavior 
+ * depends on the target platform. It can be:
+ * - hardware fault raised during the second write
+ * - hardware fault raise when reading back
+ * - no hardware fault but incorrect read value
+ * 
+ * All functions in this group are covered by anti-tearing.
+ * They shall be called with a valid context on a properly formated LFTL area.
+ * See ::lftl_format for the initial formating of an LFTL area.
+ * 
+ * @{
+ */
+
+////////////////////////////////////////////////////////////
+/// \brief Write aligned or unaligned data to NVM
+///
+/// This function detects if the write is part of a transaction 
+/// or not.
+/// \param ctx          Context of the target LFTL area
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
+/// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
+/// \param size         Size in bytes
+////////////////////////////////////////////////////////////
+void lftl_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+
+////////////////////////////////////////////////////////////
+/// \brief Write aligned or unaligned data to NVM in an LFTL area
+///
+/// Update partially or totally an LFTL area. 
+/// This function is allowed only when a transaction is on-going.
+///
+/// Performance considerations: 
+/// Each call writes the specified number of bytes to NVM.
+///
+/// \param ctx          LFTL area context
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
+/// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
+/// \param size         Size in bytes
+///
+////////////////////////////////////////////////////////////
+void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+
+/** @} */
+
 #define LFTL_META_N_ITEMS 3
+
+#ifndef SIZE64
+/// Convert a size in bytes into the minimum number of ``uint64_t``.
+#define SIZE64(size) (((size)+7)/8)
+#endif
+
+#ifndef BITS_PER_BYTE
+/// Number of bits in one byte.
+#define BITS_PER_BYTE 8
+#endif
+
+/// Division with rounding to ceiling.
+#define LFTL_DIV_CEIL(d,q) (((d)+(q)-1)/(q))
+
 
 #ifdef LFTL_DEFINE_HELPERS
 //helpers to declare LFTL areas
@@ -404,14 +529,12 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
   #define EVAL1(...) __VA_ARGS__
 #endif
 
-#ifndef SIZE64
-/// Convert a size in bytes into the minimum number of ``uint64_t``.
-#define SIZE64(size) (((size)+7)/8)
-#endif
 
-#ifndef BITS_PER_BYTE
-/// Number of bits in one byte.
-#define BITS_PER_BYTE 8
+#ifndef BYTES_TO_BITS_1
+  #define BYTES_TO_BITS_1 8
+  #define BYTES_TO_BITS_2 16
+  #define BYTES_TO_BITS_4 32
+  #define BYTES_TO_BITS_8 64
 #endif
 
 #if WU_SIZE > 8
@@ -419,8 +542,9 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
   #define DAT_PER_WU (SIZE64(WU_SIZE))
   #define SIZE_LFTL_DAT(size) SIZE64(size)
 #else
-  #define LFTL_DAT_TYPE_SIZE (WU_SIZE)
-  #define LFTL_DAT_TYPE_WIDTH (LFTL_DAT_TYPE_SIZE * BITS_PER_BYTE)
+  #define LFTL_DAT_TYPE_SIZE WU_SIZE
+
+  #define LFTL_DAT_TYPE_WIDTH CONCAT(BYTES_TO_BITS_ , LFTL_DAT_TYPE_SIZE)
   #define DAT_PER_WU 1
   #define SIZE_LFTL_DAT(size) (((size)+LFTL_DAT_TYPE_SIZE-1)/LFTL_DAT_TYPE_SIZE)
 #endif
@@ -431,14 +555,11 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 
 typedef LFTL_DAT_TYPE lftl_dat_t;
 
-typedef struct {
+typedef __attribute__ ((aligned (sizeof(lftl_dat_t)))) struct {
   lftl_dat_t dat[DAT_PER_WU];
 } lftl_wu_t;
 
 typedef lftl_dat_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[SIZE_LFTL_DAT(FLASH_SW_PAGE_SIZE)];
-
-/// Division with rounding to ceiling.
-#define LFTL_DIV_CEIL(d,q) (((d)+(q)-1)/(q))
 
 /// Round a value to the minimum number of multiples of a unit.
 #define LFTL_ROUND_UP(val,unit) (LFTL_DIV_CEIL(val,unit)*(unit))

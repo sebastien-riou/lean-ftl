@@ -43,6 +43,11 @@ static void prng_fill(uint8_t*rng_state, void*buf, uint32_t size){
   *rng_state = cnt;
 }
 
+static void stateful_prng_fill(void*buf, uint32_t size){
+  static uint8_t rng_state = 0;
+  prng_fill(&rng_state,buf,size);
+}
+
 extern lftl_nvm_props_t nvm_props;
 lftl_ctx_t nvma = {
   .nvm_props = &nvm_props,
@@ -54,7 +59,8 @@ lftl_ctx_t nvma = {
   .write = nvm_write,
   .read = nvm_read,
   .error_handler = throw_exception,
-  .transaction_tracker = LFTL_INVALID_POINTER
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
 };
 lftl_ctx_t nvmb = {
   .nvm_props = &nvm_props,
@@ -66,10 +72,12 @@ lftl_ctx_t nvmb = {
   .write = nvm_write,
   .read = nvm_read,
   .error_handler = throw_exception,
-  .transaction_tracker = LFTL_INVALID_POINTER
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
 };
 
 void (*format_func)(lftl_ctx_t*ctx);
+void (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*erase_all_func)(lftl_ctx_t*ctx);
 void (*write_func)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*transaction_start_func)(lftl_ctx_t*ctx, void *const transaction_tracker);
@@ -94,6 +102,16 @@ void tearing_sim_lftl_format(lftl_ctx_t*ctx){
   uint8_t*dst = (uint8_t*)&nvm_ref;
   memcpy(dst+offset,base,size);
 }
+void tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  //update previous state
+  nvm_ref_previous_state = nvm_ref;
+  //compute new state
+  uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
+  uint8_t*dst = (uint8_t*)&nvm_ref;
+  memcpy(dst+offset,src,size);
+  //emulate call to nvm_write rather than calling it, to make sure we do not trigger tearing here
+  memcpy(dst_nvm_addr,src,size);
+}
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
   //update previous state
   nvm_ref_previous_state = nvm_ref;
@@ -109,7 +127,7 @@ void tearing_sim_lftl_write(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const s
   //compute new state
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
-  memcpy(dst+offset,src,size);
+  lftl_memread(dst+offset,src,size);
   //call LFTL
   lftl_write(ctx,dst_nvm_addr,src,size);
 }
@@ -199,13 +217,27 @@ void test_write(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_
   read_and_check(ctx,dst_nvm_addr,src,size);
   //force a search of the slot
   ctx->data = LFTL_INVALID_POINTER;
-  read_and_check(ctx,dst_nvm_addr,src,size);
+  read_and_check(ctx,dst_nvm_addr,src,size); 
 }
 
+void test_write2(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size, const void*const expected){
+  { // sanity check
+    uint8_t srcbuf[size];
+    lftl_memread(srcbuf,src,size);
+    if(memcmp(srcbuf,expected,size)) throw_exception(ERROR_VERIFICATION_FAIL); // error is most likely in calling code
+  }
+  write_func(ctx,dst_nvm_addr,src,size);
+  read_and_check(ctx,dst_nvm_addr,expected,size);
+  //force a search of the slot
+  ctx->data = LFTL_INVALID_POINTER;
+  read_and_check(ctx,dst_nvm_addr,expected,size); 
+}
+
+
+
 void randomized_test_write(lftl_ctx_t*ctx,void*dst_nvm_addr, uintptr_t size){
-  static uint8_t rng_state = 0;
   uint8_t wbuf[size];
-  prng_fill(&rng_state,wbuf,size);
+  stateful_prng_fill(wbuf,size);
   test_write(ctx,dst_nvm_addr,wbuf,size);
 }
 
@@ -244,10 +276,76 @@ void write_size_test(){
 
 void write_offset_test(){
   const unsigned int write_size = nvmb.nvm_props->write_size;
+  //start at various offset
   uint8_t*base = (uint8_t*)&nvm.b_data;
   for(unsigned int i = 0; i < sizeof(nvm.b_data)-write_size; i+=write_size){
     randomized_test_write(&nvmb,base+i,write_size);
   }
+}
+
+//TODO: for the cases below:
+//  - data smaller than WU
+//  - data larger than WU size but not multiple of it
+//TODO: add a test case where write src is in the same LFTL area
+//TODO: add a test case where write src is in a different LFTL area
+//TODO: add a test case where write src is in NVM outside of any LFTL area
+//for all above and existing ones:
+//- dst offset such that data is not in first WU nor in last WU of the area
+//- dst offset such that end of data is in the last WU of the area
+
+
+#define MAX_NVM_TO_NVM_TEST_SIZE_IN_WU 2
+void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsigned int test_storage_size){
+  uint8_t*dst;
+  if(dst_offset>=sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
+  if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
+  stateful_prng_fill(test_storage, test_storage_size);
+  printf("test_storage[0]=0x%02x, test_storage[%u]=0x%02x\n",((uint8_t*)test_storage)[0],test_storage_size-1,((uint8_t*)test_storage)[test_storage_size-1]);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  raw_nvm_write_func(&nvm.unmanaged_data0,test_storage,test_storage_size);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+
+  lftl_wu_t*base_b = (lftl_wu_t*)&nvm.b_data;
+  //try src in NVM outside of LFTL areas
+  dst = ((uint8_t*)base_b) + dst_offset;
+  const uint8_t*src = dst;
+  test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //try dst and src in same LFTL area
+  test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+1,src,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //try dst and src in other LFTL area
+  lftl_wu_t*base_a = (lftl_wu_t*)&nvm.a_data;
+  test_write2(&nvma,base_a,src,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
+  test_write(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+1,test_storage,test_storage_size);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //retry dst and src in other LFTL area
+  test_write2(&nvma,base_a,src,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+}
+
+void write_nvm_to_nvm_vs_size(unsigned int size){
+  lftl_wu_t test_storage[3];
+  if(size>sizeof(nvm.unmanaged_data0)) throw_exception(INTERNAL_ERROR_CORRUPT);
+  if(size>=sizeof(test_storage)) throw_exception(INTERNAL_ERROR_CORRUPT);
+  {
+    //aligned src
+    write_nvm_to_nvm_test_core(0,&test_storage,size);//aligned dst
+    write_nvm_to_nvm_test_core(1,&test_storage,size);//unaligned dst
+  }
+  {
+    //unaligned src
+    uint8_t*test_storage8 = (uint8_t*)test_storage;
+    write_nvm_to_nvm_test_core(0,test_storage8+1,size);//aligned dst
+    write_nvm_to_nvm_test_core(1,test_storage8+1,size);//unaligned dst
+  }
+}
+
+void write_nvm_to_nvm_test(){
+  write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));   // single WU
+  write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2); // multiple WU
 }
 
 void transaction_basic_test(){
@@ -325,6 +423,7 @@ void exception_handler(uint32_t err_code){
 int main(int argc, const char*argv[]){
   #ifdef HAS_TEARING_SIMULATION
     format_func = tearing_sim_lftl_format;
+    raw_nvm_write_func = tearing_sim_nvm_write;
     erase_all_func = tearing_sim_lftl_erase_all;
     write_func = tearing_sim_lftl_write;
     transaction_start_func = tearing_sim_lftl_transaction_start;
@@ -336,6 +435,7 @@ int main(int argc, const char*argv[]){
     printf("build type: %s\n",lftl_build_type());
   #else
     format_func = lftl_format;
+    raw_nvm_write_func = nvm_write;
     erase_all_func = lftl_erase_all;
     write_func = lftl_write;
     transaction_start_func = lftl_transaction_start;
@@ -347,14 +447,19 @@ int main(int argc, const char*argv[]){
   led1(1);
   uint32_t err_code=-1;
   if(0 == (err_code = setjmp(exception_ctx))){
+    lftl_init_lib();
+    lftl_register_area(&nvma);
+    lftl_register_area(&nvmb);
     format_func(&nvma);
     format_func(&nvmb);
+    // operations aligned on write units
     basic_test();
     write_size_test();
     write_offset_test();
     transaction_basic_test();
     transaction_abort_test();
     erase_all_test();
+    write_nvm_to_nvm_test();
     err_code = 0;
     led1(0);
   } else {
@@ -374,6 +479,8 @@ int main(int argc, const char*argv[]){
         write_offset_test();
         transaction_basic_test();
         transaction_abort_test();
+        erase_all_test();
+        write_nvm_to_nvm_test();
         err_code = 0;
         led1(0);
       } else {

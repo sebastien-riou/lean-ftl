@@ -59,7 +59,7 @@ lftl_ctx_t nvdata = {
 
 void display_nvdata_state(){
   uint32_t cnt0;
-  lftl_read(&nvdata,&cnt0,&nvm.cnt0,sizeof(nvm.cnt0));
+  lftl_read(&nvdata, &cnt0, &nvm.cnt0, sizeof(nvm.cnt0));
   printf("INFO: %12s = 0x%08x\n","cnt0",cnt0);
 }
 
@@ -72,6 +72,8 @@ void single_area_demo(){
   PRINT_NVM_VAR_INFO(nvm.dat1);
 
   // LFTL operations
+  lftl_init_lib();
+  lftl_register_area(&nvdata);
 
   // Detect if we need to format the NVM (first use)
   if (nvm_data_state != NVM_DATA_STATE_INITIALIZED){ // Note that we do NOT use LFTL to read/write nvm_data_state
@@ -89,8 +91,13 @@ void single_area_demo(){
   display_nvdata_state();
 
   // Update each variable atomically
-  //lftl_write(&nvm.cnt0,)
+  uint32_t cnt0;
+  lftl_read(&nvdata, &cnt0, &nvm.cnt0, sizeof(nvm.cnt0));
+  cnt0++;
+  lftl_write_any(&nvdata, &nvm.cnt0, &cnt0, sizeof(nvm.cnt0));
   
+  // Read NVM
+  display_nvdata_state();
 }
 
 

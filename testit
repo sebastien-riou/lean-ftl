@@ -12,6 +12,7 @@ cd $OUTDIR
 
 gcc -Og ../../examples/hello/main.c -o hello -I../../liblean-ftl/include -Lliblean-ftl -llean-ftl 
 
+gcc -O0 -g3 -ggdb -E ../../examples/single_area/main.c -DLINUX=1 -I../../examples/single_area -I../../examples/include -I../../liblean-ftl/include > single_area_main.c.i
 gcc -O0 -g3 -ggdb ../../examples/single_area/main.c ../../target/linux/linux.c -o single_area -DLINUX=1 -I../../examples/single_area -I../../examples/include -I../../liblean-ftl/include -Lliblean-ftl -llean-ftl 
 
 

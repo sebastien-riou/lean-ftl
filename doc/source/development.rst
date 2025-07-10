@@ -88,6 +88,9 @@ Installing *sphinx*
 Further instructions on configuring advanced features can be found at `<http://read-the-docs.readthedocs.org/en/latest/install.html>`_.
 
 
+Tips and tricks
+---------------------------
+
 Live preview of docs
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -103,3 +106,17 @@ Testing and code coverage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Please refer to :doc:`tests`
+
+Debug preprocessor macros
+~~~~~~~~~~~~~~~~~~~~~~~~~
+.. code-block:: bash
+
+  make -C build/build-linux.cmake/ test/source/main.i
+
+This generate the file ``build/build-linux.cmake/CMakeFiles/lean-ftl-test.dir/test/source/main.c.i``
+
+Type the following to see the full list of available targets:
+
+.. code-block:: bash
+
+  make -C build/build-linux.cmake/ help

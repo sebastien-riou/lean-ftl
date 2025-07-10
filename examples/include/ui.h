@@ -4,6 +4,9 @@
 #ifdef LINUX
   #if LINUX
     #include <stdio.h>
+    #ifndef HAS_PRINTF
+      #define HAS_PRINTF 1
+    #endif
   #endif
 #endif
 #ifdef HAS_PRINTF

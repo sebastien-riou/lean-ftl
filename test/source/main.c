@@ -77,7 +77,7 @@ lftl_ctx_t nvmb = {
 };
 
 void (*format_func)(lftl_ctx_t*ctx);
-void (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t size);
+uint8_t (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*erase_all_func)(lftl_ctx_t*ctx);
 void (*write_func)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*transaction_start_func)(lftl_ctx_t*ctx, void *const transaction_tracker);
@@ -102,7 +102,7 @@ void tearing_sim_lftl_format(lftl_ctx_t*ctx){
   uint8_t*dst = (uint8_t*)&nvm_ref;
   memcpy(dst+offset,base,size);
 }
-void tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   //update previous state
   nvm_ref_previous_state = nvm_ref;
   //compute new state
@@ -111,6 +111,7 @@ void tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t si
   memcpy(dst+offset,src,size);
   //emulate call to nvm_write rather than calling it, to make sure we do not trigger tearing here
   memcpy(dst_nvm_addr,src,size);
+  return 0;
 }
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
   //update previous state
@@ -188,6 +189,9 @@ void tearing_sim_check_nvm(){
 }
 uint32_t tearing_sim_get_max_target();
 void tearing_sim_set_target(uint64_t target_write);
+#define SANITY_CHECK() do{if(!nvm_is_equal(&nvm_ref)) throw_exception(INTERNAL_ERROR_CORRUPT);}while(0)
+#else
+#define SANITY_CHECK()
 #endif
 
 void read_and_check(lftl_ctx_t*ctx,void*nvm_addr, const void*const expected, uintptr_t size){
@@ -291,30 +295,29 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   if(dst_offset>=MAX_DST_OFFSET_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   stateful_prng_fill(test_storage, test_storage_size);
-  //printf("test_storage[0]=0x%02x, test_storage[%u]=0x%02x\n",((uint8_t*)test_storage)[0],test_storage_size-1,((uint8_t*)test_storage)[test_storage_size-1]);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   raw_nvm_write_func(&nvm.unmanaged_data0,test_storage,test_storage_size);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
 
   lftl_wu_t*base_b = (lftl_wu_t*)&nvm.b_data;
   //try src in NVM outside of LFTL areas
   dst = ((uint8_t*)base_b) + dst_offset;
   uint8_t*src = dst;
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //try dst and src in same LFTL area
   test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,src,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //try dst and src in other LFTL area
   lftl_wu_t*base_a = (lftl_wu_t*)&nvm.a_data;
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
   test_write(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,test_storage,test_storage_size);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //retry dst and src in other LFTL area
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   
   //now try the 'mirror' cases
   dst_offset = 2*DATA_SIZE - test_storage_size;
@@ -323,20 +326,19 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   dst = ((uint8_t*)base_b) + dst_offset;
   src = dst;
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //try dst and src in same LFTL area
   test_write2(&nvmb,base_b,src,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //try dst and src in other LFTL area
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
   test_write(&nvmb,base_b,test_storage,test_storage_size);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  SANITY_CHECK();
   //retry dst and src in other LFTL area
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
-  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
-
+  SANITY_CHECK();
 }
 
 void write_nvm_to_nvm_vs_size(unsigned int size){

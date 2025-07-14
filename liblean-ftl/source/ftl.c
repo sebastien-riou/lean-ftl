@@ -333,7 +333,7 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   lftl_ctx_t* src_ctx = is_in_any_nvm(src_phy_addr);
   if(LFTL_INVALID_POINTER!=src_ctx){
     if(is_in_data(src_ctx,src_phy_addr)){ // src is in an LFTL area
-      src_phy_addr = translate_addr(src_ctx, (void*)src_phy_addr, size_aligned);
+      src_phy_addr = translate_addr(src_ctx, (void*)src_phy_addr, size);
     }
   }else{
     src_ctx = ctx;
@@ -349,7 +349,12 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   }
   if(addr_misalignement){
     // fix up first WU
-    const uintptr_t size_consumed = write_size - addr_misalignement;
+    uintptr_t size_consumed = write_size - addr_misalignement;
+    if(size_consumed > size){
+      const uintptr_t tail_size = size_consumed - size;
+      size_consumed = size;
+      nvm_read(ctx, ((uint8_t*)&wu) + addr_misalignement + size, current_base+offset+ addr_misalignement+size, tail_size);
+    }
     nvm_read(ctx, &wu, current_base+offset, addr_misalignement);
     mem_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
     nvm_write(ctx,phy_addr,&wu,write_size);

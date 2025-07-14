@@ -169,7 +169,8 @@ Each LFTL area has its volatile context maintained in a
     .write = nvm_write,
     .read = nvm_read,
     .error_handler = throw_exception,
-    .transaction_tracker = LFTL_INVALID_POINTER
+    .transaction_tracker = LFTL_INVALID_POINTER,
+    .next = LFTL_INVALID_POINTER
   };
   lftl_ctx_t nvmb = {
     .nvm_props = &nvm_props,
@@ -181,12 +182,28 @@ Each LFTL area has its volatile context maintained in a
     .write = nvm_write,
     .read = nvm_read,
     .error_handler = throw_exception,
-    .transaction_tracker = LFTL_INVALID_POINTER
+    .transaction_tracker = LFTL_INVALID_POINTER,
+    .next = LFTL_INVALID_POINTER
   };
+
+Library initialization
+------------------------
+After a power up, the library must be initialized using :func:`lftl_lib_init`.
+Each area must be registered using :func:`lftl_register_area`.
+
+.. code-block:: C
+  :linenos:
+  :caption: Example: Librairy initialization
+  :name: Example: Librairy initialization
+
+  lftl_init_lib();
+  lftl_register_area(&nvma);
+  lftl_register_area(&nvmb);
+
 
 Initial formatting
 ------------------------
-Each LFTL area must be formatted before being used. This is done using the :func:`lftl_format`.
+Each LFTL area must be formatted before being used. This is done using :func:`lftl_format`.
 
 .. code-block:: c
   :linenos:

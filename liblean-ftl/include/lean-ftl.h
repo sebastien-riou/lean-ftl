@@ -307,9 +307,9 @@ void lftl_transaction_abort(lftl_ctx_t*ctx);
 /// This function detects if the write is part of a transaction 
 /// or not.
 /// \param ctx          Context of the target LFTL area
-/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
-/// \param size         Size in bytes
+/// \param size         Size in bytes, MUST be multiple of write unit size (WU_SIZE)
 ////////////////////////////////////////////////////////////
 void lftl_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
@@ -426,7 +426,7 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 /** @name Foot-guns API
  * Functions in this group are useful but can break transaction mechanism
  * if used incorrectly. They remove restrictions on data alignement and size
- * of the regular functions. They work well as long as you do not target the 
+ * of ::lftl_write and ::lftl_transaction_write. They work well as long as you do not target the 
  * same write unit twice during a transaction. If it happens, the behavior 
  * depends on the target platform. It can be:
  * - hardware fault raised during the second write

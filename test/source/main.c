@@ -283,24 +283,15 @@ void write_offset_test(){
   }
 }
 
-//TODO: for the cases below:
-//  - data smaller than WU
-//  - data larger than WU size but not multiple of it
-//TODO: add a test case where write src is in the same LFTL area
-//TODO: add a test case where write src is in a different LFTL area
-//TODO: add a test case where write src is in NVM outside of any LFTL area
-//for all above and existing ones:
-//- dst offset such that data is not in first WU nor in last WU of the area
-//- dst offset such that end of data is in the last WU of the area
-
 
 #define MAX_NVM_TO_NVM_TEST_SIZE_IN_WU 2
+#define MAX_DST_OFFSET_IN_WU 2
 void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsigned int test_storage_size){
   uint8_t*dst;
-  if(dst_offset>=sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
+  if(dst_offset>=MAX_DST_OFFSET_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   stateful_prng_fill(test_storage, test_storage_size);
-  printf("test_storage[0]=0x%02x, test_storage[%u]=0x%02x\n",((uint8_t*)test_storage)[0],test_storage_size-1,((uint8_t*)test_storage)[test_storage_size-1]);
+  //printf("test_storage[0]=0x%02x, test_storage[%u]=0x%02x\n",((uint8_t*)test_storage)[0],test_storage_size-1,((uint8_t*)test_storage)[test_storage_size-1]);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
   raw_nvm_write_func(&nvm.unmanaged_data0,test_storage,test_storage_size);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
@@ -308,44 +299,72 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   lftl_wu_t*base_b = (lftl_wu_t*)&nvm.b_data;
   //try src in NVM outside of LFTL areas
   dst = ((uint8_t*)base_b) + dst_offset;
-  const uint8_t*src = dst;
+  uint8_t*src = dst;
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
   //try dst and src in same LFTL area
-  test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+1,src,test_storage_size,test_storage);
+  test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,src,test_storage_size,test_storage);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
   //try dst and src in other LFTL area
   lftl_wu_t*base_a = (lftl_wu_t*)&nvm.a_data;
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
   //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
-  test_write(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+1,test_storage,test_storage_size);
+  test_write(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,test_storage,test_storage_size);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
   //retry dst and src in other LFTL area
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
   if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  
+  //now try the 'mirror' cases
+  dst_offset = 2*DATA_SIZE - test_storage_size;
+
+  //try src in NVM outside of LFTL areas
+  dst = ((uint8_t*)base_b) + dst_offset;
+  src = dst;
+  test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //try dst and src in same LFTL area
+  test_write2(&nvmb,base_b,src,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //try dst and src in other LFTL area
+  test_write2(&nvma,base_a,src,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
+  test_write(&nvmb,base_b,test_storage,test_storage_size);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+  //retry dst and src in other LFTL area
+  test_write2(&nvma,base_a,src,test_storage_size,test_storage);
+  if(!nvm_is_equal(&nvm_ref)){printf("NVM corrupted\n");abort();};
+
 }
 
 void write_nvm_to_nvm_vs_size(unsigned int size){
-  lftl_wu_t test_storage[3];
+  lftl_wu_t test_storage[4];
   if(size>sizeof(nvm.unmanaged_data0)) throw_exception(INTERNAL_ERROR_CORRUPT);
   if(size>=sizeof(test_storage)) throw_exception(INTERNAL_ERROR_CORRUPT);
   {
     //aligned src
     write_nvm_to_nvm_test_core(0,&test_storage,size);//aligned dst
     write_nvm_to_nvm_test_core(1,&test_storage,size);//unaligned dst
+    write_nvm_to_nvm_test_core(sizeof(lftl_wu_t),&test_storage,size);//aligned dst in second WU
+    write_nvm_to_nvm_test_core(1+sizeof(lftl_wu_t),&test_storage,size);//unaligned dst in second WU
   }
   {
     //unaligned src
     uint8_t*test_storage8 = (uint8_t*)test_storage;
     write_nvm_to_nvm_test_core(0,test_storage8+1,size);//aligned dst
     write_nvm_to_nvm_test_core(1,test_storage8+1,size);//unaligned dst
+    write_nvm_to_nvm_test_core(sizeof(lftl_wu_t),test_storage8+1,size);//aligned dst in second WU
+    write_nvm_to_nvm_test_core(1+sizeof(lftl_wu_t),test_storage8+1,size);//unaligned dst in second WU
   }
 }
 
 void write_nvm_to_nvm_test(){
+  write_nvm_to_nvm_vs_size(1);                   // smaller than WU
   write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));   // single WU
   write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2); // multiple WU
+  write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1); // larger than WU size but not multiple of it
 }
 
 void transaction_basic_test(){

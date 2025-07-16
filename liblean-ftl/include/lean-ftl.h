@@ -96,9 +96,9 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
  * The source may be within the NVM but is guaranteed to not overlap 
  * with the destination range.
  * 
- * \param dst_nvm_addr The start address of the destination
- * \param src The start address of the source
- * \param size The size in bytes of the data to write
+ * \param dst_nvm_addr The start address of the destination. It is always aligned on WU_SIZE.
+ * \param src The start address of the source. It may be misaligned if top level API are called with misaligned source address.
+ * \param size The size in bytes of the data to write. It is always a multiple of WU_SIZE.
  * 
  * \returns 0 or an error code
  */

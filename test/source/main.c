@@ -322,8 +322,8 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
   SANITY_CHECK();
   //set src in area b with same alignement as test_storage
-  const bool test_storage_aligned = (uintptr_t)test_storage%2;
-  const bool src_aligned = (uintptr_t)src%2;
+  const bool test_storage_aligned = (uintptr_t)test_storage%2 ? 0 : 1;
+  const bool src_aligned = (uintptr_t)src%2 ? 0 : 1;
   if(test_storage_aligned & !src_aligned){
     src = ((uint8_t*)base_b);
     test_write2(&nvmb,src,&nvm.unmanaged_data0,test_storage_size,test_storage);

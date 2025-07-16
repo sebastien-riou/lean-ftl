@@ -20,9 +20,13 @@ typedef struct data_flash_struct {
     uint64_t data2[SIZE64(DATA_SIZE)];
     uint64_t data3[SIZE64(DATA_SIZE)];
     ,2)
-    
-  uint64_t unmanaged_data0[SIZE64(DATA_SIZE)];
-  uint64_t unmanaged_data1[SIZE64(DATA_SIZE)];
+  union {
+    flash_sw_page_t unmanaged_page;
+    struct {
+      uint64_t unmanaged_data0[SIZE64(DATA_SIZE)];
+      uint64_t unmanaged_data1[SIZE64(DATA_SIZE)];
+    };
+  };
 } __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) data_flash_t;
 
 #define SIMULATED_TEARING 0xFF

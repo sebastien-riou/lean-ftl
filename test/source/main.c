@@ -78,6 +78,7 @@ lftl_ctx_t nvmb = {
 
 void (*format_func)(lftl_ctx_t*ctx);
 uint8_t (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t size);
+uint8_t (*raw_nvm_erase_func)(void*base_address, unsigned int n_pages);
 void (*erase_all_func)(lftl_ctx_t*ctx);
 void (*write_func)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*transaction_start_func)(lftl_ctx_t*ctx, void *const transaction_tracker);
@@ -111,6 +112,18 @@ uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t
   memcpy(dst+offset,src,size);
   //emulate call to nvm_write rather than calling it, to make sure we do not trigger tearing here
   memcpy(dst_nvm_addr,src,size);
+  return 0;
+}
+uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
+  //update previous state
+  nvm_ref_previous_state = nvm_ref;
+  //compute new state
+  uintptr_t offset = (uintptr_t)base_address - (uintptr_t)&nvm;
+  uint8_t*dst = (uint8_t*)&nvm_ref;
+  uintptr_t size = n_pages*FLASH_SW_PAGE_SIZE;
+  memset(dst+offset,0xFF,size);
+  //emulate call to nvm_erase rather than calling it, to make sure we do not trigger tearing here
+  memset(base_address,0xFF,size);
   return 0;
 }
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
@@ -296,7 +309,10 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   stateful_prng_fill(test_storage, test_storage_size);
   SANITY_CHECK();
-  raw_nvm_write_func(&nvm.unmanaged_data0,test_storage,test_storage_size);
+  raw_nvm_erase_func(&nvm.unmanaged_data0,1);
+  lftl_wu_t aligned_test_storage[4] = {0};//always write 4 WU because implementations may need a multiple of WU size
+  memcpy(aligned_test_storage,test_storage,test_storage_size);
+  raw_nvm_write_func(&nvm.unmanaged_data0,aligned_test_storage ,sizeof(aligned_test_storage));
   SANITY_CHECK();
 
   lftl_wu_t*base_b = (lftl_wu_t*)&nvm.b_data;
@@ -305,6 +321,19 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   uint8_t*src = dst;
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
   SANITY_CHECK();
+  //set src in area b with same alignement as test_storage
+  const bool test_storage_aligned = (uintptr_t)test_storage%2;
+  const bool src_aligned = (uintptr_t)src%2;
+  if(test_storage_aligned & !src_aligned){
+    src = ((uint8_t*)base_b);
+    test_write2(&nvmb,src,&nvm.unmanaged_data0,test_storage_size,test_storage);
+    SANITY_CHECK();
+  }
+  if(!test_storage_aligned & src_aligned){
+    src = ((uint8_t*)base_b) + 1;
+    test_write2(&nvmb,src,&nvm.unmanaged_data0,test_storage_size,test_storage);
+    SANITY_CHECK();
+  }
   //try dst and src in same LFTL area
   test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,src,test_storage_size,test_storage);
   SANITY_CHECK();
@@ -342,7 +371,7 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
 }
 
 void write_nvm_to_nvm_vs_size(unsigned int size){
-  lftl_wu_t test_storage[4];
+  lftl_wu_t test_storage[4];//write_nvm_to_nvm_test_core assumes test_storage size is 4 WU.
   if(size>sizeof(nvm.unmanaged_data0)) throw_exception(INTERNAL_ERROR_CORRUPT);
   if(size>=sizeof(test_storage)) throw_exception(INTERNAL_ERROR_CORRUPT);
   {
@@ -445,6 +474,7 @@ int main(int argc, const char*argv[]){
   #ifdef HAS_TEARING_SIMULATION
     format_func = tearing_sim_lftl_format;
     raw_nvm_write_func = tearing_sim_nvm_write;
+    raw_nvm_erase_func = tearing_sim_nvm_erase;
     erase_all_func = tearing_sim_lftl_erase_all;
     write_func = tearing_sim_lftl_write;
     transaction_start_func = tearing_sim_lftl_transaction_start;
@@ -457,6 +487,7 @@ int main(int argc, const char*argv[]){
   #else
     format_func = lftl_format;
     raw_nvm_write_func = nvm_write;
+    raw_nvm_erase_func = nvm_erase;
     erase_all_func = lftl_erase_all;
     write_func = lftl_write;
     transaction_start_func = lftl_transaction_start;

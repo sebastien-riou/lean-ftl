@@ -626,7 +626,7 @@ int main(int argc, const char*argv[]){
   #ifdef HAS_TEARING_SIMULATION
     printf("All tests PASSED\n");
   #else
-    while(1){ui_led1_blink_ms(5000,DUTY_CYCLE_50);}
+    while(1){ui_led1_blink_ms(1000,DUTY_CYCLE_75);}
   #endif
   return 0;
 }

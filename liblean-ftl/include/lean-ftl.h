@@ -514,22 +514,6 @@ void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*co
   #define CONCAT(x,y) CONCAT_INNER(x,y)
 #endif
 
-#ifndef EVAL
-  #define EVAL(...) EVAL1024(__VA_ARGS__)
-  #define EVAL1024(...) EVAL512(EVAL512(__VA_ARGS__))
-  #define EVAL512(...) EVAL256(EVAL256(__VA_ARGS__))
-  #define EVAL256(...) EVAL128(EVAL128(__VA_ARGS__))
-  #define EVAL128(...) EVAL64(EVAL64(__VA_ARGS__))
-  #define EVAL64(...) EVAL32(EVAL32(__VA_ARGS__))
-  #define EVAL32(...) EVAL16(EVAL16(__VA_ARGS__))
-  #define EVAL16(...) EVAL8(EVAL8(__VA_ARGS__))
-  #define EVAL8(...) EVAL4(EVAL4(__VA_ARGS__))
-  #define EVAL4(...) EVAL2(EVAL2(__VA_ARGS__))
-  #define EVAL2(...) EVAL1(EVAL1(__VA_ARGS__))
-  #define EVAL1(...) __VA_ARGS__
-#endif
-
-
 #ifndef BYTES_TO_BITS_1
   #define BYTES_TO_BITS_1 8
   #define BYTES_TO_BITS_2 16
@@ -555,9 +539,16 @@ void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*co
 
 typedef LFTL_DAT_TYPE lftl_dat_t;
 
-typedef __attribute__ ((aligned (sizeof(lftl_dat_t)))) struct {
+/** @struct lftl_wu_struct
+ *  Struct which has the same size as a NVM write unit.
+ *  It is used to defined the type `lftl_wu_t`.
+ * 
+ *  `lftl_wu_t` has the same size and the same alignement as a NVM write unit.
+ *
+ */
+typedef struct lftl_wu_struct {
   lftl_dat_t dat[DAT_PER_WU];
-} lftl_wu_t;
+} __attribute__ ((aligned (sizeof(lftl_dat_t)))) lftl_wu_t;
 
 typedef lftl_dat_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[SIZE_LFTL_DAT(FLASH_SW_PAGE_SIZE)];
 

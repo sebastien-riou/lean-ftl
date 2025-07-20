@@ -521,15 +521,28 @@ void lftl_transaction_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*
 
 void lftl_transaction_write_any(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   const uint32_t write_size = ctx->nvm_props->write_size;
-  const bool addr_aligned = 0 != ((uintptr_t)dst_nvm_addr % write_size);
-  const bool size_aligned = 0 != (size % write_size);
-  if(addr_aligned & size_aligned) {
-    // fix alignement
-    //check/update transaction tracker
-    //TODO
-    write_core(ctx,dst_nvm_addr,src,size,TRANSACTION, UNALIGNED);
-  } else {
+  const uintptr_t addr_misalignement = ((uintptr_t)dst_nvm_addr % write_size);
+  const bool addr_is_aligned = 0 == addr_misalignement;
+  const bool size_is_aligned = 0 == (size % write_size);
+  if(addr_is_aligned & size_is_aligned) {
     lftl_transaction_write(ctx, dst_nvm_addr, src, size);
+  } else {
+    if(LFTL_INVALID_POINTER == ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
+    //check/update transaction tracker
+    const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
+    const uint32_t n_write_units = LFTL_DIV_CEIL(size+addr_misalignement,write_size);
+    const uintptr_t offset = dst_nvm_addr_aligned - (uintptr_t)ctx->area;
+    const uint32_t offset_wu = offset / write_size;
+    uint8_t*tracker = (uint8_t*)ctx->transaction_tracker;
+    for(uintptr_t i = 0; i < n_write_units; i++){
+      const uint32_t wu_index = offset_wu+i;
+      const uint32_t byte_index = wu_index / BITS_PER_BYTE;
+      const uint32_t bit_index = wu_index % BITS_PER_BYTE;
+      const uint8_t mask = 1 << bit_index;
+      if(tracker[byte_index] & mask) ctx->error_handler(LFTL_ERROR_TRANSACTION_OVERWRITE);
+      tracker[byte_index] |= mask;
+    }
+    write_core(ctx,dst_nvm_addr,src,size,TRANSACTION, UNALIGNED);
   }
   
 }

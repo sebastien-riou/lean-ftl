@@ -200,6 +200,11 @@ const uint32_t nvm_erase_size = 8*1024;
 uint64_t tearing_sim_cnt=0;
 uint64_t tearing_sim_target_cnt = -1;
 
+void tearing_sim_init(){
+  tearing_sim_cnt=0;
+  tearing_sim_target_cnt = -1;
+}
+
 uint32_t tearing_sim_get_max_target(){
   return tearing_sim_cnt / nvm_write_size;
 }

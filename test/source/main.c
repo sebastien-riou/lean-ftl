@@ -76,13 +76,16 @@ lftl_ctx_t nvmb = {
   .next = LFTL_INVALID_POINTER
 };
 
+typedef void (*write_func_t)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
+
 void (*format_func)(lftl_ctx_t*ctx);
 uint8_t (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t size);
 uint8_t (*raw_nvm_erase_func)(void*base_address, unsigned int n_pages);
 void (*erase_all_func)(lftl_ctx_t*ctx);
-void (*write_func)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
+write_func_t write_func;
 void (*transaction_start_func)(lftl_ctx_t*ctx, void *const transaction_tracker);
 void (*transaction_write_func)(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void (*transaction_write_any_func)(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*transaction_commit_func)(lftl_ctx_t*ctx);
 void (*transaction_abort_func)(lftl_ctx_t*ctx);
 
@@ -158,9 +161,17 @@ void tearing_sim_lftl_transaction_write(lftl_ctx_t*ctx,void*dst_nvm_addr, const 
   //write into transaction buffer
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&transaction_buf_ref;
-  memcpy(dst+offset,src,size);
+  lftl_memread(dst+offset,src,size);
   //call LFTL
   lftl_transaction_write(ctx,dst_nvm_addr,src,size);
+}
+void tearing_sim_lftl_transaction_write_any(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size){
+  //write into transaction buffer
+  uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
+  uint8_t*dst = (uint8_t*)&transaction_buf_ref;
+  lftl_memread(dst+offset,src,size);
+  //call LFTL
+  lftl_transaction_write_any(ctx,dst_nvm_addr,src,size);
 }
 void tearing_sim_lftl_transaction_commit(lftl_ctx_t*ctx){
   //update previous state
@@ -192,7 +203,7 @@ void check_nvm(){
   abort();
 }
 void tearing_sim_check_nvm(){
-  printf("Simulated tearing\n");
+  //printf("Simulated tearing\n");//too verbose
   //simulate a reboot
   nvma.data = LFTL_INVALID_POINTER;
   nvma.transaction_tracker = LFTL_INVALID_POINTER;
@@ -200,8 +211,28 @@ void tearing_sim_check_nvm(){
   nvmb.transaction_tracker = LFTL_INVALID_POINTER;
   check_nvm();
 }
+void tearing_sim_init();
 uint32_t tearing_sim_get_max_target();
 void tearing_sim_set_target(uint64_t target_write);
+
+
+#define PBSTR "||||||||||||||||||||||||||||||||||||||||||||||||||"
+#define PBWIDTH 50
+
+void print_progress_bar(size_t val, size_t total) {
+  float pf = (val*1.0) / total;
+  unsigned int p = (unsigned int)(pf*100);
+  unsigned int lpad = (unsigned int) (pf * PBWIDTH);
+  unsigned int rpad = PBWIDTH - lpad;
+  printf("\r%3d%% [%.*s%*s]", p, lpad, PBSTR, rpad, "");
+  fflush(stdout);
+}
+void print_progress_bar_done(){
+  print_progress_bar(1,1);
+  printf("\n");
+  fflush(stdout);
+}
+
 #define SANITY_CHECK() do{if(!nvm_is_equal(&nvm_ref)) throw_exception(INTERNAL_ERROR_CORRUPT);}while(0)
 #else
 #define SANITY_CHECK()
@@ -259,6 +290,7 @@ void randomized_test_write(lftl_ctx_t*ctx,void*dst_nvm_addr, uintptr_t size){
 }
 
 void basic_test(){
+  randomized_test_write(&nvma,nvm.data0,sizeof(lftl_wu_t));
   randomized_test_write(&nvma,nvm.data0,sizeof(nvm.data0));
   randomized_test_write(&nvma,nvm.data1,sizeof(nvm.data1));
   randomized_test_write(&nvmb,nvm.data2,sizeof(nvm.data2));
@@ -391,12 +423,6 @@ void write_nvm_to_nvm_vs_size(unsigned int size){
   }
 }
 
-void write_nvm_to_nvm_test(){
-  write_nvm_to_nvm_vs_size(1);                   // smaller than WU
-  write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));   // single WU
-  write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2); // multiple WU
-  write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1); // larger than WU size but not multiple of it
-}
 
 void transaction_basic_test(){
   uint8_t rng_state = 0;
@@ -407,7 +433,7 @@ void transaction_basic_test(){
     prng_fill(&rng_state,wbuf0,size);
     test_write(&nvma,&nvm.a_data,wbuf0,sizeof(nvm.a_data));
     //write 1st word of each data in one transaction
-  uint8_t nvma_transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+    uint8_t nvma_transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
     transaction_start_func(&nvma,nvma_transaction_tracker);
     uint8_t wbuf[size];
     prng_fill(&rng_state,wbuf,size);
@@ -453,6 +479,16 @@ void transaction_abort_test(){
   read_and_check(&nvma,&nvm.a_data,wbuf0,sizeof(nvm.a_data));//read current data
 }
 
+void write_func_using_transaction(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size){
+  uint8_t transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(ctx)];
+  transaction_start_func(ctx,transaction_tracker);
+  transaction_write_any_func(ctx,dst_nvm_addr,src,size);
+  transaction_commit_func(ctx);
+}
+
+
+
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -470,6 +506,86 @@ void exception_handler(uint32_t err_code){
   #endif
 }
 
+void test_and_simulate_tearing(void (*dut)()){
+  static unsigned int test_cnt=0;
+  uint32_t err_code=-1;
+  led1(1);
+  if(0 == (err_code = setjmp(exception_ctx))){
+    #ifdef HAS_TEARING_SIMULATION
+    tearing_sim_init(); // ensure any previous tearing sim is stopped at this point
+    #endif
+    lftl_init_lib();
+    lftl_register_area(&nvma);
+    lftl_register_area(&nvmb);
+    format_func(&nvma);
+    format_func(&nvmb);
+    #ifdef HAS_TEARING_SIMULATION
+    tearing_sim_init();
+    #endif
+    dut();//functional test
+    err_code = 0;
+    led1(0);
+  } else {
+    exception_handler(err_code);
+  }
+  #ifdef HAS_TEARING_SIMULATION
+    tearing_sim_check_nvm();//sanity check that model is in sync
+    const unsigned int target_max = tearing_sim_get_max_target();
+    printf("%u targets for tearing simulation\n",target_max);
+    led1(1);
+    format_func(&nvma);
+    format_func(&nvmb);
+    for(volatile unsigned int i=0;i<target_max+1;i++){//volatile to remove warning about setjump.
+      //if(0 == (i%1000)) printf("tearing simulation target %u\n",i);
+      if(0 == (i%50)) print_progress_bar(i,target_max);
+      tearing_sim_set_target(i);
+      if(0 == (err_code = setjmp(exception_ctx))){
+        dut();//simulated tearing test
+      } else {
+        exception_handler(err_code);
+      }
+    }
+    print_progress_bar_done();
+    err_code = 0;
+    led1(0);
+  #endif
+  test_cnt++;
+  if(0==err_code){
+    #ifdef HAS_TEARING_SIMULATION
+      printf("Test %d PASS\n",test_cnt);
+    #else
+      
+    #endif
+  }else{
+    #ifdef HAS_TEARING_SIMULATION
+      exit(err_code);
+    #endif
+    ui_wait_button();
+    led1(0);
+    while(1);
+  }
+}
+
+
+void write_nvm_to_nvm_vs_size_1()   {write_nvm_to_nvm_vs_size(1);}                    // smaller than WU
+void write_nvm_to_nvm_vs_size_1wu() {write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));}    // single WU
+void write_nvm_to_nvm_vs_size_2wu() {write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2);}  // multiple WU
+void write_nvm_to_nvm_vs_size_1wu1(){write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1);}  // larger than WU size but not multiple of it
+
+void write_nvm_to_nvm_seq(){
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1)   ;
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu) ;
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_2wu) ;
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu1);
+}
+void transaction_nvm_to_nvm_seq(){
+  write_func_t org_write_func = write_func;
+  write_func = write_func_using_transaction;
+  write_nvm_to_nvm_seq();
+  write_func = org_write_func;
+}
+
+
 int main(int argc, const char*argv[]){
   #ifdef HAS_TEARING_SIMULATION
     format_func = tearing_sim_lftl_format;
@@ -479,6 +595,7 @@ int main(int argc, const char*argv[]){
     write_func = tearing_sim_lftl_write;
     transaction_start_func = tearing_sim_lftl_transaction_start;
     transaction_write_func = tearing_sim_lftl_transaction_write;
+    transaction_write_any_func = tearing_sim_lftl_transaction_write_any;
     transaction_commit_func = tearing_sim_lftl_transaction_commit;
     transaction_abort_func = tearing_sim_lftl_transaction_abort;
     printf("version: %s\n",lftl_version());
@@ -492,66 +609,26 @@ int main(int argc, const char*argv[]){
     write_func = lftl_write;
     transaction_start_func = lftl_transaction_start;
     transaction_write_func = lftl_transaction_write;
+    transaction_write_any_func = lftl_transaction_write_any;
     transaction_commit_func = lftl_transaction_commit;
     transaction_abort_func = lftl_transaction_abort;
   #endif
   init(argc,argv);
   led1(1);
-  uint32_t err_code=-1;
-  if(0 == (err_code = setjmp(exception_ctx))){
-    lftl_init_lib();
-    lftl_register_area(&nvma);
-    lftl_register_area(&nvmb);
-    format_func(&nvma);
-    format_func(&nvmb);
-    // operations aligned on write units
-    basic_test();
-    write_size_test();
-    write_offset_test();
-    transaction_basic_test();
-    transaction_abort_test();
-    erase_all_test();
-    write_nvm_to_nvm_test();
-    err_code = 0;
-    led1(0);
-  } else {
-    exception_handler(err_code);
-  }
+  test_and_simulate_tearing(basic_test);
+  test_and_simulate_tearing(write_size_test);
+  test_and_simulate_tearing(write_offset_test);
+  test_and_simulate_tearing(transaction_basic_test);
+  test_and_simulate_tearing(transaction_abort_test);
+  test_and_simulate_tearing(erase_all_test);
+  write_nvm_to_nvm_seq();
+  transaction_nvm_to_nvm_seq();
   #ifdef HAS_TEARING_SIMULATION
-    tearing_sim_check_nvm();//sanity check that model is in sync
-    const unsigned int target_max = tearing_sim_get_max_target();
-    printf("%u targets for tearing simulation\n",target_max);
-    led1(1);
-    for(volatile unsigned int i=0;i<target_max;i++){//volatile to remove warning about setjump
-      printf("tearing simulation target %u\n",i);
-      tearing_sim_set_target(i);
-      if(0 == (err_code = setjmp(exception_ctx))){
-        basic_test();
-        write_size_test();
-        write_offset_test();
-        transaction_basic_test();
-        transaction_abort_test();
-        erase_all_test();
-        write_nvm_to_nvm_test();
-        err_code = 0;
-        led1(0);
-      } else {
-        exception_handler(err_code);
-      }
-    }
+    printf("All tests PASSED\n");
+  #else
+    while(1){ui_led1_blink_ms(5000,DUTY_CYCLE_50);}
   #endif
-  if(0==err_code){
-    #ifdef HAS_TEARING_SIMULATION
-      printf("PASS\n");
-    #else
-      while(1){ui_led1_blink_ms(5000,DUTY_CYCLE_50);}
-    #endif
-  }else{
-    ui_wait_button();
-    led1(0);
-    while(1);
-  }
-  return err_code;
+  return 0;
 }
 
 

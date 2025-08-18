@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(lean-ftl-test)
+project(lean-ftl-test-fw)
 
 add_subdirectory(liblean-ftl)
+add_subdirectory(liblean-ftl-test)
 
 if(BUILD_TEST)
 
@@ -20,16 +21,18 @@ set(include_c_DIRS
 # libs
 set(link_DIRS
 	${CMAKE_CURRENT_BINARY_DIR}/liblean-ftl
+	${CMAKE_CURRENT_BINARY_DIR}/liblean-ftl-test
 )
 
 set(link_LIBS
+	lean-ftl-test
 	lean-ftl
 )
 
 include("cmake/generic_binary.cmake")
 
 include(CTest)
-add_test(NAME lean-ftl-test
-					COMMAND lean-ftl-test)
+add_test(NAME lean-ftl-test-fw
+					COMMAND lean-ftl-test-fw)
 
 endif(BUILD_TEST)

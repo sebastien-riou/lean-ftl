@@ -30,6 +30,7 @@ void throw_exception(uint32_t err_code){
 }
 
 #include "ui.h"
+#include <stdio.h>
 
 
 #include "type.h"

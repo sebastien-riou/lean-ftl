@@ -22,7 +22,7 @@ Building
 ------------------------------
 
 Prerequisites:
- - Recent compilers (tested on ``gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0`` and ``arm-none-eabi-gcc (xPack GNU Arm Embedded GCC x86_64) 13.2.1``)
+ - Recent compilers (tested on ``gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0`` and ``arm-none-eabi-gcc (xPack GNU Arm Embedded GCC x86_64) 14.2.1 20241119``)
  - CMake_ 3.28 or newer (might also be called ``cmakesetup``, ``cmake-gui`` or ``ccmake`` depending on the installed version and system)
  - C build system CMake can target (make, Apple Xcode, MinGW, ...)
 

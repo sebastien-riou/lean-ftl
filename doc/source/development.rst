@@ -68,7 +68,7 @@ Development dependencies
 
 - CMake_ 3.28 or newer
 - gcc 11.4.0 or newer
-- arm-none-eabi-gcc 13.2.1 or newer
+- arm-none-eabi-gcc 14.2.1 or newer
 
 .. _CMake: http://cmake.org/
 

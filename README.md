@@ -37,7 +37,7 @@ NOTES:
 You need CMake and arm-none-eabi toolchain in your path.
 
 ```
-./buildit linux.cmake debug
+./buildit on/linux debug
 ```
 
 Notes: 
@@ -46,7 +46,7 @@ Notes:
 
 ### Local test
 ```
-./testit linux.cmake debug
+./testit on/linux debug
 ```
 
 Note: this does not work with embedded targets.

@@ -111,12 +111,12 @@ Debug preprocessor macros
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 .. code-block:: bash
 
-  make -C build/build-linux.cmake/ test/source/main.i
+  make -C build/linux/ test/source/main.i
 
-This generate the file ``build/build-linux.cmake/CMakeFiles/lean-ftl-test.dir/test/source/main.c.i``
+This generate the file ``build/linux/CMakeFiles/lean-ftl-test.dir/test/source/main.c.i``
 
 Type the following to see the full list of available targets:
 
 .. code-block:: bash
 
-  make -C build/build-linux.cmake/ help
+  make -C build/linux/ help

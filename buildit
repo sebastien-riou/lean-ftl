@@ -2,7 +2,7 @@
 
 set -ex
 
-OUTDIR="build/build-"$1
+OUTDIR="build/"$(basename ${1})
 rm -rf $OUTDIR
 mkdir -p $OUTDIR
 

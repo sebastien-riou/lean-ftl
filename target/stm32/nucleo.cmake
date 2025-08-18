@@ -1,5 +1,5 @@
 
-include("${CMAKE_CURRENT_LIST_DIR}/../cortex-m33.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../../on/cortex-m33")
 
 set(linker_script_SRC ${CMAKE_CURRENT_SOURCE_DIR}/target/stm32/${DEVICE}_FLASH.ld)
 

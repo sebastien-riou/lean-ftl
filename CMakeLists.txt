@@ -4,6 +4,8 @@ project(lean-ftl-test)
 
 add_subdirectory(liblean-ftl)
 
+if(BUILD_TEST)
+
 # Sources
 set(sources_SRCS
 	${CMAKE_CURRENT_SOURCE_DIR}/test/source/main.c
@@ -30,3 +32,4 @@ include(CTest)
 add_test(NAME lean-ftl-test
 					COMMAND lean-ftl-test)
 
+endif(BUILD_TEST)

@@ -8,4 +8,4 @@ There is a comprehensive test suite . You can run all of them on linux using ``t
 
 .. code-block:: bash
 
-  ./testit linux.cmake debug
+  ./testit on/linux debug

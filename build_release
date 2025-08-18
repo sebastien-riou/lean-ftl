@@ -5,7 +5,15 @@ set -ex
 PRESET=${1:-minSizeRel}
 
 
-./testit linux.cmake $PRESET
+./testit on/linux $PRESET
+./clean
+./buildit on/cortex-m0 $PRESET
+./buildit on/cortex-m3 $PRESET
+./buildit on/cortex-m4 $PRESET
+./buildit on/cortex-m7 $PRESET
+./buildit on/cortex-m33 $PRESET
+./buildit on/cortex-m35p $PRESET
+
 OUT=dist/$PRESET/liblean-ftl
 rm -rf $OUT
 mkdir -p $OUT
@@ -17,6 +25,10 @@ git status
 git diff package.json
 sha256sum package.json
 git describe --tags --always --dirty --match "v*" > $OUT/version.txt
-cd dist
-7z a liblean-ftl-$PRESET.7z $PRESET/liblean-ftl
+cd dist/$PRESET
+7z a liblean-ftl-$PRESET.7z liblean-ftl
 sha512sum liblean-ftl-$PRESET.7z > liblean-ftl-$PRESET.7z.sha512sum
+cd ../..
+rm -rf $OUT
+mv dist/$PRESET/* dist
+rm -rf dist/$PRESET

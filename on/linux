@@ -1,3 +1,4 @@
+set(BUILD_TEST 1)
 set(LINUX_TARGET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/target/linux)
 set(target_SRCS 
 	${LINUX_TARGET_DIR}/linux.c
@@ -10,3 +11,4 @@ set(target_include_sys_c_DIRS
 	${LINUX_TARGET_DIR}
 )
 
+set(CMAKE_AR_O_EXT                  "o")

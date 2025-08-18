@@ -34,11 +34,11 @@ This builds for all supported platforms, result is in "dist" folder:
 
   ./build_release
 
-If you want to build just for linux, result is in "build/build-linux.cmake" folder:
+If you want to build just for linux, result is in "build/linux" folder:
 
 .. code-block:: bash
 
-  ./buildit linux.cmake debug
+  ./buildit on/linux debug
 
 
 Linking with lean-ftl
@@ -61,7 +61,7 @@ You can verify support for your platform by compiling main.c from the example/he
 
   7z x  ~/Downloads/lean-ftl-v0.0.4.7z
   gcc examples/hello/main.c -o hello -Idist/debug/liblean-ftl/include \
-    -Ldist/debug/liblean-ftl/build/build-linux.cmake/liblean-ftl -llean-ftl 
+    -Ldist/debug/liblean-ftl/build/linux/liblean-ftl -llean-ftl 
   ./hello
 
 You should get something like:

@@ -11,8 +11,12 @@ PRESET=${1:-minSizeRel}
 ./buildit on/cortex-m3 $PRESET
 ./buildit on/cortex-m4 $PRESET
 ./buildit on/cortex-m7 $PRESET
+./buildit on/cortex-m23 $PRESET
 ./buildit on/cortex-m33 $PRESET
 ./buildit on/cortex-m35p $PRESET
+./buildit on/cortex-m52 $PRESET
+./buildit on/cortex-m55 $PRESET
+./buildit on/cortex-m85 $PRESET
 
 OUT=dist/$PRESET/liblean-ftl
 rm -rf $OUT

@@ -41,9 +41,10 @@ jobs:
         echo after restoration
         sha256sum package.json
         ls -l
-        PATH=xpacks/.bin/:$PATH
-        ./build_release minSizeRel
-        ./build_release debug
+        PATH=`pwd`/xpacks/.bin:$PATH
+        #./build_release minSizeRel
+        #./build_release debug
+        ./buildit on/cortex-m0 debug
         echo after build
         sha256sum package.json
         ls -l

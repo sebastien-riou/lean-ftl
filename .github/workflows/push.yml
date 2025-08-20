@@ -42,9 +42,9 @@ jobs:
         sha256sum package.json
         ls -l
         PATH=`pwd`/xpacks/.bin:$PATH
-        #./build_release minSizeRel
-        #./build_release debug
-        ./buildit on/cortex-m0 debug
+        ./build_release minSizeRel
+        ./build_release debug
+        #./buildit on/cortex-m0 debug
         echo after build
         sha256sum package.json
         ls -l

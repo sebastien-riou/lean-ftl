@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.22)
 
 project(lean-ftl-test-fw)
 
+#message(WARNING "CMAKE_C_COMPILER is ${CMAKE_C_COMPILER}")
+#message(WARNING "CMAKE_AR is ${CMAKE_AR}")
+
 add_subdirectory(liblean-ftl)
 add_subdirectory(liblean-ftl-test)
 

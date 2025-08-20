@@ -15,7 +15,7 @@ add_definitions( -DVERSION_TIMESTAMP=${VERSION_TIMESTAMP} )
 
 add_definitions( -DBUILD_TYPE=${CMAKE_BUILD_TYPE})
 # Core project settings
-enable_language(C CXX ASM)
+enable_language(C ASM)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Setup compiler settings

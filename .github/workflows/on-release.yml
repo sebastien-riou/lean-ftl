@@ -27,7 +27,8 @@ jobs:
       - name: build
         shell: bash
         run: |
-          PATH=xpacks/.bin/:$PATH
+          PATH=`pwd`/xpacks/.bin:$PATH
+          #./buildit on/cortex-m0 debug
           ./build_release debug
           ./build_release minSizeRel
           7z a lean-ftl-${{github.ref_name}}.7z dist

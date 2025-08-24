@@ -27,10 +27,12 @@ set(link_DIRS
 	${CMAKE_CURRENT_BINARY_DIR}/liblean-ftl-test
 )
 
-set(link_LIBS
-	lean-ftl-test
-	lean-ftl
-)
+#set(link_LIBS
+#	lean-ftl-test
+#	lean-ftl
+#)
+list(APPEND link_LIBS lean-ftl-test)
+list(APPEND link_LIBS lean-ftl)
 
 include("cmake/generic_binary.cmake")
 

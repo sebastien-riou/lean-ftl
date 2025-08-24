@@ -1,0 +1,12 @@
+#define toolchain
+include("${CMAKE_CURRENT_LIST_DIR}/cortex-m33")
+
+#define device specific accessors
+set(DEVICE STM32U5A5ZJTXQ)
+set(DEVICE_FAMILY STM32U5xx)
+set(LFTL_ACCESSORS ${CMAKE_CURRENT_LIST_DIR}/../target/stm32/stm32u5-accessors.c)
+set(LFTL_ACCESSORS_INCLUDES
+	${CMAKE_CURRENT_SOURCE_DIR}/target/stm32/CMSIS/Include
+	${CMAKE_CURRENT_SOURCE_DIR}/target/stm32/CMSIS/Device/ST/${DEVICE_FAMILY}/Include
+)
+

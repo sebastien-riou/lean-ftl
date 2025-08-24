@@ -134,6 +134,9 @@ SECTIONS
     *(.RamFunc)        /* .RamFunc sections */
     *(.RamFunc*)       /* .RamFunc* sections */
 
+    *(.flash_write_funcs) /*lean-ftl accessors*/
+    *(.flash_write_funcs*)
+
     _edata = .;        /* define a global symbol at data end */
   } >RAM AT> FLASH
 

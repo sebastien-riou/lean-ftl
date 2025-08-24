@@ -31,6 +31,11 @@ void throw_exception(uint32_t err_code){
 #include "ui.h"
 #include "nvm_state.h"
 
+extern data_flash_t nvm;
+extern lftl_nvm_props_t nvm_props;
+extern lftl_ctx_t nvma;
+extern lftl_ctx_t nvmb;
+
 const char*version = xstr(GIT_VERSION);
 
 //A very bad PRNG, but it is good enough for our testing purpose + it facilitate our debugging
@@ -47,34 +52,6 @@ static void stateful_prng_fill(void*buf, uint32_t size){
   static uint8_t rng_state = 0;
   prng_fill(&rng_state,buf,size);
 }
-
-extern lftl_nvm_props_t nvm_props;
-lftl_ctx_t nvma = {
-  .nvm_props = &nvm_props,
-  .area = &nvm.a_pages,
-  .area_size = sizeof(nvm.a_pages),
-  .data = LFTL_INVALID_POINTER,
-  .data_size = sizeof(nvm.a_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
-  .transaction_tracker = LFTL_INVALID_POINTER,
-  .next = LFTL_INVALID_POINTER
-};
-lftl_ctx_t nvmb = {
-  .nvm_props = &nvm_props,
-  .area = &nvm.b_pages,
-  .area_size = sizeof(nvm.b_pages),
-  .data = LFTL_INVALID_POINTER,
-  .data_size = sizeof(nvm.b_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
-  .transaction_tracker = LFTL_INVALID_POINTER,
-  .next = LFTL_INVALID_POINTER
-};
 
 typedef void (*write_func_t)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
 
@@ -586,7 +563,7 @@ void transaction_nvm_to_nvm_seq(){
 }
 
 
-int test_main(int argc, const char*argv[]){
+int test_main(){
   #ifdef HAS_TEARING_SIMULATION
     format_func = tearing_sim_lftl_format;
     raw_nvm_write_func = tearing_sim_nvm_write;
@@ -613,7 +590,6 @@ int test_main(int argc, const char*argv[]){
     transaction_commit_func = lftl_transaction_commit;
     transaction_abort_func = lftl_transaction_abort;
   #endif
-  init(argc,argv);
   led1(1);
   test_and_simulate_tearing(basic_test);
   test_and_simulate_tearing(write_size_test);

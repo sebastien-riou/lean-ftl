@@ -241,13 +241,6 @@ bool tearing_sim(void*base_address, uint32_t size){
   } 
   return tsize ? 1:0;
 }
-#include "lean-ftl.h"
-lftl_nvm_props_t nvm_props = {
-    .base = &nvm,
-    .size = sizeof(nvm),
-    .write_size = nvm_write_size,
-    .erase_size = nvm_erase_size,
-  };
 
 uint32_t get_alignement_requirement(uint32_t original_req){
   if(original_req > nvm_alignement) return nvm_alignement;

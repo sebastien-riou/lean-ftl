@@ -264,31 +264,6 @@ static void set_uart_config(){
   while ((!(LL_USART_IsActiveFlag_TEACK(NUCLEO_USART))) || (!(LL_USART_IsActiveFlag_REACK(NUCLEO_USART))));
 }
 
-/** @defgroup FLASH_Banks FLASH Banks
-  * @{
-  */
-#define FLASH_BANK_1      0x00000001U                   /*!< Bank 1   */
-#define FLASH_BANK_2      0x00000002U                   /*!< Bank 2   */
-#define FLASH_BANK_BOTH   (FLASH_BANK_1 | FLASH_BANK_2) /*!< Bank1 and Bank2  */
-
-/** @defgroup FLASH_Keys FLASH Keys
-  * @{
-  */
-#define FLASH_KEY1   0x45670123U /*!< Flash key1 */
-#define FLASH_KEY2   0xCDEF89ABU /*!< Flash key2: used with FLASH_KEY1
-                                      to unlock the FLASH registers access */
-
-#define NVM_PAGE_SIZE32 (FLASH_PAGE_SIZE/4)
-
-#define NVM_PAGE_ADDR_MASK (~(FLASH_PAGE_SIZE-1))
-#define NVM_BANK_ADDR_MASK (~(FLASH_BANK_SIZE-1))
-
-#define NVM_PAGE_BASE(addr) ((void*)((uintptr_t)(addr) & NVM_PAGE_ADDR_MASK))
-#define NVM_BANK_BASE(addr) ((void*)((uintptr_t)(addr) & NVM_BANK_ADDR_MASK))
-
-#define NVM_SIZE_IN_PAGE(addr) ((uintptr_t)NVM_PAGE_BASE((uintptr_t)(addr)+FLASH_PAGE_SIZE) - (uintptr_t)(addr))
-
-#define WRITE_BIT(reg,bit,val) do{if(val) SET_BIT(reg,bit); else CLEAR_BIT(reg,bit);}while(0)
 
 //Our application level HAL
 #define USER_BUTTON_Pin GPIO_BSRR_BS13 /*!< Select pin 13 */
@@ -351,32 +326,5 @@ void delay_ms(unsigned int ms){
   }
 }
 
-void nvm_read64(uint64_t*nvm_addr, uint64_t*buf, uint32_t size){
-  const uint32_t nwords = size / 8;
-  for(unsigned int i=0;i<nwords;i++){
-    buf[i] = nvm_addr[i];
-  }
-}
-
 #include "type.h"
 extern data_flash_t nvm __attribute__ ((section (".data_flash")));
-
-#include "lean-ftl.h"
-lftl_nvm_props_t nvm_props = {
-    .base = &nvm,
-    .size = sizeof(nvm),
-    .write_size = FLASH_WRITE_SIZE,
-    .erase_size = FLASH_PAGE_SIZE,
-  };
-
-uint8_t nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
-  if(0 == size) return 0;
-  if(src_nvm_addr < (void*)&nvm) return 1;
-  if(((uintptr_t)src_nvm_addr + size) > ((uintptr_t)&nvm + sizeof(nvm))) return 2;
-  uint8_t*dst8=(uint8_t*)dst;
-  const uint8_t*const src8 = (const uint8_t*const)src_nvm_addr;
-  for(uintptr_t i=0;i<size;i++){
-    dst8[i] = src8[i];
-  }
-  return 0;
-}

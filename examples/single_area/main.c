@@ -40,7 +40,12 @@ data_flash_t nvm __attribute__ ((section (".data_flash")));
 uint64_t nvm_data_state __attribute__ ((section (".data_flash")));
 #define NVM_DATA_STATE_INITIALIZED 0x7EB5F0C28D3419A6 //could be any non trivial 64 bit value
 
-extern lftl_nvm_props_t nvm_props;
+lftl_nvm_props_t nvm_props = {
+    .base = &nvm,
+    .size = sizeof(nvm),
+    .write_size = WU_SIZE,
+    .erase_size = FLASH_SW_PAGE_SIZE,
+  };
 lftl_ctx_t nvdata = {
   .nvm_props = &nvm_props,
   .area = &nvm.nvdata_pages,

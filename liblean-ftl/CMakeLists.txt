@@ -1,9 +1,14 @@
 set(LIB lean-ftl)
-add_library(${LIB} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/source/ftl.c)
+if(LFTL_ACCESSORS)
+  add_library(${LIB} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/source/ftl.c ${LFTL_ACCESSORS})
+else()
+  add_library(${LIB} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/source/ftl.c)
+endif(LFTL_ACCESSORS)
 
 target_include_directories(${LIB}
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${LFTL_ACCESSORS_INCLUDES}
 )
 
 # Compiler options
@@ -31,12 +36,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/../cmake/git_version.cmake")
 add_definitions( -DGIT_VERSION=${GIT_VERSION} )
 add_definitions( -DVERSION_TIMESTAMP=${VERSION_TIMESTAMP} )
 add_definitions( -DBUILD_TYPE=${CMAKE_BUILD_TYPE})
-
-add_custom_command(
-  TARGET lean-ftl PRE_BUILD
-  COMMAND which ${CMAKE_C_COMPILER}
-  COMMAND which ${CMAKE_AR}
-)
 
 add_custom_command(
   TARGET lean-ftl POST_BUILD

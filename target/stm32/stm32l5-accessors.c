@@ -2,8 +2,8 @@
 #include <stdbool.h>
 #include <string.h>
 #include "lean-ftl.h"
-#define STM32U5A5xx
-#include <stm32u5xx.h>
+#define STM32L552xx
+#include <stm32l5xx.h>
 
 /** @defgroup FLASH_Banks FLASH Banks
   * @{
@@ -29,7 +29,19 @@
 
 #define NVM_SIZE_IN_PAGE(addr) ((uintptr_t)NVM_PAGE_BASE((uintptr_t)(addr)+FLASH_PAGE_SIZE) - (uintptr_t)(addr))
 
-#define FLASH_WRITE_SIZE 16
+#define FLASH_BANK_SIZE          (FLASH_SIZE >> 1)
+#define FLASH_PAGE_SIZE          0x00000800U
+#define FLASH_WRITE_SIZE 8
+
+//harmonize some reg names to use same as STM32U5
+#define FLASH_NSCR_BKER FLASH_NSCR_NSBKER
+#define FLASH_NSCR_PNB FLASH_NSCR_NSPNB
+#define FLASH_NSCR_PNB_Pos FLASH_NSCR_NSPNB_Pos
+#define FLASH_NSCR_PER FLASH_NSCR_NSPER
+#define FLASH_NSCR_LOCK FLASH_NSCR_NSLOCK
+#define FLASH_NSCR_PG FLASH_NSCR_NSPG
+#define FLASH_NSSR_BSY FLASH_NSSR_NSBSY
+#define FLASH_NSCR_STRT FLASH_NSCR_NSSTRT
 
 #define WRITE_BIT(reg,bit,val) do{if(val) SET_BIT(reg,bit); else CLEAR_BIT(reg,bit);}while(0)
 
@@ -87,7 +99,7 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_erase_page(u
 }
 
 static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write_unaligned_src(uint64_t*dst, const uint8_t* buf, uint32_t n_words32){
-  uint32_t*dst32 = (uint32_t*)dst;
+  volatile uint32_t*dst32 = (uint32_t*)dst;
   const bool icache_enabled = icache_is_enabled();
   if (icache_enabled){//need to disable icache, it treats write in cache-able areas as errors.
 	  icache_disable();
@@ -95,13 +107,11 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write_unalig
   //data cache does not need special care apparently (at least when configured by STMCube)
   WRITE_REG(FLASH_NS->NSCR, FLASH_NSCR_PG);
   for(unsigned int i=0;i<n_words32;i+=4){
-    uint32_t buf32[4];
+    uint32_t buf32[2];
     memcpy(buf32,buf,sizeof(buf32));
     buf+=sizeof(buf32);
     dst32[i] = buf32[0];
     dst32[i+1] = buf32[1];
-    dst32[i+2] = buf32[2];
-    dst32[i+3] = buf32[3];
 
     //wait end of operation
     while(READ_BIT(FLASH_NS->NSSR, FLASH_NSSR_BSY));
@@ -116,7 +126,7 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write(uint64
   if((uintptr_t)buf % sizeof(uint32_t)) {
     nvm_ll_write_unaligned_src(dst,(const uint8_t*)buf,n_words32);
   } else {
-    uint32_t*dst32 = (uint32_t*)dst;
+    volatile uint32_t*dst32 = (uint32_t*)dst;
     const uint32_t*const buf32 = (const uint32_t*const)buf;
     const bool icache_enabled = icache_is_enabled();
     if (icache_enabled){//need to disable icache, it treats write in cache-able areas as errors.
@@ -127,8 +137,6 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write(uint64
     for(unsigned int i=0;i<n_words32;i+=4){
       dst32[i] = buf32[i];
       dst32[i+1] = buf32[i+1];
-      dst32[i+2] = buf32[i+2];
-      dst32[i+3] = buf32[i+3];
 
       //wait end of operation
       while(READ_BIT(FLASH_NS->NSSR, FLASH_NSSR_BSY));

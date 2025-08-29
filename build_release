@@ -4,9 +4,10 @@ set -ex
 
 PRESET=${1:-minSizeRel}
 
-
+#generic test build and examples
 ./testit on/linux $PRESET
 ./clean
+#generic builds, need user to implement accessors
 ./buildit on/cortex-m0 $PRESET
 ./buildit on/cortex-m3 $PRESET
 ./buildit on/cortex-m4 $PRESET
@@ -17,6 +18,9 @@ PRESET=${1:-minSizeRel}
 ./buildit on/cortex-m52 $PRESET
 ./buildit on/cortex-m55 $PRESET
 ./buildit on/cortex-m85 $PRESET
+#targeted builds for few specific MCUs
+./buildit on/stm32u5 $PRESET
+./buildit on/stm32l5 $PRESET
 
 OUT=dist/$PRESET/liblean-ftl
 rm -rf $OUT

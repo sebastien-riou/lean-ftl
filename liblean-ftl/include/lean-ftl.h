@@ -96,9 +96,9 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
  * The source may be within the NVM but is guaranteed to not overlap 
  * with the destination range.
  * 
- * \param dst_nvm_addr The start address of the destination. It is always aligned on WU_SIZE.
+ * \param dst_nvm_addr The start address of the destination. It is always aligned on LFTL_WU_SIZE.
  * \param src The start address of the source. It may be misaligned if top level API are called with misaligned source address.
- * \param size The size in bytes of the data to write. It is always a multiple of WU_SIZE.
+ * \param size The size in bytes of the data to write. It is always a multiple of LFTL_WU_SIZE.
  * 
  * \returns 0 or an error code
  */
@@ -307,9 +307,9 @@ void lftl_transaction_abort(lftl_ctx_t*ctx);
 /// This function detects if the write is part of a transaction 
 /// or not.
 /// \param ctx          Context of the target LFTL area
-/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (WU_SIZE)
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (LFTL_WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
-/// \param size         Size in bytes, MUST be multiple of write unit size (WU_SIZE)
+/// \param size         Size in bytes, MUST be multiple of write unit size (LFTL_WU_SIZE)
 ////////////////////////////////////////////////////////////
 void lftl_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
@@ -402,9 +402,9 @@ void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, u
 /// Each call writes the specified number of bytes to NVM.
 ///
 /// \param ctx          LFTL area context
-/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (WU_SIZE)
+/// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (LFTL_WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
-/// \param size         Size in bytes, MUST be multiple of write unit size (WU_SIZE)
+/// \param size         Size in bytes, MUST be multiple of write unit size (LFTL_WU_SIZE)
 ///
 ////////////////////////////////////////////////////////////
 void lftl_transaction_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
@@ -496,13 +496,13 @@ void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*co
 //    uint64_t my_nvm_array_var[SIZE64(1024)];
 //    LFTL_DATA(my_nvm_uint64_var,8);
 //    //...more variables...
-//    ,1*2)//ceiling(size of the area / FLASH_SW_PAGE_SIZE) * 2 
+//    ,1*2)//ceiling(size of the area / LFTL_PAGE_SIZE) * 2 
 //  //more LFTL_AREA can be declared here
-//} __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) data_flash_t;
+//} __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
 //data_flash_t nvm __attribute__ ((section (".data_flash")));
 
-//WU_SIZE shall be the size of write unit, in bytes
-//FLASH_SW_PAGE_SIZE shall be the size of the page unit, in bytes, or a multiple of it
+//LFTL_WU_SIZE shall be the size of write unit, in bytes
+//LFTL_PAGE_SIZE shall be the size of the page unit, in bytes, or a multiple of it
 
 #ifndef STR
   #define STR_INNER(x) # x
@@ -521,12 +521,12 @@ void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*co
   #define BYTES_TO_BITS_8 64
 #endif
 
-#if WU_SIZE > 8
+#if LFTL_WU_SIZE > 8
   #define LFTL_DAT_TYPE_WIDTH 64
-  #define DAT_PER_WU (SIZE64(WU_SIZE))
+  #define DAT_PER_WU (SIZE64(LFTL_WU_SIZE))
   #define SIZE_LFTL_DAT(size) SIZE64(size)
 #else
-  #define LFTL_DAT_TYPE_SIZE WU_SIZE
+  #define LFTL_DAT_TYPE_SIZE LFTL_WU_SIZE
 
   #define LFTL_DAT_TYPE_WIDTH CONCAT(BYTES_TO_BITS_ , LFTL_DAT_TYPE_SIZE)
   #define DAT_PER_WU 1
@@ -550,26 +550,26 @@ typedef struct lftl_wu_struct {
   lftl_dat_t dat[DAT_PER_WU];
 } __attribute__ ((aligned (sizeof(lftl_dat_t)))) lftl_wu_t;
 
-typedef lftl_dat_t __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) flash_sw_page_t[SIZE_LFTL_DAT(FLASH_SW_PAGE_SIZE)];
+typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SIZE_LFTL_DAT(LFTL_PAGE_SIZE)];
 
 /// Round a value to the minimum number of multiples of a unit.
 #define LFTL_ROUND_UP(val,unit) (LFTL_DIV_CEIL(val,unit)*(unit))
 
 /// Convert a size into the minimum number of write units and then convert to number of ``uint64_t``.
-#define LFTL_WU64(size) (SIZE64(LFTL_ROUND_UP(size,WU_SIZE)))
+#define LFTL_WU64(size) (SIZE64(LFTL_ROUND_UP(size,LFTL_WU_SIZE)))
 
 /// Convert a size into the minimum number of write units and then convert to number of ``lftl_dat_t``.
-#define LFTL_WU_DAT(size) (SIZE_LFTL_DAT(LFTL_ROUND_UP(size,WU_SIZE)))
+#define LFTL_WU_DAT(size) (SIZE_LFTL_DAT(LFTL_ROUND_UP(size,LFTL_WU_SIZE)))
 
 
-#define LFTL_PAGES(size) (LFTL_DIV_CEIL(size,FLASH_SW_PAGE_SIZE))
+#define LFTL_PAGES(size) (LFTL_DIV_CEIL(size,LFTL_PAGE_SIZE))
 
 /// Declare an LFTL area
 /// \param name Name of the LFTL area.
 /// \param area_content Members of the LFTL area.
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA(name, area_content, wear_leveling_factor) union {\
-  flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*WU_SIZE)*(wear_leveling_factor)];\
+  flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_WU_SIZE)*(wear_leveling_factor)];\
   struct {area_content} name##_data;\
   struct {area_content};\
   struct {area_content} _##name##_data;\

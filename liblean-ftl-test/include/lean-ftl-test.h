@@ -10,8 +10,8 @@ void throw_exception(uint32_t err_code);
 lftl_nvm_props_t nvm_props = {
     .base = &nvm,
     .size = sizeof(nvm),
-    .write_size = WU_SIZE,
-    .erase_size = FLASH_SW_PAGE_SIZE,
+    .write_size = LFTL_WU_SIZE,
+    .erase_size = LFTL_PAGE_SIZE,
   };
 
 lftl_ctx_t nvma = {

@@ -16,9 +16,9 @@ declaration of your LFTL areas.
 To use those helper macros, you must define 3 macros before including
 ``lean-ftl.h``:
 
-- LFTL_DEFINE_HELPERS: Indicates that you want to use the helper macros. Value does not matter
-- FLASH_SW_PAGE_SIZE: Defines the size for "flash software page". Value shall be the minimum erase size.
-- WU_SIZE: Defines the size for "write unit". Value shall be the minimum write size in the NVM.
+- LFTL_DEFINE_HELPERS: Indicates that you want to use the helper macros. Value does not matter.
+- LFTL_WU_SIZE: Defines the size for "write unit". Value shall be the minimum write size in the NVM or a multiple of it.
+- LFTL_PAGE_SIZE: Defines the size for "LFTL page". Value shall be the minimum erase size in the NVM or a multiple of it and LFTL_WU_SIZE.
 
 .. code-block:: c
   :linenos:
@@ -26,8 +26,8 @@ To use those helper macros, you must define 3 macros before including
   :name: Example: Enabling helper macros for STM32U5
 
   #define LFTL_DEFINE_HELPERS
-  #define FLASH_SW_PAGE_SIZE (8*1024)
-  #define WU_SIZE 16 
+  #define LFTL_PAGE_SIZE (8*1024)
+  #define LFTL_WU_SIZE 16 
   #include "lean-ftl.h"
 
 .. note:: This user guide assumes that you use the helper macros
@@ -57,13 +57,13 @@ the macro :c:macro:`LFTL_AREA`.
       uint64_t data3[4];
       ,2)
       
-  } __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) data_flash_t;
+  } __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
   data_flash_t nvm;
 
 .. note:: In the example above, ``data0`` is accessible via ``nvm.a.data0``.
 
 .. note:: Members declared inside an LFTL area can be of any type however 
-  they should be padded to occupy a multiple of the ``WU_SIZE``.
+  they should be padded to occupy a multiple of the ``LFTL_WU_SIZE``.
 
 Choosing the wear leveling factor
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

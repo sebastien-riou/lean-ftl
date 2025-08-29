@@ -85,8 +85,11 @@ void read_file(const char*name, void*const buf, size_t*size){
 static int com_port = 0; 
 static unsigned int button_sampling_cnt = 0;
 static bool test_mode = 0;
+
+
 extern data_flash_t nvm __attribute__ ((section (".data_flash")));
 const char*save_nvm_file_name = 0;
+
 
 uint32_t nvm_alignement;
 
@@ -103,29 +106,30 @@ uint32_t get_nvm_alignement(){
   return (uint32_t)alignement;
 }
 
+void init_nvm_alignement(){
+  nvm_alignement = get_nvm_alignement();
+}
+
+bool nvm_write64(uint64_t*nvm_addr, const uint64_t*const buf, uint32_t size){
+  memcpy(nvm_addr,buf,size);
+  if(save_nvm_file_name){
+    write_file(save_nvm_file_name,&nvm,sizeof(nvm));
+  }
+  return 0;
+}
+void nvm_read64(uint64_t*nvm_addr, uint64_t*buf, uint32_t size){
+  memcpy(buf,nvm_addr,size);
+}
+
+const void* nvm_base = &nvm;
+const uintptr_t nvm_size = sizeof(nvm);
 //Application level HAL
 void init(int argc, const char*argv[]){
-  nvm_alignement = get_nvm_alignement();
+  init_nvm_alignement();
   for(int i=1;i<argc;i++){
     const char*test_mode_str = "--test-mode";
-    const char*nvm_file_str = "--nvm-file=";
-    const char*save_nvm_file_str = "--save-nvm-file=";
     if(0==memcmp(argv[i],test_mode_str,strlen(test_mode_str)+1)){
       test_mode = 1;
-      continue;
-    }
-    if(0==memcmp(argv[i],nvm_file_str,strlen(nvm_file_str))){
-      const char*nvm_file_name = argv[i]+strlen(nvm_file_str);
-      size_t size = sizeof(nvm);
-      read_file(nvm_file_name,&nvm,&size);
-      if(size!=sizeof(nvm)) {
-        printf("ERROR incorrect nvm file size: %ld bytes,  %ld bytes are expected\n",size,sizeof(nvm));
-        abort();
-      }
-      continue;
-    }
-    if(0==memcmp(argv[i],save_nvm_file_str,strlen(save_nvm_file_str))){
-      save_nvm_file_name = argv[i]+strlen(save_nvm_file_str);
       continue;
     }
     printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
@@ -181,101 +185,4 @@ void delay_ms(unsigned int ms){
   do {
       res = nanosleep(&ts, &ts);
   } while (res && errno == EINTR);
-}
-bool nvm_write64(uint64_t*nvm_addr, const uint64_t*const buf, uint32_t size){
-  memcpy(nvm_addr,buf,size);
-  if(save_nvm_file_name){
-    write_file(save_nvm_file_name,&nvm,sizeof(nvm));
-  }
-  return 0;
-}
-void nvm_read64(uint64_t*nvm_addr, uint64_t*buf, uint32_t size){
-  memcpy(buf,nvm_addr,size);
-}
-
-
-const uint32_t nvm_write_size = 16;
-const uint32_t nvm_erase_size = 8*1024;
-
-uint64_t tearing_sim_cnt=0;
-uint64_t tearing_sim_target_cnt = -1;
-
-void tearing_sim_init(){
-  tearing_sim_cnt=0;
-  tearing_sim_target_cnt = -1;
-}
-
-uint32_t tearing_sim_get_max_target(){
-  return tearing_sim_cnt / nvm_write_size;
-}
-
-void tearing_sim_set_target(uint64_t target_write){
-  tearing_sim_cnt=0;
-  tearing_sim_target_cnt = target_write * nvm_write_size;
-}
-
-uint32_t tearing_size(uint32_t size){
-  if(tearing_sim_cnt + size > tearing_sim_target_cnt){
-    uint32_t out = tearing_sim_cnt + size - tearing_sim_target_cnt;
-    //reset counters
-    tearing_sim_cnt=0;
-    tearing_sim_target_cnt = -1;
-    return out;
-  }
-  tearing_sim_cnt += size;
-  return 0;
-}
-
-bool tearing_sim(void*base_address, uint32_t size){
-  const uint32_t tsize = tearing_size(size);
-  if(tsize){
-    //corrupt the last tsize bytes to simulate a tearing
-    //we prefer corrupting the data rather than exactly simulating 
-    //a tearing that would keep old data because in some case
-    //a tearing could go undetected (old data may match new data)
-    const uint32_t offset = size - tsize;
-    for(uint32_t i = offset;i<tsize;i++){
-      uint8_t*dst = (uint8_t*)base_address+i;
-      *dst ^= 0x55; 
-    }
-  } 
-  return tsize ? 1:0;
-}
-
-uint32_t get_alignement_requirement(uint32_t original_req){
-  if(original_req > nvm_alignement) return nvm_alignement;
-  return original_req;
-}
-
-uint8_t nvm_erase(void*base_address, unsigned int n_pages){
-  const uintptr_t size = n_pages * nvm_erase_size;
-  if(base_address < (void*)&nvm) return 1;
-  if(((uintptr_t)base_address + size) > ((uintptr_t)&nvm + sizeof(nvm))) return 2;
-  //Linux makes it hard to get nvm aligned to large units like 4k or 8k, so we check against the minimum between the original constraint and the alignement of nvm
-  if(0 != ((uintptr_t)base_address % get_alignement_requirement(nvm_erase_size))) return 3;
-  
-  memset(base_address, 0xFF, size);
-  bool tearing = tearing_sim(base_address,size);
-  if(save_nvm_file_name){
-    write_file(save_nvm_file_name,&nvm,sizeof(nvm));
-  }
-  return tearing ? SIMULATED_TEARING:0;
-}
-
-uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
-  if(dst_nvm_addr < (void*)&nvm) return 1;
-  if(((uintptr_t)dst_nvm_addr + size) > ((uintptr_t)&nvm + sizeof(nvm))) return 2;
-  if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
-  if(0 != (size % nvm_write_size)) return 4;
-  memcpy(dst_nvm_addr,src,size);
-  bool tearing = tearing_sim(dst_nvm_addr,size);
-  if(save_nvm_file_name){
-    write_file(save_nvm_file_name,&nvm,sizeof(nvm));
-  }
-  return tearing ? SIMULATED_TEARING:0;
-}
-
-uint8_t nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
-  memcpy(dst,src_nvm_addr,size);
-  return 0;
 }

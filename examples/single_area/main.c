@@ -43,8 +43,8 @@ uint64_t nvm_data_state __attribute__ ((section (".data_flash")));
 lftl_nvm_props_t nvm_props = {
     .base = &nvm,
     .size = sizeof(nvm),
-    .write_size = WU_SIZE,
-    .erase_size = FLASH_SW_PAGE_SIZE,
+    .write_size = LFTL_WU_SIZE,
+    .erase_size = LFTL_PAGE_SIZE,
   };
 lftl_ctx_t nvdata = {
   .nvm_props = &nvm_props,

@@ -100,7 +100,7 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
   //compute new state
   uintptr_t offset = (uintptr_t)base_address - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
-  uintptr_t size = n_pages*FLASH_SW_PAGE_SIZE;
+  uintptr_t size = n_pages*LFTL_PAGE_SIZE;
   memset(dst+offset,0xFF,size);
   //emulate call to nvm_erase rather than calling it, to make sure we do not trigger tearing here
   memset(base_address,0xFF,size);

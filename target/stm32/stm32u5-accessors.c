@@ -29,7 +29,8 @@
 
 #define NVM_SIZE_IN_PAGE(addr) ((uintptr_t)NVM_PAGE_BASE((uintptr_t)(addr)+FLASH_PAGE_SIZE) - (uintptr_t)(addr))
 
-#define FLASH_WRITE_SIZE 16
+#define LFTL_PAGE_SIZE (8*1024) //STM32U5
+#define LFTL_WU_SIZE 16
 
 #define WRITE_BIT(reg,bit,val) do{if(val) SET_BIT(reg,bit); else CLEAR_BIT(reg,bit);}while(0)
 
@@ -172,8 +173,8 @@ uint8_t __attribute__((weak)) nvm_write(void*dst_nvm_addr, const void*const src,
   if(0 == size) return 0;
   if((uintptr_t)dst_nvm_addr < FLASH_BASE_NS) return 1;
   if(((uintptr_t)dst_nvm_addr + size) > (FLASH_BASE_NS + FLASH_SIZE)) return 2;
-  if(0 != ((uintptr_t)dst_nvm_addr % FLASH_WRITE_SIZE)) return 3;
-  if(0 != (size % FLASH_WRITE_SIZE)) return 4;
+  if(0 != ((uintptr_t)dst_nvm_addr % LFTL_WU_SIZE)) return 3;
+  if(0 != (size % LFTL_WU_SIZE)) return 4;
   /* Disable interrupts to avoid any interruption */
   const bool interrupts_enabled = (__get_PRIMASK() == 0);
   __disable_irq();

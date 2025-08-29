@@ -3,11 +3,18 @@
 #include "util.h"
 
 #define LFTL_DEFINE_HELPERS
-#define FLASH_SW_PAGE_SIZE (8*1024) //STM32U5
-#define WU_SIZE 16
+#ifdef LFTL_STM32U5
+#define LFTL_PAGE_SIZE (8*1024) //STM32U5
+#define LFTL_WU_SIZE 16
+#endif
+#ifdef LFTL_STM32L5
+#define LFTL_PAGE_SIZE (2*1024) //STM32L5
+#define LFTL_WU_SIZE 8
+#endif
+
 #include "lean-ftl.h"
 
-#define DATA_SIZE (4*WU_SIZE)
+#define DATA_SIZE (4*LFTL_WU_SIZE)
 
 typedef struct data_flash_struct {
 
@@ -27,6 +34,6 @@ typedef struct data_flash_struct {
       uint64_t unmanaged_data1[SIZE64(DATA_SIZE)];
     };
   };
-} __attribute__ ((aligned (FLASH_SW_PAGE_SIZE))) data_flash_t;
+} __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
 
 #define SIMULATED_TEARING 0xFF

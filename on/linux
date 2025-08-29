@@ -12,3 +12,13 @@ set(target_include_sys_c_DIRS
 )
 
 set(CMAKE_AR_O_EXT                  "o")
+
+set(LFTL_ACCESSORS ${CMAKE_CURRENT_LIST_DIR}/../target/linux/linux-accessors.c)
+set(LFTL_ACCESSORS_INCLUDES )
+
+#match STM32U5
+add_definitions(-DLFTL_PAGE_SIZE=8*1024)
+add_definitions(-DLFTL_WU_SIZE=16)
+#match STM32L5
+#add_definitions(-DLFTL_PAGE_SIZE=2*1024)
+#add_definitions(-DLFTL_WU_SIZE=8)

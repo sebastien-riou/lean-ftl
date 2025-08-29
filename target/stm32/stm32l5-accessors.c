@@ -31,7 +31,9 @@
 
 #define FLASH_BANK_SIZE          (FLASH_SIZE >> 1)
 #define FLASH_PAGE_SIZE          0x00000800U
-#define FLASH_WRITE_SIZE 8
+
+#define LFTL_PAGE_SIZE (2*1024) //STM32L5
+#define LFTL_WU_SIZE 8
 
 //harmonize some reg names to use same as STM32U5
 #define FLASH_NSCR_BKER FLASH_NSCR_NSBKER
@@ -75,7 +77,7 @@ static void icache_enable(){
 static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_erase_page(uint64_t*page_addr){
   const uintptr_t bank_addr = (uintptr_t)NVM_BANK_BASE(page_addr);
   const uint32_t bank = (bank_addr - FLASH_BASE_NS)/FLASH_BANK_SIZE;
-  const uint32_t page = ((uintptr_t)page_addr - bank_addr)/FLASH_PAGE_SIZE;
+  const uint32_t page = ((uintptr_t)page_addr - bank_addr)/LFTL_PAGE_SIZE;
   
   //select the bank
   WRITE_BIT(FLASH_NS->NSCR, FLASH_NSCR_BKER,bank^bank_swapped());
@@ -106,7 +108,7 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write_unalig
   }
   //data cache does not need special care apparently (at least when configured by STMCube)
   WRITE_REG(FLASH_NS->NSCR, FLASH_NSCR_PG);
-  for(unsigned int i=0;i<n_words32;i+=4){
+  for(unsigned int i=0;i<n_words32;i+=2){
     uint32_t buf32[2];
     memcpy(buf32,buf,sizeof(buf32));
     buf+=sizeof(buf32);
@@ -134,7 +136,7 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write(uint64
     }
     //data cache does not need special care apparently (at least when configured by STMCube)
     WRITE_REG(FLASH_NS->NSCR, FLASH_NSCR_PG);
-    for(unsigned int i=0;i<n_words32;i+=4){
+    for(unsigned int i=0;i<n_words32;i+=2){
       dst32[i] = buf32[i];
       dst32[i+1] = buf32[i+1];
 
@@ -150,10 +152,10 @@ static void __attribute__ ((section (".flash_write_funcs"))) nvm_ll_write(uint64
 
 uint8_t __attribute__((weak)) nvm_erase(void*base_address, unsigned int n_pages){
   if(0 == n_pages) return 0;
-  const uintptr_t size = n_pages * FLASH_PAGE_SIZE;
+  const uintptr_t size = n_pages * LFTL_PAGE_SIZE;
   if((uintptr_t)base_address < FLASH_BASE_NS) return 1;
   if(((uintptr_t)base_address + size) > (FLASH_BASE_NS + FLASH_SIZE)) return 2;
-  if(0 != ((uintptr_t)base_address % FLASH_PAGE_SIZE)) return 3;
+  if(0 != ((uintptr_t)base_address % LFTL_PAGE_SIZE)) return 3;
   /* Disable interrupts to avoid any interruption */
   const bool interrupts_enabled = (__get_PRIMASK() == 0);
   __disable_irq();
@@ -164,7 +166,7 @@ uint8_t __attribute__((weak)) nvm_erase(void*base_address, unsigned int n_pages)
   uint64_t*dst64 = (uint64_t*)base_address;
   for(unsigned int i=0;i<n_pages;i++){
     nvm_ll_erase_page(dst64);
-    dst64 += SIZE64(FLASH_PAGE_SIZE);
+    dst64 += SIZE64(LFTL_PAGE_SIZE);
   }
 
   //lock flash write
@@ -180,8 +182,8 @@ uint8_t __attribute__((weak)) nvm_write(void*dst_nvm_addr, const void*const src,
   if(0 == size) return 0;
   if((uintptr_t)dst_nvm_addr < FLASH_BASE_NS) return 1;
   if(((uintptr_t)dst_nvm_addr + size) > (FLASH_BASE_NS + FLASH_SIZE)) return 2;
-  if(0 != ((uintptr_t)dst_nvm_addr % FLASH_WRITE_SIZE)) return 3;
-  if(0 != (size % FLASH_WRITE_SIZE)) return 4;
+  if(0 != ((uintptr_t)dst_nvm_addr % LFTL_WU_SIZE)) return 3;
+  if(0 != (size % LFTL_WU_SIZE)) return 4;
   /* Disable interrupts to avoid any interruption */
   const bool interrupts_enabled = (__get_PRIMASK() == 0);
   __disable_irq();

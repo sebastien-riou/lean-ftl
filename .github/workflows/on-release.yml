@@ -25,6 +25,7 @@ jobs:
           PATH=`pwd`/xpacks/.bin:$PATH
           ./build_release debug
           ./build_release minSizeRel
+          cp -R liblean-ftl-test dist
           tar czf lean-ftl-${{github.ref_name}}.tar.gz dist
       - name: Release
         uses: softprops/action-gh-release@v2

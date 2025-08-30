@@ -14,11 +14,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install 7z
-      shell: bash
-      run: |
-        sudo apt update
-        sudo apt -yq install p7zip-full
     #workaround for package.json: it gets modified during "xpm install" somehow, so we backup it and restore it before launching the build
     - name: Install xpm
       run: |

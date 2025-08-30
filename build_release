@@ -18,6 +18,7 @@ PRESET=${1:-minSizeRel}
 ./buildit on/cortex-m52 $PRESET
 ./buildit on/cortex-m55 $PRESET
 ./buildit on/cortex-m85 $PRESET
+./buildit on/rv32imc $PRESET
 #targeted builds for few specific MCUs
 ./buildit on/stm32u5 $PRESET
 ./buildit on/stm32l5 $PRESET

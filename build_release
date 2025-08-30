@@ -34,8 +34,9 @@ git diff package.json
 sha256sum package.json
 git describe --tags --always --dirty --match "v*" > $OUT/version.txt
 cd dist/$PRESET
-7z a liblean-ftl-$PRESET.7z liblean-ftl
-sha512sum liblean-ftl-$PRESET.7z > liblean-ftl-$PRESET.7z.sha512sum
+OUT_FILE=liblean-ftl-$PRESET.tar.gz
+tar czf $OUT_FILE liblean-ftl
+sha256sum $OUT_FILE > $OUT_FILE.sha256sum
 cd ../..
 rm -rf $OUT
 mv dist/$PRESET/* dist

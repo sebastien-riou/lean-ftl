@@ -28,10 +28,9 @@ jobs:
         shell: bash
         run: |
           PATH=`pwd`/xpacks/.bin:$PATH
-          #./buildit on/cortex-m0 debug
           ./build_release debug
           ./build_release minSizeRel
-          7z a lean-ftl-${{github.ref_name}}.7z dist
+          tar czf lean-ftl-${{github.ref_name}}.tar.gz dist
       - name: Release
         uses: softprops/action-gh-release@v2
         with:

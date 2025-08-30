@@ -148,7 +148,7 @@ uint8_t __attribute__((weak)) nvm_erase(void*base_address, unsigned int n_pages)
   if(((uintptr_t)base_address + size) > (FLASH_BASE_NS + FLASH_SIZE)) return 2;
   if(0 != ((uintptr_t)base_address % FLASH_PAGE_SIZE)) return 3;
   /* Disable interrupts to avoid any interruption */
-  const bool interrupts_enabled = (__get_PRIMASK() == 0);
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   //unlock flash write
   WRITE_REG(FLASH->NSKEYR, FLASH_KEY1);
@@ -163,9 +163,8 @@ uint8_t __attribute__((weak)) nvm_erase(void*base_address, unsigned int n_pages)
   //lock flash write
   SET_BIT(FLASH->NSCR, FLASH_NSCR_LOCK);
   // Restore backed-up-state
-  if (interrupts_enabled) {
-      __enable_irq();
-  }
+  __set_PRIMASK(primask);
+  
   return 0;
 }
 
@@ -176,7 +175,7 @@ uint8_t __attribute__((weak)) nvm_write(void*dst_nvm_addr, const void*const src,
   if(0 != ((uintptr_t)dst_nvm_addr % LFTL_WU_SIZE)) return 3;
   if(0 != (size % LFTL_WU_SIZE)) return 4;
   /* Disable interrupts to avoid any interruption */
-  const bool interrupts_enabled = (__get_PRIMASK() == 0);
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   //unlock flash write
   WRITE_REG(FLASH->NSKEYR, FLASH_KEY1);
@@ -192,9 +191,7 @@ uint8_t __attribute__((weak)) nvm_write(void*dst_nvm_addr, const void*const src,
   uint8_t fail = 0;
   fail = memcmp(dst_nvm_addr,src,size) ? 5 : 0;
   // Restore backed-up-state
-  if (interrupts_enabled) {
-      __enable_irq();
-  }
+  __set_PRIMASK(primask);
 
   return fail;
 }

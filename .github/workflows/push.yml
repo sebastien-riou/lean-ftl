@@ -21,6 +21,7 @@ jobs:
         cp package.json package.bu
         npm install --no-save --global xpm@latest
         xpm install --no-save  @xpack-dev-tools/arm-none-eabi-gcc@latest
+        xpm install --no-save  @xpack-dev-tools/riscv-none-elf-gcc@latest
         xpm install --no-save  @xpack-dev-tools/cmake@latest
         sha256sum package.json
     - name: Satisfy project dependencies

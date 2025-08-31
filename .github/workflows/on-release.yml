@@ -16,6 +16,7 @@ jobs:
         run: |
           npm install --global xpm@latest
           xpm install @xpack-dev-tools/arm-none-eabi-gcc@latest
+          xpm install --no-save  @xpack-dev-tools/riscv-none-elf-gcc@latest
           xpm install @xpack-dev-tools/cmake@latest
       - name: Satisfy project dependencies
         run: xpm install

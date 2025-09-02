@@ -4,12 +4,16 @@
 
 #define LFTL_DEFINE_HELPERS
 #ifdef LFTL_STM32U5
-#define LFTL_PAGE_SIZE (8*1024) //STM32U5
+#define LFTL_PAGE_SIZE (8*1024)
 #define LFTL_WU_SIZE 16
 #endif
 #ifdef LFTL_STM32L5
-#define LFTL_PAGE_SIZE (2*1024) //STM32L5
+#define LFTL_PAGE_SIZE (2*1024)
 #define LFTL_WU_SIZE 8
+#endif
+#ifdef LFTL_CH32V307
+#define LFTL_PAGE_SIZE (4*1024)
+#define LFTL_WU_SIZE 2
 #endif
 
 #include "lean-ftl.h"

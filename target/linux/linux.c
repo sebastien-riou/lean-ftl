@@ -121,8 +121,24 @@ void nvm_read64(uint64_t*nvm_addr, uint64_t*buf, uint32_t size){
   memcpy(buf,nvm_addr,size);
 }
 
+
+void dump_core(uintptr_t addr, uintptr_t size, uintptr_t display_addr){
+  PRINTF("@0x%08lx, %lu bytes:\n\r",display_addr, size);
+  uint8_t*r = (uint8_t*)addr;
+  while(size){
+    PRINTF("%02x ",*r++);
+    size--;
+  }
+  PRINTF("\n\r");
+}
+
+void dump(uintptr_t addr, uintptr_t size){
+  dump_core(addr,size,addr);
+}
+
 const void* nvm_base = &nvm;
 const uintptr_t nvm_size = sizeof(nvm);
+bool trace_accessors=0;
 //Application level HAL
 void init(int argc, const char*argv[]){
   init_nvm_alignement();
@@ -130,6 +146,11 @@ void init(int argc, const char*argv[]){
     const char*test_mode_str = "--test-mode";
     if(0==memcmp(argv[i],test_mode_str,strlen(test_mode_str)+1)){
       test_mode = 1;
+      continue;
+    }
+    const char*trace_str = "--trace";
+    if(0==memcmp(argv[i],trace_str,strlen(trace_str)+1)){
+      trace_accessors = 1;
       continue;
     }
     printf("ERROR unsupported command line argument: '%s'\n",argv[i]);

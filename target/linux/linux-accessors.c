@@ -71,14 +71,19 @@ extern const void* nvm_base;
 extern uintptr_t nvm_size;
 extern uint32_t nvm_alignement;
 extern const char*save_nvm_file_name;
+extern bool trace_accessors;
 
 uint32_t get_alignement_requirement(uint32_t original_req){
   if(original_req > nvm_alignement) return nvm_alignement;
   return original_req;
 }
+void dump_core(uintptr_t addr, uintptr_t size, uintptr_t display_addr);
 
 uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   const uintptr_t size = n_pages * nvm_erase_size;
+  if(trace_accessors){
+    printf("nvm_erase @0x%08lx, %lu bytes\n\r",(uintptr_t)base_address,size);
+  }
   if(base_address < nvm_base) return 1;
   if(((uintptr_t)base_address + size) > ((uintptr_t)nvm_base + nvm_size)) return 2;
   //Linux makes it hard to get nvm aligned to large units like 4k or 8k, so we check against the minimum between the original constraint and the alignement of nvm
@@ -93,6 +98,10 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages){
 }
 
 uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  if(trace_accessors){
+    printf("nvm_write ");
+    dump_core((uintptr_t)src,size,(uintptr_t)dst_nvm_addr);
+  }
   if(dst_nvm_addr < nvm_base) return 1;
   if(((uintptr_t)dst_nvm_addr + size) > ((uintptr_t)nvm_base + nvm_size)) return 2;
   if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
@@ -107,5 +116,9 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
 
 uint8_t nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
   memcpy(dst,src_nvm_addr,size);
+  if(trace_accessors){
+    printf("nvm_read ");
+    dump_core((uintptr_t)dst,size,(uintptr_t)src_nvm_addr);
+  }
   return 0;
 }

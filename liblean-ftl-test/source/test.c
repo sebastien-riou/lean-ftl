@@ -176,11 +176,11 @@ bool nvm_is_equal(data_flash_t*expected){
 void check_nvm(){
   if(nvm_is_equal(&nvm_ref)) return;
   if(nvm_is_equal(&nvm_ref_previous_state)) return;
-  printf("NVM corrupted\n");
+  PRINTF("NVM corrupted\n");
   abort();
 }
 void tearing_sim_check_nvm(){
-  //printf("Simulated tearing\n");//too verbose
+  //PRINTF("Simulated tearing\n");//too verbose
   //simulate a reboot
   nvma.data = LFTL_INVALID_POINTER;
   nvma.transaction_tracker = LFTL_INVALID_POINTER;
@@ -201,12 +201,12 @@ void print_progress_bar(size_t val, size_t total) {
   unsigned int p = (unsigned int)(pf*100);
   unsigned int lpad = (unsigned int) (pf * PBWIDTH);
   unsigned int rpad = PBWIDTH - lpad;
-  printf("\r%3d%% [%.*s%*s]", p, lpad, PBSTR, rpad, "");
+  PRINTF("\r%3d%% [%.*s%*s]", p, lpad, PBSTR, rpad, "");
   fflush(stdout);
 }
 void print_progress_bar_done(){
   print_progress_bar(1,1);
-  printf("\n");
+  PRINTF("\n");
   fflush(stdout);
 }
 
@@ -475,7 +475,7 @@ void exception_handler(uint32_t err_code){
     format_func(&nvmb);
   } else {
     //a real error, that's unexpected
-    printf("ERROR: test failed with error code 0x%08x\n",err_code);
+    PRINTF("ERROR: test failed with error code 0x%08x\n",err_code);
     ui_wait_button();
   }
   #else
@@ -508,12 +508,12 @@ void test_and_simulate_tearing(void (*dut)()){
   #ifdef HAS_TEARING_SIMULATION
     tearing_sim_check_nvm();//sanity check that model is in sync
     const unsigned int target_max = tearing_sim_get_max_target();
-    printf("%u targets for tearing simulation\n",target_max);
+    PRINTF("%u targets for tearing simulation\n",target_max);
     led1(1);
     format_func(&nvma);
     format_func(&nvmb);
     for(volatile unsigned int i=0;i<target_max+1;i++){//volatile to remove warning about setjump.
-      //if(0 == (i%1000)) printf("tearing simulation target %u\n",i);
+      //if(0 == (i%1000)) PRINTF("tearing simulation target %u\n",i);
       if(0 == (i%50)) print_progress_bar(i,target_max);
       tearing_sim_set_target(i);
       if(0 == (err_code = setjmp(exception_ctx))){
@@ -529,7 +529,7 @@ void test_and_simulate_tearing(void (*dut)()){
   test_cnt++;
   if(0==err_code){
     #ifdef HAS_TEARING_SIMULATION
-      printf("Test %d PASS\n",test_cnt);
+      PRINTF("Test %d PASS\n",test_cnt);
     #else
       
     #endif
@@ -575,9 +575,6 @@ int test_main(){
     transaction_write_any_func = tearing_sim_lftl_transaction_write_any;
     transaction_commit_func = tearing_sim_lftl_transaction_commit;
     transaction_abort_func = tearing_sim_lftl_transaction_abort;
-    printf("version: %s\n",lftl_version());
-    printf("version timestamp: %lu\n",lftl_version_timestamp());
-    printf("build type: %s\n",lftl_build_type());
   #else
     format_func = lftl_format;
     raw_nvm_write_func = nvm_write;
@@ -590,6 +587,10 @@ int test_main(){
     transaction_commit_func = lftl_transaction_commit;
     transaction_abort_func = lftl_transaction_abort;
   #endif
+  PRINTF("version: %s\n",lftl_version());
+  PRINTF("version timestamp: %lu\n",lftl_version_timestamp());
+  PRINTF("build type: %s\n",lftl_build_type());
+
   led1(1);
   test_and_simulate_tearing(basic_test);
   test_and_simulate_tearing(write_size_test);
@@ -599,7 +600,7 @@ int test_main(){
   test_and_simulate_tearing(erase_all_test);
   write_nvm_to_nvm_seq();
   transaction_nvm_to_nvm_seq();
-  #ifdef HAS_TEARING_SIMULATION
+  #ifdef HAS_PRINTF
     printf("All tests PASSED\n");
   #else
     while(1){ui_led1_blink_ms(1000,DUTY_CYCLE_75);}
@@ -607,4 +608,79 @@ int test_main(){
   return 0;
 }
 
+
+static uint32_t xs_prng_seed;
+static void xs_prng_set_seed(uint32_t seed){
+	if(0==seed) seed = 0xFFFFFFFF;
+	xs_prng_seed = seed;
+}
+
+static uint32_t xs_prng_get(){
+	// Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
+	uint32_t x = xs_prng_seed;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	return xs_prng_seed = x;
+}
+
+static void xs_prng_fill(void*dst, uintptr_t size){
+  uint8_t*dst8 = (uint8_t*)dst;
+  uint32_t buf;
+  uint8_t*buf8 = (uint8_t*)&buf;
+  for(unsigned int i=0;i<size;i++){
+    if(0 == i%4){
+      buf = xs_prng_get();
+    }
+    dst8[i] = buf8[i%4];
+  }
+}
+
+void dump(uintptr_t addr, uintptr_t size);
+
+void __attribute__((weak)) dump(uintptr_t addr, uintptr_t size){
+  //dummy implementation
+}
+
+void test_callbacks(){
+  nvm_erase(&nvm,sizeof(nvm)/LFTL_PAGE_SIZE);
+  PRINTF("Erased state:\r\n");
+  dump((uintptr_t)&nvm,sizeof(nvm));
+  uint8_t buf[64];
+  const unsigned int nloops = sizeof(nvm) / sizeof(buf);
+  xs_prng_set_seed(0);
+  uint8_t*addr = (uint8_t*)&nvm;
+  for(unsigned int i=0;i<nloops;i++){
+    xs_prng_fill(buf,sizeof(buf));
+    nvm_write(addr,buf,sizeof(buf));
+    uint8_t buf2[64];
+    nvm_read(buf2,addr,sizeof(buf));
+    if(memcmp(buf,buf2,sizeof(buf))){
+      PRINTF("ERROR during writing loop %u\r\n",i);
+      dump((uintptr_t)buf,sizeof(buf));
+      dump((uintptr_t)buf2,sizeof(buf2));
+      while(1);
+    }else{
+      PRINTF("Writing loop %u PASS\r\n",i);
+    }
+    addr+=sizeof(buf);
+  }
+  xs_prng_set_seed(0);
+  addr = (uint8_t*)&nvm;
+  for(unsigned int i=0;i<nloops;i++){
+    xs_prng_fill(buf,sizeof(buf));
+    uint8_t buf2[64];
+    nvm_read(buf2,addr,sizeof(buf));
+    if(memcmp(buf,buf2,sizeof(buf))){
+      PRINTF("ERROR during reading loop %u\r\n",i);
+      dump((uintptr_t)buf,sizeof(buf));
+      dump((uintptr_t)buf2,sizeof(buf2));
+      while(1);
+    }else{
+      PRINTF("Reading loop %u PASS\r\n",i);
+    }
+    addr+=sizeof(buf);
+  }
+  PRINTF("Callbacks test PASS\r\n");
+}
 

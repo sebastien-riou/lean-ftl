@@ -1,5 +1,21 @@
 # lean-ftl
-minimal flash translation layer meant for embedded systems (wear leveling+anti tearing)
+Minimal flash translation layer meant for embedded systems (wear leveling + anti tearing).
+
+Main features:
+- Anti-tearing is exhautively tested via a dedicated emulator
+- Avoid fragmentation
+- Support transactions
+- Easily portable to new MCUs / new flash chips
+
+The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions:
+- nvm_erase
+- nvm_write
+- nvm_read
+
+This repository provides accessors for the following targets:
+- STM32U5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32u5/))
+- STM32L5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32l5/))
+- Native execution on Linux (for test and development purposes)
 
 ## Concept
 
@@ -34,14 +50,14 @@ NOTES:
 ## Developper info
 
 ### Local build
-You need CMake and arm-none-eabi toolchain in your path.
+You need CMake and arm-none-eabi or riscv-none-elf toolchain in your path.
 
 ```
 ./buildit on/linux debug
 ```
 
 Notes: 
-- replace `linux.cmake` by any other top level `.cmake` file to target another platform.
+- replace `linux` by any other file in the `on` folder to target another platform.
 - replace `debug` by `minSizeRel` to build with size optimizations.
 
 ### Local test
@@ -49,7 +65,7 @@ Notes:
 ./testit on/linux debug
 ```
 
-Note: this does not work with embedded targets.
+Note: this does not work with embedded targets (each is tested via a dedicated repository).
 
 ### Make a new release
 Release are created for each tag formatted as `v*.*.*`

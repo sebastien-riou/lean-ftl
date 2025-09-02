@@ -44,6 +44,10 @@ static uint32_t crc32c(uint32_t crc, const void*const buf, unsigned int len) {
   return crc;
 }
 
+static uintptr_t max_uintptr(uintptr_t a,uintptr_t b){
+  return a > b ? a : b;
+}
+
 static bool is_in_range(const void*const addr, const void*const base, uintptr_t size){
   if(addr < base) return false;
   if((uintptr_t)addr > ((uintptr_t)base+size)) return false;
@@ -91,7 +95,8 @@ typedef struct lftl_meta_struct {
 typedef uint32_t meta_items_worst_case_t[LFTL_META_N_ITEMS*4];//enough to support NVM with write size of 128 bits
 
 static uintptr_t meta_phy_size(lftl_ctx_t*ctx){
-  return LFTL_META_N_ITEMS * ctx->nvm_props->write_size;
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  return LFTL_META_N_ITEMS * item_size;
 }
 
 static uintptr_t n_pages_in_slot(lftl_ctx_t*ctx){
@@ -119,12 +124,13 @@ static uintptr_t meta_offset(lftl_ctx_t*ctx){
 
 static void get_slot_meta(lftl_ctx_t*ctx, lftl_meta_t* dst, unsigned int slot_index){
   const uint32_t write_size = ctx->nvm_props->write_size;
-  const uintptr_t meta_size = LFTL_META_N_ITEMS * write_size;
+  const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
+  const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
   uint32_t*phy_meta = (uint32_t*)(slot_base(ctx, slot_index) + meta_offset(ctx));
   meta_items_worst_case_t buf;
   nvm_read(ctx,buf,phy_meta,meta_size);
   for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
-    dst->items[i] = buf[i*write_size/sizeof(uint32_t)];
+    dst->items[i] = buf[i*item_size/sizeof(uint32_t)];
   }
 }
 
@@ -153,20 +159,21 @@ static bool slot_integrity_check_ok(lftl_ctx_t*ctx, unsigned int slot_index){
 
 static void write_meta_core(lftl_ctx_t*ctx, unsigned int slot_index, lftl_meta_t*meta){
   const uint32_t write_size = ctx->nvm_props->write_size;
-  const uintptr_t meta_size = LFTL_META_N_ITEMS * write_size;
+  const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
+  const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
   uint8_t*const base = slot_base(ctx, slot_index);
   lftl_meta_t*meta_phy_addr = (lftl_meta_t*)(base + meta_offset(ctx));
   meta_items_worst_case_t buf = {0};
   for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
-    buf[i*write_size/sizeof(uint32_t)] = meta->items[i];
+    buf[i*item_size/sizeof(uint32_t)] = meta->items[i];
   }
   //write everything but checksum2
-  nvm_write(ctx,meta_phy_addr,buf,meta_size - write_size);
+  nvm_write(ctx,meta_phy_addr,buf,meta_size - item_size);
   //write checksum2
-  const uintptr_t checksum2_offset = meta_size - write_size;
+  const uintptr_t checksum2_offset = meta_size - item_size;
   uint32_t*const checksum2_phy_addr = (uint32_t*)(base + meta_offset(ctx) + checksum2_offset);
   uint8_t*const checksum2_src = (uint8_t*)buf + checksum2_offset;
-  nvm_write(ctx,checksum2_phy_addr,checksum2_src,write_size);
+  nvm_write(ctx,checksum2_phy_addr,checksum2_src,item_size);
 }
 
 static void write_meta(lftl_ctx_t*ctx, unsigned int slot_index, uint32_t version){

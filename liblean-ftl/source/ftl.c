@@ -219,7 +219,7 @@ static void find_current_slot(lftl_ctx_t*ctx){
   }
 }
 
-static bool is_in_data(lftl_ctx_t*ctx, const void*const nvm_addr){
+static bool is_in_data(lftl_ctx_t*ctx, const void*const nvm_addr){//nvm_addr is a logical address, so always between ctx->area and ctx->area+data_size
   return is_in_range(nvm_addr, ctx->area, ctx->data_size);
 }
 

@@ -263,6 +263,8 @@ lftl_ctx_t*lftl_get_ctx(const void*const addr);
 ///
 /// Note that the erasure is 'logical'. At physical level, 
 /// previous version of the data may still remain.
+/// See ::lftl_format for erasing all data at physical level.
+///
 /// \param ctx Context of the target LFTL area
 ///
 ////////////////////////////////////////////////////////////

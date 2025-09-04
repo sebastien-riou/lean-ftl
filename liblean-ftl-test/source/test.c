@@ -19,9 +19,12 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages);
 uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size);
 uint8_t nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size);
 
+//dummy implementations
+void __attribute__((weak)) dump_core(uintptr_t addr, uintptr_t size, uintptr_t display_addr){}
+void __attribute__((weak)) dump(uintptr_t addr, uintptr_t size){}
 
 //Application
-
+#include <stdio.h>
 static jmp_buf exception_ctx;
 void throw_exception(uint32_t err_code){
   longjmp(exception_ctx,err_code);
@@ -52,6 +55,36 @@ static void stateful_prng_fill(void*buf, uint32_t size){
   static uint8_t rng_state = 0;
   prng_fill(&rng_state,buf,size);
 }
+
+//a better PRNG (but still very bad for anything else than testing/debugging)
+static uint32_t xs_prng_seed;
+static void xs_prng_set_seed(uint32_t seed){
+	if(0==seed) seed = 0xFFFFFFFF;
+	xs_prng_seed = seed;
+}
+
+static uint32_t xs_prng_get(){
+	// Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
+	uint32_t x = xs_prng_seed;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	return xs_prng_seed = x;
+}
+
+static void xs_prng_fill(void*dst, uintptr_t size){
+  uint8_t*dst8 = (uint8_t*)dst;
+  uint32_t buf;
+  uint8_t*buf8 = (uint8_t*)&buf;
+  for(unsigned int i=0;i<size;i++){
+    if(0 == i%4){
+      buf = xs_prng_get();
+    }
+    dst8[i] = buf8[i%4];
+  }
+}
+
+
 
 typedef void (*write_func_t)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
 
@@ -221,6 +254,10 @@ void read_and_check(lftl_ctx_t*ctx,void*nvm_addr, const void*const expected, uin
   const uint8_t*const expected8 = (const uint8_t*const)expected;
   for(unsigned int i=0;i<size;i++){
     if(rbuf[i]!=expected8[i]){
+      PRINTF("READ VALUE:\n\r");
+      dump_core((uintptr_t)rbuf,size,(uintptr_t)nvm_addr);
+      PRINTF("EXPECTED:\n\r");
+      dump((uintptr_t)expected,size);
       throw_exception(ERROR_VERIFICATION_FAIL);
     }
   }
@@ -232,6 +269,10 @@ void read_newer_and_check(lftl_ctx_t*ctx,void*nvm_addr, const void*const expecte
   const uint8_t*const expected8 = (const uint8_t*const)expected;
   for(unsigned int i=0;i<size;i++){
     if(rbuf[i]!=expected8[i]){
+      PRINTF("READ VALUE (newer):\n\r");
+      dump_core((uintptr_t)rbuf,size,(uintptr_t)nvm_addr);
+      PRINTF("EXPECTED:\n\r");
+      dump((uintptr_t)expected,size);
       throw_exception(ERROR_VERIFICATION_FAIL);
     }
   }
@@ -267,6 +308,7 @@ void randomized_test_write(lftl_ctx_t*ctx,void*dst_nvm_addr, uintptr_t size){
 }
 
 void basic_test(){
+  PRINTLN("basic_test");
   randomized_test_write(&nvma,nvm.data0,sizeof(lftl_wu_t));
   randomized_test_write(&nvma,nvm.data0,sizeof(nvm.data0));
   randomized_test_write(&nvma,nvm.data1,sizeof(nvm.data1));
@@ -276,18 +318,31 @@ void basic_test(){
   randomized_test_write(&nvmb,&nvm.b_data,sizeof(nvm.b_data));
 }
 
+void erase_all_test_core(lftl_ctx_t*ctx){
+  erase_all_func(ctx);
+  const uintptr_t size = SIZE64(ctx->data_size);
+  uint8_t*addr = (uint8_t*)ctx->area;
+  //PRINTLN("ctx->data = %p, addr = %p",ctx->data,addr);
+  uint64_t buf[SIZE64(size)];
+  xs_prng_fill(buf,size);
+  //PRINTLN("ctx->data = %p, addr = %p",ctx->data,addr);
+  write_func(ctx,addr,buf,size);
+  read_and_check(ctx,addr,buf,size);
+}
+
 void erase_all_test(){
-  erase_all_func(&nvma);
-  const uint32_t nwords = SIZE64(nvma.data_size);
-  uint8_t*addr = (uint8_t*)nvma.area;
-  for(unsigned int i=0;i < nwords;i++){
-    uint64_t word = -1;
-    read_and_check(&nvma,addr,&word,sizeof(word));
-    addr += sizeof(word);
+  PRINTLN("erase_all_test");
+  //test erase indirectly because some flash does not read as 0xFF
+  //instead we merely check that we can write properly after calling erase_all
+  //we do it several times to ensure we covered the whole area physically
+  const unsigned int nloops = LFTL_DIV_CEIL(sizeof(nvm.a_pages),LFTL_PAGE_SIZE); 
+  for(unsigned int i=0;i<nloops;i++){
+    erase_all_test_core(&nvma);
   }
 }
 
 void write_size_test(){
+  PRINTLN("write_size_test");
   const unsigned int write_size = nvmb.nvm_props->write_size;
   //start at 0, end at various offsets
   for(unsigned int i = write_size; i < sizeof(nvm.b_data); i+=write_size){
@@ -301,6 +356,7 @@ void write_size_test(){
 }
 
 void write_offset_test(){
+  PRINTLN("write_offset_test");
   const unsigned int write_size = nvmb.nvm_props->write_size;
   //start at various offset
   uint8_t*base = (uint8_t*)&nvm.b_data;
@@ -313,6 +369,7 @@ void write_offset_test(){
 #define MAX_NVM_TO_NVM_TEST_SIZE_IN_WU 2
 #define MAX_DST_OFFSET_IN_WU 2
 void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsigned int test_storage_size){
+  PRINTLN("write_nvm_to_nvm_test_core(%u,%p,%u) entry",dst_offset,test_storage,test_storage_size);
   uint8_t*dst;
   if(dst_offset>=MAX_DST_OFFSET_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
@@ -344,6 +401,7 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
     SANITY_CHECK();
   }
   //try dst and src in same LFTL area
+  PRINTLN("\ttry dst and src in same LFTL area");
   test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,src,test_storage_size,test_storage);
   SANITY_CHECK();
   //try dst and src in other LFTL area
@@ -358,23 +416,27 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   SANITY_CHECK();
   
   //now try the 'mirror' cases
+  PRINTLN("\tnow try the 'mirror' cases");
   dst_offset = 2*DATA_SIZE - test_storage_size;
-
   //try src in NVM outside of LFTL areas
   dst = ((uint8_t*)base_b) + dst_offset;
   src = dst;
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
   SANITY_CHECK();
   //try dst and src in same LFTL area
+  PRINTLN("\ttry dst and src in same LFTL area");
   test_write2(&nvmb,base_b,src,test_storage_size,test_storage);
   SANITY_CHECK();
   //try dst and src in other LFTL area
+  PRINTLN("\ttry dst and src in other LFTL area");
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
   SANITY_CHECK();
   //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
+  PRINTLN("\twrite the other LFTL area to move the physical address of the valid data");
   test_write(&nvmb,base_b,test_storage,test_storage_size);
   SANITY_CHECK();
   //retry dst and src in other LFTL area
+  PRINTLN("\tretry dst and src in other LFTL area");
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
   SANITY_CHECK();
 }
@@ -402,6 +464,7 @@ void write_nvm_to_nvm_vs_size(unsigned int size){
 
 
 void transaction_basic_test(){
+  PRINTLN("transaction_basic_test");
   uint8_t rng_state = 0;
   for(unsigned int i=0;i<2;i++){
     const size_t size = sizeof(nvm.a_data);
@@ -436,6 +499,7 @@ void transaction_basic_test(){
 }
 
 void transaction_abort_test(){
+  PRINTLN("transaction_abort_test");
   const size_t size = sizeof(nvm.a_data);
   //initialize the whole data to 0
   uint8_t wbuf0[size];
@@ -479,7 +543,12 @@ void exception_handler(uint32_t err_code){
     ui_wait_button();
   }
   #else
-  ui_wait_button();
+    #ifdef HAS_PRINTF
+      PRINTF("EXCEPTION: 0x%08x\n\r",err_code);
+      while(1);
+    #else
+      ui_wait_button();
+    #endif
   #endif
 }
 
@@ -528,11 +597,7 @@ void test_and_simulate_tearing(void (*dut)()){
   #endif
   test_cnt++;
   if(0==err_code){
-    #ifdef HAS_TEARING_SIMULATION
-      PRINTF("Test %d PASS\n",test_cnt);
-    #else
-      
-    #endif
+    PRINTLN("Test %d PASS",test_cnt);
   }else{
     #ifdef HAS_TEARING_SIMULATION
       exit(err_code);
@@ -543,19 +608,20 @@ void test_and_simulate_tearing(void (*dut)()){
   }
 }
 
-
-void write_nvm_to_nvm_vs_size_1()   {write_nvm_to_nvm_vs_size(1);}                    // smaller than WU
-void write_nvm_to_nvm_vs_size_1wu() {write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));}    // single WU
-void write_nvm_to_nvm_vs_size_2wu() {write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2);}  // multiple WU
-void write_nvm_to_nvm_vs_size_1wu1(){write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1);}  // larger than WU size but not multiple of it
+void write_nvm_to_nvm_vs_size_1()   {PRINTLN("write_nvm_to_nvm_vs_size_1");write_nvm_to_nvm_vs_size(1);}                    // smaller than WU
+void write_nvm_to_nvm_vs_size_1wu() {PRINTLN("write_nvm_to_nvm_vs_size_1wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));}    // single WU
+void write_nvm_to_nvm_vs_size_2wu() {PRINTLN("write_nvm_to_nvm_vs_size_2wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2);}  // multiple WU
+void write_nvm_to_nvm_vs_size_1wu1(){PRINTLN("write_nvm_to_nvm_vs_size_1wu1");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1);}  // larger than WU size but not multiple of it
 
 void write_nvm_to_nvm_seq(){
+  PRINTLN("write_nvm_to_nvm_seq");
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1)   ;
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu) ;
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_2wu) ;
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu1);
 }
 void transaction_nvm_to_nvm_seq(){
+  PRINTLN("transaction_nvm_to_nvm_seq");
   write_func_t org_write_func = write_func;
   write_func = write_func_using_transaction;
   write_nvm_to_nvm_seq();
@@ -587,9 +653,9 @@ int test_main(){
     transaction_commit_func = lftl_transaction_commit;
     transaction_abort_func = lftl_transaction_abort;
   #endif
-  PRINTF("version: %s\n",lftl_version());
-  PRINTF("version timestamp: %lu\n",lftl_version_timestamp());
-  PRINTF("build type: %s\n",lftl_build_type());
+  PRINTLN("version: %s",lftl_version());
+  PRINTLN("version timestamp: %lu",lftl_version_timestamp());
+  PRINTLN("build type: %s",lftl_build_type());
 
   led1(1);
   test_and_simulate_tearing(basic_test);
@@ -601,86 +667,79 @@ int test_main(){
   write_nvm_to_nvm_seq();
   transaction_nvm_to_nvm_seq();
   #ifdef HAS_PRINTF
-    printf("All tests PASSED\n");
+    PRINTLN("All tests PASSED");
   #else
     while(1){ui_led1_blink_ms(1000,DUTY_CYCLE_75);}
   #endif
   return 0;
 }
 
-
-static uint32_t xs_prng_seed;
-static void xs_prng_set_seed(uint32_t seed){
-	if(0==seed) seed = 0xFFFFFFFF;
-	xs_prng_seed = seed;
-}
-
-static uint32_t xs_prng_get(){
-	// Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs"
-	uint32_t x = xs_prng_seed;
-	x ^= x << 13;
-	x ^= x >> 17;
-	x ^= x << 5;
-	return xs_prng_seed = x;
-}
-
-static void xs_prng_fill(void*dst, uintptr_t size){
-  uint8_t*dst8 = (uint8_t*)dst;
-  uint32_t buf;
-  uint8_t*buf8 = (uint8_t*)&buf;
-  for(unsigned int i=0;i<size;i++){
-    if(0 == i%4){
-      buf = xs_prng_get();
-    }
-    dst8[i] = buf8[i%4];
-  }
-}
-
-void dump(uintptr_t addr, uintptr_t size);
-
-void __attribute__((weak)) dump(uintptr_t addr, uintptr_t size){
-  //dummy implementation
-}
-
 void test_callbacks(){
-  nvm_erase(&nvm,sizeof(nvm)/LFTL_PAGE_SIZE);
-  PRINTF("Erased state:\r\n");
-  dump((uintptr_t)&nvm,sizeof(nvm));
-  uint8_t buf[64];
-  const unsigned int nloops = sizeof(nvm) / sizeof(buf);
-  xs_prng_set_seed(0);
-  uint8_t*addr = (uint8_t*)&nvm;
-  for(unsigned int i=0;i<nloops;i++){
-    xs_prng_fill(buf,sizeof(buf));
-    nvm_write(addr,buf,sizeof(buf));
-    uint8_t buf2[64];
-    nvm_read(buf2,addr,sizeof(buf));
-    if(memcmp(buf,buf2,sizeof(buf))){
-      PRINTF("ERROR during writing loop %u\r\n",i);
-      dump((uintptr_t)buf,sizeof(buf));
-      dump((uintptr_t)buf2,sizeof(buf2));
-      while(1);
-    }else{
-      PRINTF("Writing loop %u PASS\r\n",i);
+  uint32_t status;
+  do{
+    if((status = nvm_erase(&nvm,sizeof(nvm)/LFTL_PAGE_SIZE))) {status|=0x100;break;}
+    PRINTF("Erased state:\r\n");
+    dump((uintptr_t)&nvm,sizeof(nvm));
+    uint8_t buf[64];
+    const unsigned int nloops = sizeof(nvm) / sizeof(buf);
+    xs_prng_set_seed(0);
+    uint8_t*addr = (uint8_t*)&nvm;
+    for(unsigned int i=0;i<nloops;i++){
+      xs_prng_fill(buf,sizeof(buf));
+      if((status = nvm_write(addr,buf,sizeof(buf)))) {status|=0x200;break;}
+      uint8_t buf2[64];
+      if((status = nvm_read(buf2,addr,sizeof(buf)))) {status|=0x300;break;}
+      if(memcmp(buf,buf2,sizeof(buf))){
+        PRINTF("ERROR during writing loop %u\r\n",i);
+        dump((uintptr_t)buf,sizeof(buf));
+        dump((uintptr_t)buf2,sizeof(buf2));
+        while(1);
+      }else{
+        PRINTF("Writing loop %u PASS\r\n",i);
+      }
+      addr+=sizeof(buf);
     }
-    addr+=sizeof(buf);
-  }
-  xs_prng_set_seed(0);
-  addr = (uint8_t*)&nvm;
-  for(unsigned int i=0;i<nloops;i++){
-    xs_prng_fill(buf,sizeof(buf));
-    uint8_t buf2[64];
-    nvm_read(buf2,addr,sizeof(buf));
-    if(memcmp(buf,buf2,sizeof(buf))){
-      PRINTF("ERROR during reading loop %u\r\n",i);
-      dump((uintptr_t)buf,sizeof(buf));
-      dump((uintptr_t)buf2,sizeof(buf2));
-      while(1);
-    }else{
-      PRINTF("Reading loop %u PASS\r\n",i);
+    xs_prng_set_seed(0);
+    addr = (uint8_t*)&nvm;
+    for(unsigned int i=0;i<nloops;i++){
+      xs_prng_fill(buf,sizeof(buf));
+      uint8_t buf2[64];
+      if((status = nvm_read(buf2,addr,sizeof(buf)))) {status|=0x400;break;}
+      if(memcmp(buf,buf2,sizeof(buf))){
+        PRINTF("ERROR during reading loop %u\r\n",i);
+        dump((uintptr_t)buf,sizeof(buf));
+        dump((uintptr_t)buf2,sizeof(buf2));
+        while(1);
+      }else{
+        PRINTF("Reading loop %u PASS\r\n",i);
+      }
+      addr+=sizeof(buf);
     }
-    addr+=sizeof(buf);
+    //try out a write with unaligned source
+    if((status = nvm_erase(&nvm,sizeof(nvm)/LFTL_PAGE_SIZE))) {status|=0x500;break;}
+    addr = (uint8_t*)&nvm;
+    uint64_t aligned_buf[SIZE64(LFTL_WU_SIZE*2+1)];
+    xs_prng_fill(aligned_buf,sizeof(aligned_buf));
+    uint8_t*unaligned_buf = ((uint8_t*)&aligned_buf) + 1;
+    const unsigned int unaligned_write_size = LFTL_ROUND_UP(sizeof(aligned_buf) - 1 -LFTL_WU_SIZE,LFTL_WU_SIZE);
+    if((status = nvm_write(addr,unaligned_buf,unaligned_write_size))) {status|=0x600;break;}
+    if((status = nvm_read(buf,addr,unaligned_write_size))) {status|=0x700;break;}
+    const uint8_t*const expected8 = unaligned_buf;
+    for(unsigned int i=0;i<unaligned_write_size;i++){
+      if(buf[i]!=expected8[i]){
+        PRINTF("READ VALUE:\n\r");
+        dump((uintptr_t)buf,unaligned_write_size);
+        PRINTF("EXPECTED:\n\r");
+        dump((uintptr_t)expected8,unaligned_write_size);
+        while(1);
+      }
+    }
+    PRINTF("Callbacks test PASS\r\n");
+  }while(0);
+  if(status){
+    PRINTLN("ERROR during callbacks test: status = 0x%08x",status);
+    while(1);
   }
-  PRINTF("Callbacks test PASS\r\n");
 }
+
 

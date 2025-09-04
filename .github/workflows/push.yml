@@ -38,8 +38,7 @@ jobs:
         sha256sum package.json
         ls -l
         PATH=`pwd`/xpacks/.bin:$PATH
-        ./build_release minSizeRel
-        ./build_release debug
+        ./build-release 1 lean-ftl-${{github.ref_name}}
         #./buildit on/cortex-m0 debug
         echo after build
         sha256sum package.json

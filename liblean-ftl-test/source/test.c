@@ -84,8 +84,6 @@ static void xs_prng_fill(void*dst, uintptr_t size){
   }
 }
 
-
-
 typedef void (*write_func_t)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 void (*format_func)(lftl_ctx_t*ctx);
@@ -299,8 +297,6 @@ void test_write2(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr
   read_and_check(ctx,dst_nvm_addr,expected,size); 
 }
 
-
-
 void randomized_test_write(lftl_ctx_t*ctx,void*dst_nvm_addr, uintptr_t size){
   uint8_t wbuf[size];
   stateful_prng_fill(wbuf,size);
@@ -308,7 +304,7 @@ void randomized_test_write(lftl_ctx_t*ctx,void*dst_nvm_addr, uintptr_t size){
 }
 
 void basic_test(){
-  PRINTLN("basic_test");
+  DEBUG_PRINTLN("basic_test");
   randomized_test_write(&nvma,nvm.data0,sizeof(lftl_wu_t));
   randomized_test_write(&nvma,nvm.data0,sizeof(nvm.data0));
   randomized_test_write(&nvma,nvm.data1,sizeof(nvm.data1));
@@ -322,16 +318,14 @@ void erase_all_test_core(lftl_ctx_t*ctx){
   erase_all_func(ctx);
   const uintptr_t size = SIZE64(ctx->data_size);
   uint8_t*addr = (uint8_t*)ctx->area;
-  //PRINTLN("ctx->data = %p, addr = %p",ctx->data,addr);
   uint64_t buf[SIZE64(size)];
   xs_prng_fill(buf,size);
-  //PRINTLN("ctx->data = %p, addr = %p",ctx->data,addr);
   write_func(ctx,addr,buf,size);
   read_and_check(ctx,addr,buf,size);
 }
 
 void erase_all_test(){
-  PRINTLN("erase_all_test");
+  DEBUG_PRINTLN("erase_all_test");
   //test erase indirectly because some flash does not read as 0xFF
   //instead we merely check that we can write properly after calling erase_all
   //we do it several times to ensure we covered the whole area physically
@@ -342,7 +336,7 @@ void erase_all_test(){
 }
 
 void write_size_test(){
-  PRINTLN("write_size_test");
+  DEBUG_PRINTLN("write_size_test");
   const unsigned int write_size = nvmb.nvm_props->write_size;
   //start at 0, end at various offsets
   for(unsigned int i = write_size; i < sizeof(nvm.b_data); i+=write_size){
@@ -356,7 +350,7 @@ void write_size_test(){
 }
 
 void write_offset_test(){
-  PRINTLN("write_offset_test");
+  DEBUG_PRINTLN("write_offset_test");
   const unsigned int write_size = nvmb.nvm_props->write_size;
   //start at various offset
   uint8_t*base = (uint8_t*)&nvm.b_data;
@@ -369,7 +363,7 @@ void write_offset_test(){
 #define MAX_NVM_TO_NVM_TEST_SIZE_IN_WU 2
 #define MAX_DST_OFFSET_IN_WU 2
 void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsigned int test_storage_size){
-  PRINTLN("write_nvm_to_nvm_test_core(%u,%p,%u) entry",dst_offset,test_storage,test_storage_size);
+  DEBUG_PRINTLN("write_nvm_to_nvm_test_core(%u,%p,%u) entry",dst_offset,test_storage,test_storage_size);
   uint8_t*dst;
   if(dst_offset>=MAX_DST_OFFSET_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
@@ -401,7 +395,7 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
     SANITY_CHECK();
   }
   //try dst and src in same LFTL area
-  PRINTLN("\ttry dst and src in same LFTL area");
+  DEBUG_PRINTLN("\ttry dst and src in same LFTL area");
   test_write2(&nvmb,base_b+MAX_NVM_TO_NVM_TEST_SIZE_IN_WU+MAX_DST_OFFSET_IN_WU,src,test_storage_size,test_storage);
   SANITY_CHECK();
   //try dst and src in other LFTL area
@@ -416,7 +410,7 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   SANITY_CHECK();
   
   //now try the 'mirror' cases
-  PRINTLN("\tnow try the 'mirror' cases");
+  DEBUG_PRINTLN("\tnow try the 'mirror' cases");
   dst_offset = 2*DATA_SIZE - test_storage_size;
   //try src in NVM outside of LFTL areas
   dst = ((uint8_t*)base_b) + dst_offset;
@@ -424,19 +418,19 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   test_write2(&nvmb,dst,&nvm.unmanaged_data0,test_storage_size,test_storage);
   SANITY_CHECK();
   //try dst and src in same LFTL area
-  PRINTLN("\ttry dst and src in same LFTL area");
+  DEBUG_PRINTLN("\ttry dst and src in same LFTL area");
   test_write2(&nvmb,base_b,src,test_storage_size,test_storage);
   SANITY_CHECK();
   //try dst and src in other LFTL area
-  PRINTLN("\ttry dst and src in other LFTL area");
+  DEBUG_PRINTLN("\ttry dst and src in other LFTL area");
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
   SANITY_CHECK();
   //write the other LFTL area to move the physical address of the valid data (previous test may have passed by chance)
-  PRINTLN("\twrite the other LFTL area to move the physical address of the valid data");
+  DEBUG_PRINTLN("\twrite the other LFTL area to move the physical address of the valid data");
   test_write(&nvmb,base_b,test_storage,test_storage_size);
   SANITY_CHECK();
   //retry dst and src in other LFTL area
-  PRINTLN("\tretry dst and src in other LFTL area");
+  DEBUG_PRINTLN("\tretry dst and src in other LFTL area");
   test_write2(&nvma,base_a,src,test_storage_size,test_storage);
   SANITY_CHECK();
 }
@@ -464,7 +458,7 @@ void write_nvm_to_nvm_vs_size(unsigned int size){
 
 
 void transaction_basic_test(){
-  PRINTLN("transaction_basic_test");
+  DEBUG_PRINTLN("transaction_basic_test");
   uint8_t rng_state = 0;
   for(unsigned int i=0;i<2;i++){
     const size_t size = sizeof(nvm.a_data);
@@ -499,7 +493,7 @@ void transaction_basic_test(){
 }
 
 void transaction_abort_test(){
-  PRINTLN("transaction_abort_test");
+  DEBUG_PRINTLN("transaction_abort_test");
   const size_t size = sizeof(nvm.a_data);
   //initialize the whole data to 0
   uint8_t wbuf0[size];
@@ -597,7 +591,7 @@ void test_and_simulate_tearing(void (*dut)()){
   #endif
   test_cnt++;
   if(0==err_code){
-    PRINTLN("Test %d PASS",test_cnt);
+    DEBUG_PRINTLN("Test %d PASS",test_cnt);
   }else{
     #ifdef HAS_TEARING_SIMULATION
       exit(err_code);
@@ -608,26 +602,31 @@ void test_and_simulate_tearing(void (*dut)()){
   }
 }
 
-void write_nvm_to_nvm_vs_size_1()   {PRINTLN("write_nvm_to_nvm_vs_size_1");write_nvm_to_nvm_vs_size(1);}                    // smaller than WU
-void write_nvm_to_nvm_vs_size_1wu() {PRINTLN("write_nvm_to_nvm_vs_size_1wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));}    // single WU
-void write_nvm_to_nvm_vs_size_2wu() {PRINTLN("write_nvm_to_nvm_vs_size_2wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2);}  // multiple WU
-void write_nvm_to_nvm_vs_size_1wu1(){PRINTLN("write_nvm_to_nvm_vs_size_1wu1");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1);}  // larger than WU size but not multiple of it
+void write_nvm_to_nvm_vs_size_1()   {DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_1");write_nvm_to_nvm_vs_size(1);}                    // smaller than WU
+void write_nvm_to_nvm_vs_size_1wu() {DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_1wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t));}    // single WU
+void write_nvm_to_nvm_vs_size_2wu() {DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_2wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2);}  // multiple WU
+void write_nvm_to_nvm_vs_size_1wu1(){DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_1wu1");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1);}  // larger than WU size but not multiple of it
 
 void write_nvm_to_nvm_seq(){
-  PRINTLN("write_nvm_to_nvm_seq");
+  DEBUG_PRINTLN("write_nvm_to_nvm_seq");
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1)   ;
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu) ;
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_2wu) ;
   test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu1);
 }
 void transaction_nvm_to_nvm_seq(){
-  PRINTLN("transaction_nvm_to_nvm_seq");
+  DEBUG_PRINTLN("transaction_nvm_to_nvm_seq");
   write_func_t org_write_func = write_func;
   write_func = write_func_using_transaction;
   write_nvm_to_nvm_seq();
   write_func = org_write_func;
 }
 
+void print_lib_info(){
+  PRINTLN("version: %s",lftl_version());
+  PRINTLN("version timestamp: %lu",lftl_version_timestamp());
+  PRINTLN("build type: %s",lftl_build_type());
+}
 
 int test_main(){
   #ifdef HAS_TEARING_SIMULATION
@@ -653,9 +652,7 @@ int test_main(){
     transaction_commit_func = lftl_transaction_commit;
     transaction_abort_func = lftl_transaction_abort;
   #endif
-  PRINTLN("version: %s",lftl_version());
-  PRINTLN("version timestamp: %lu",lftl_version_timestamp());
-  PRINTLN("build type: %s",lftl_build_type());
+  print_lib_info();
 
   led1(1);
   test_and_simulate_tearing(basic_test);
@@ -675,11 +672,12 @@ int test_main(){
 }
 
 void test_callbacks(){
+  print_lib_info();
   uint32_t status;
   do{
     if((status = nvm_erase(&nvm,sizeof(nvm)/LFTL_PAGE_SIZE))) {status|=0x100;break;}
-    PRINTF("Erased state:\r\n");
-    dump((uintptr_t)&nvm,sizeof(nvm));
+    DEBUG_PRINTLN("Erased state:");
+    DEBUG_DUMP((uintptr_t)&nvm,sizeof(nvm));
     uint8_t buf[64];
     const unsigned int nloops = sizeof(nvm) / sizeof(buf);
     xs_prng_set_seed(0);
@@ -690,12 +688,12 @@ void test_callbacks(){
       uint8_t buf2[64];
       if((status = nvm_read(buf2,addr,sizeof(buf)))) {status|=0x300;break;}
       if(memcmp(buf,buf2,sizeof(buf))){
-        PRINTF("ERROR during writing loop %u\r\n",i);
+        PRINTLN("ERROR during writing loop %u",i);
         dump((uintptr_t)buf,sizeof(buf));
         dump((uintptr_t)buf2,sizeof(buf2));
         while(1);
       }else{
-        PRINTF("Writing loop %u PASS\r\n",i);
+        DEBUG_PRINTLN("Writing loop %u PASS",i);
       }
       addr+=sizeof(buf);
     }
@@ -706,12 +704,12 @@ void test_callbacks(){
       uint8_t buf2[64];
       if((status = nvm_read(buf2,addr,sizeof(buf)))) {status|=0x400;break;}
       if(memcmp(buf,buf2,sizeof(buf))){
-        PRINTF("ERROR during reading loop %u\r\n",i);
+        PRINTLN("ERROR during reading loop %u",i);
         dump((uintptr_t)buf,sizeof(buf));
         dump((uintptr_t)buf2,sizeof(buf2));
         while(1);
       }else{
-        PRINTF("Reading loop %u PASS\r\n",i);
+        DEBUG_PRINTLN("Reading loop %u PASS",i);
       }
       addr+=sizeof(buf);
     }
@@ -727,18 +725,22 @@ void test_callbacks(){
     const uint8_t*const expected8 = unaligned_buf;
     for(unsigned int i=0;i<unaligned_write_size;i++){
       if(buf[i]!=expected8[i]){
-        PRINTF("READ VALUE:\n\r");
+        PRINTLN("READ VALUE:");
         dump((uintptr_t)buf,unaligned_write_size);
-        PRINTF("EXPECTED:\n\r");
+        PRINTLN("EXPECTED:");
         dump((uintptr_t)expected8,unaligned_write_size);
         while(1);
       }
     }
-    PRINTF("Callbacks test PASS\r\n");
+    PRINTLN("Callbacks test PASS");
   }while(0);
   if(status){
-    PRINTLN("ERROR during callbacks test: status = 0x%08x",status);
-    while(1);
+    #ifdef HAS_PRINTF
+      PRINTLN("ERROR during callbacks test: status = 0x%08x",status);
+      while(1);
+    #else
+      ui_wait_button();
+    #endif
   }
 }
 

@@ -43,3 +43,4 @@ lftl_ctx_t nvmb = {
 };
 
 int test_main();
+void test_callbacks();

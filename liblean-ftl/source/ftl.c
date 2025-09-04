@@ -4,6 +4,19 @@
 
 #include "lean-ftl.h"
 
+#ifdef LFTL_DEBUG
+  #ifdef HAS_PRINTF
+    #include <stdio.h>
+    #define PRINTF(...) printf( __VA_ARGS__ );
+  #else
+    #define PRINTF(...)
+  #endif 
+  #define DEBUG_PRINTLN(...) do{PRINTF( __VA_ARGS__ );PRINTF("\n\r");}while(0)
+#else
+  #define PRINTF(...)
+  #define DEBUG_PRINTLN(...)
+#endif
+
 #define NO_TRANSACTION 0
 #define TRANSACTION 1
 
@@ -304,12 +317,12 @@ void dbg_memcpy(void*dst, const void*const src, uintptr_t size){
 }
 */
 static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool transaction, bool aligned){
+  DEBUG_PRINTLN("write_core(%p,%p,%p,%u,%u,%u) entry",ctx,dst_nvm_addr,src,size,transaction,aligned);
   //printf("src=%p, size=0x%08lx\n",src,size);
   const uint32_t write_size = ctx->nvm_props->write_size;
   uintptr_t dst_nvm_addr_aligned;
   uintptr_t addr_misalignement;
   uintptr_t size_aligned;
-  //uint64_t wu[SIZE64(LFTL_WU_MAX_SIZE)];
   uint64_t wu[SIZE64(write_size)];
   memset(&wu,0x55,sizeof(wu));
   if(aligned){
@@ -402,9 +415,11 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
     //update context
     ctx->data = base;
   }
+  DEBUG_PRINTLN("write_core exit");
 }
 
 static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
+  DEBUG_PRINTLN("erase entry");
   const uint32_t write_size = ctx->nvm_props->write_size;
   if(0 != ((uintptr_t)dst_nvm_addr % write_size)) ctx->error_handler(LFTL_ERROR_BASE_MISALIGNED);
   if(0 != (size % write_size)) ctx->error_handler(LFTL_ERROR_SIZE_MISALIGNED);
@@ -432,6 +447,7 @@ static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
   write_meta(ctx, index, version);
   //update context
   ctx->data = base;
+  DEBUG_PRINTLN("erase exit");
 }
 
 #define xstr(s) str(s)
@@ -470,10 +486,12 @@ void lftl_register_area(lftl_ctx_t*ctx){
 }
 
 void lftl_format(lftl_ctx_t*ctx){
+  DEBUG_PRINTLN("lftl_format entry");
   if(ctx->nvm_props->write_size>LFTL_WU_MAX_SIZE) ctx->error_handler(LFTL_ERROR_WU_SIZE_TOO_LARGE);
   nvm_erase(ctx,ctx->area,n_pages(ctx));
   ctx->data = ctx->area;
   write_meta(ctx, 0, 1);
+  DEBUG_PRINTLN("lftl_format exit");
 }
 
 lftl_ctx_t*lftl_get_ctx(const void*const addr){
@@ -492,9 +510,11 @@ void lftl_basic_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const 
 }
 
 void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
+  DEBUG_PRINTLN("lftl_read entry");
   if(0==size) return;
   const void*const phy_addr = translate_addr(ctx, src_nvm_addr, size);
   nvm_read(ctx,dst, phy_addr, size);
+  DEBUG_PRINTLN("lftl_read exit");
 }
 
 void lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker){
@@ -640,14 +660,17 @@ void lftl_write_any(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const sr
 
 void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
   if(0==size) return;
+  DEBUG_PRINTLN("lftl_read_newer entry");
   if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
     lftl_read(ctx, dst, src_nvm_addr, size);
   } else {
     lftl_transaction_read(ctx, dst, src_nvm_addr, size);
   }
+  DEBUG_PRINTLN("lftl_read_newer exit");
 }
 
 void lftl_memread(void*dst, const void*const src, uintptr_t size){
+  DEBUG_PRINTLN("lftl_memread entry");
   lftl_ctx_t*ctx = is_in_any_nvm(src);
   if(LFTL_INVALID_POINTER==ctx) { // regular memory
     memcpy(dst,src,size);
@@ -655,9 +678,11 @@ void lftl_memread(void*dst, const void*const src, uintptr_t size){
     if(is_in_data(ctx,src)) lftl_read(ctx,dst,src,size);
     else nvm_read(ctx,dst,src,size); // outside of LFTL area but within NVM
   }
+  DEBUG_PRINTLN("lftl_memread exit");
 }
 
 void lftl_memread_newer(void*dst, const void*const src, uintptr_t size){
+  DEBUG_PRINTLN("lftl_memread_newer entry");
   lftl_ctx_t*ctx = is_in_any_nvm(src);
   if(LFTL_INVALID_POINTER==ctx) { // regular memory
     memcpy(dst,src,size);
@@ -665,4 +690,5 @@ void lftl_memread_newer(void*dst, const void*const src, uintptr_t size){
     if(is_in_data(ctx,src)) lftl_read_newer(ctx,dst,src,size);
     else nvm_read(ctx,dst,src,size); // outside of LFTL area but within NVM
   }
+  DEBUG_PRINTLN("lftl_memread_newer exit");
 }

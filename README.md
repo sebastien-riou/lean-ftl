@@ -70,7 +70,7 @@ Note: this does not work with embedded targets (each is tested via a dedicated r
 ### Make a new release
 Release are created for each tag formatted as `v*.*.*`
 ```
-./publish_release v1.2.3
+./publish-release v1.2.3
 ```
 
 ### Make the doc

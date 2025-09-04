@@ -4,9 +4,6 @@ set -ex
 
 PRESET=${1:-minSizeRel}
 
-#generic test build and examples
-./testit on/linux $PRESET
-./clean
 #generic builds, need user to implement accessors
 ./buildit on/cortex-m0 $PRESET
 ./buildit on/cortex-m3 $PRESET

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -ex
+
+TEST_ON_LINUX=${1:-1}
+NAME=${2:-lean-ftl}
+
+echo "INFO: Creating release archive ${NAME}.tar.gz"
+
+if [ $TEST_ON_LINUX -eq 1 ]; then
+    #generic test build and examples
+    echo "INFO: Test on Linux."
+    ./testit on/linux debug
+    ./testit on/linux minSizeRel
+    ./clean
+else 
+    echo "WARNING: Test on Linux skipped."
+fi
+
+./build-all-targets debug
+./build-all-targets minSizeRel
+cp -R liblean-ftl-test dist
+tar czf ${NAME}.tar.gz dist

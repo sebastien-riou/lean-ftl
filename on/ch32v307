@@ -9,4 +9,4 @@ set(LFTL_ACCESSORS_INCLUDES
 	${CMAKE_CURRENT_SOURCE_DIR}/target/ch32v307
 )
 add_definitions(-DLFTL_CH32V307)
-
+add_definitions( -DHAS_PRINTF )

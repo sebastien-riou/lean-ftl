@@ -35,7 +35,7 @@ if [[ ! -z "$ARM_NONE_EABI" ]]; then
     ./buildit on/stm32l5 $PRESET
 fi
 
-RISCV_NONE_ELF=`which riscv-none-elf || true`
+RISCV_NONE_ELF=`which riscv-none-elf-gcc || true`
 if [[ ! -z "$RISCV_NONE_ELF" ]]; then
     # if RISCV_NONE_ELF toolchain seems to be present
     #generic builds, need user to implement accessors

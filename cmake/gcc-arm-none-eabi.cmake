@@ -39,3 +39,5 @@ set(CMAKE_CXX_COMPILER_WORKS 1)
 
 #message(WARNING "CMAKE_C_COMPILER is ${CMAKE_C_COMPILER}")
 #message(WARNING "CMAKE_AR is ${CMAKE_AR}")
+
+set(OBJDUMP_OPTIONS "--visualize-jumps")

@@ -42,5 +42,5 @@ add_custom_command(
   COMMAND ls -l ${CMAKE_BINARY_DIR}
   COMMAND ls -l $<TARGET_FILE:lean-ftl>
   COMMAND ${CMAKE_AR} -x $<TARGET_FILE:lean-ftl>
-  COMMAND ${CMAKE_OBJDUMP} -D --visualize-jumps *.${CMAKE_AR_O_EXT} > disassembly.asm
+  COMMAND ${CMAKE_OBJDUMP} -D ${OBJDUMP_OPTIONS} *.${CMAKE_AR_O_EXT} > disassembly.asm
 )

@@ -9,16 +9,37 @@ Main features:
 - Avoid fragmentation
 - Support transactions
 - Easily portable to new MCUs / new flash chips
+- Support flash with erased state different from 'FF' (even undefined value if supported)
 
 The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions:
 - nvm_erase
 - nvm_write
 - nvm_read
 
+NOTE: tests are provided to verify the correct implementation of the accessors.
+
 This repository provides accessors for the following targets:
-- STM32U5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32u5/))
+- CH32V307 (testbench is [here](https://github.com/sebastien-riou/lean-ftl-ch32v307))
 - STM32L5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32l5/))
+- STM32U5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32u5/))
 - Native execution on Linux (for test and development purposes)
+
+Release package contains binaries for the following platforms:
+- ARM Cortex-M:
+    - M0
+    - M3
+    - M4
+    - M7
+    - M23
+    - M33
+        - STM32L5xx
+        - STM32U5xx
+    - M35P
+    - M55
+    - M85
+- RISC-V:
+    - RV32IMC
+        - CH32V307
 
 ## Concept
 

@@ -1,6 +1,6 @@
 # lean-ftl
 
-[![Push](https://github.com/sebastien-riou/lean-ftl/actions/workflows/push.yml/badge.svg)](https://github.com/sebastien-riou/lean-ftl/actions/workflows/push.yml)
+[![Push build](https://github.com/sebastien-riou/lean-ftl/actions/workflows/push.yml/badge.svg)](https://github.com/sebastien-riou/lean-ftl/actions/workflows/push.yml)
 
 Minimal flash translation layer meant for embedded systems (wear leveling + anti tearing).
 

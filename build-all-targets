@@ -4,7 +4,6 @@ set -ex
 
 PRESET=${1:-minSizeRel}
 
-#builds with non standard toolchains, i.e., toolchains we can't get in CI
 WCH=`which riscv-wch-elf-gcc || true`
 if [[ ! -z "$WCH" ]]; then
     # if WCH toolchain seems to be present
@@ -17,22 +16,33 @@ if [[ ! -z "$EMBED" ]]; then
     ./buildit on/ch32v307-none-embed $PRESET
 fi
 
-#generic builds, need user to implement accessors
-./buildit on/cortex-m0 $PRESET
-./buildit on/cortex-m3 $PRESET
-./buildit on/cortex-m4 $PRESET
-./buildit on/cortex-m7 $PRESET
-./buildit on/cortex-m23 $PRESET
-./buildit on/cortex-m33 $PRESET
-./buildit on/cortex-m35p $PRESET
-./buildit on/cortex-m52 $PRESET
-./buildit on/cortex-m55 $PRESET
-./buildit on/cortex-m85 $PRESET
-./buildit on/rv32imc $PRESET
-#targeted builds for few specific MCUs
-./buildit on/stm32u5 $PRESET
-./buildit on/stm32l5 $PRESET
-./buildit on/ch32v307 $PRESET
+ARM_NONE_EABI=`which arm-none-eabi-gcc || true`
+if [[ ! -z "$ARM_NONE_EABI" ]]; then
+    # if ARM_NONE_EABI toolchain seems to be present
+    #generic builds, need user to implement accessors
+    ./buildit on/cortex-m0 $PRESET
+    ./buildit on/cortex-m3 $PRESET
+    ./buildit on/cortex-m4 $PRESET
+    ./buildit on/cortex-m7 $PRESET
+    ./buildit on/cortex-m23 $PRESET
+    ./buildit on/cortex-m33 $PRESET
+    ./buildit on/cortex-m35p $PRESET
+    ./buildit on/cortex-m52 $PRESET
+    ./buildit on/cortex-m55 $PRESET
+    ./buildit on/cortex-m85 $PRESET
+    #targeted builds for few specific MCUs
+    ./buildit on/stm32u5 $PRESET
+    ./buildit on/stm32l5 $PRESET
+fi
+
+RISCV_NONE_ELF=`which riscv-none-elf || true`
+if [[ ! -z "$RISCV_NONE_ELF" ]]; then
+    # if RISCV_NONE_ELF toolchain seems to be present
+    #generic builds, need user to implement accessors
+    ./buildit on/rv32imc $PRESET
+    #targeted builds for few specific MCUs
+    ./buildit on/ch32v307 $PRESET
+fi
 
 OUT=dist/$PRESET/liblean-ftl
 rm -rf $OUT

@@ -38,6 +38,6 @@ add_custom_command(
   TARGET lean-ftl-test
   POST_BUILD
   COMMAND ${CMAKE_AR} -x $<TARGET_FILE:lean-ftl-test>
-  COMMAND ${CMAKE_OBJDUMP} -D --visualize-jumps *.${CMAKE_AR_O_EXT} > disassembly.asm
+  COMMAND ${CMAKE_OBJDUMP} -D ${OBJDUMP_OPTIONS} *.${CMAKE_AR_O_EXT} > disassembly.asm
 )
 endif(LFTL_ACCESSORS)

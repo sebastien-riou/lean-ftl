@@ -29,18 +29,18 @@
     "minimumXpmRequired": "0.16.3",
     "dependencies": {},
     "devDependencies": {
-      "@xpack-dev-tools/arm-none-eabi-gcc": {
-        "specifier": "14.2.1-1.1.1",
-        "local": "link",
-        "platforms": "all"
-      },
       "@xpack-dev-tools/riscv-none-elf-gcc": {
         "specifier": "14.2.0-3.1",
         "local": "link",
         "platforms": "all"
       },
+      "@xpack-dev-tools/arm-none-eabi-gcc": {
+        "specifier": "14.2.1-1.1.1",
+        "local": "link",
+        "platforms": "all"
+      },
       "@xpack-dev-tools/cmake": {
-        "specifier": "3.28.6-1.1",
+        "specifier": "3.30.7-1.1",
         "local": "link",
         "platforms": "all"
       }

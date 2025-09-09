@@ -32,14 +32,14 @@ Release package contains binaries for the following platforms:
     - M7
     - M23
     - M33
-        - STM32L5xx
-        - STM32U5xx
+        - STM32L5xx (includes accessors)
+        - STM32U5xx (includes accessors)
     - M35P
     - M55
     - M85
 - RISC-V:
     - RV32IMC
-        - CH32V307
+        - CH32V307 (includes accessors)
 
 ## Concept
 

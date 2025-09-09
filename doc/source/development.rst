@@ -66,7 +66,7 @@ environments where updates may be costly.
 Development dependencies
 ---------------------------
 
-- CMake_ 3.28 or newer
+- CMake_ 3.30 or newer
 - gcc 11.4.0 or newer
 - arm-none-eabi-gcc 14.2.1 or newer
 

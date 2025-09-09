@@ -8,9 +8,20 @@ The release package is designed to support cross platform, multi configuration, 
 
 - For each of the platforms below:
 
-  - Linux 
-  - STM32U5
-  - STM32L5
+  - ARM Cortex-M0
+  - ARM Cortex-M3
+  - ARM Cortex-M4
+  - ARM Cortex-M7
+  - ARM Cortex-M23
+  - ARM Cortex-M33
+  - ARM Cortex-M35P
+  - ARM Cortex-M55
+  - ARM Cortex-M85
+  - RISC-V RV32IMC
+  - CH32V307 (include accessors, `testbench is here <https://github.com/sebastien-riou/lean-ftl-ch32v307>`_)
+  - STM32L5 (include accessors, `testbench is here <https://github.com/sebastien-riou/lean-ftl-stm32l5/>`_)
+  - STM32U5 (include accessors, `testbench is here <https://github.com/sebastien-riou/lean-ftl-stm32u5/>`_)
+  - Linux (include RAM based accessors, for dev/debug purposes only)
 
 - The following binaries are included:
 
@@ -23,7 +34,7 @@ Building
 
 Prerequisites:
  - Recent compilers (tested on ``gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0`` and ``arm-none-eabi-gcc (xPack GNU Arm Embedded GCC x86_64) 14.2.1 20241119``)
- - CMake_ 3.28 or newer (might also be called ``cmakesetup``, ``cmake-gui`` or ``ccmake`` depending on the installed version and system)
+ - CMake_ 3.30 or newer (might also be called ``cmakesetup``, ``cmake-gui`` or ``ccmake`` depending on the installed version and system)
  - C build system CMake can target (make, Apple Xcode, MinGW, ...)
 
 .. _CMake: http://cmake.org/
@@ -32,7 +43,7 @@ This builds for all supported platforms, result is in "dist" folder:
 
 .. code-block:: bash
 
-  ./build_release
+  ./build-release
 
 If you want to build just for linux, result is in "build/linux" folder:
 

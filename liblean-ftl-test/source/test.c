@@ -538,7 +538,7 @@ void exception_handler(uint32_t err_code){
   }
   #else
     #ifdef HAS_PRINTF
-      PRINTF("EXCEPTION: 0x%08x\n\r",err_code);
+      PRINTF("EXCEPTION: 0x%08lx\n\r",(long unsigned int)err_code);
       while(1);
     #else
       ui_wait_button();
@@ -624,7 +624,7 @@ void transaction_nvm_to_nvm_seq(){
 
 void print_lib_info(){
   PRINTLN("version: %s",lftl_version());
-  PRINTLN("version timestamp: %lu",lftl_version_timestamp());
+  PRINTLN("version timestamp: %llu",(long long unsigned int)lftl_version_timestamp());
   PRINTLN("build type: %s",lftl_build_type());
 }
 
@@ -736,7 +736,7 @@ void test_callbacks(){
   }while(0);
   if(status){
     #ifdef HAS_PRINTF
-      PRINTLN("ERROR during callbacks test: status = 0x%08x",status);
+      PRINTLN("ERROR during callbacks test: status = 0x%08lx",(long unsigned int)status);
       while(1);
     #else
       ui_wait_button();

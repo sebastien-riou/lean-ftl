@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
 
@@ -20,9 +20,9 @@ jobs:
         sha256sum package.json
         cp package.json package.bu
         npm install --no-save --global xpm@latest
-        xpm install --no-save  @xpack-dev-tools/arm-none-eabi-gcc@latest
-        xpm install --no-save  @xpack-dev-tools/riscv-none-elf-gcc@latest
-        xpm install --no-save  @xpack-dev-tools/cmake@latest
+        xpm install @xpack-dev-tools/arm-none-eabi-gcc@14.2.1-1.1.1
+        xpm install --no-save  @xpack-dev-tools/riscv-none-elf-gcc@14.2.0-3.1
+        xpm install @xpack-dev-tools/cmake@3.30.7-1.1
         sha256sum package.json
     - name: Satisfy project dependencies
       run: xpm install --no-save 
@@ -37,6 +37,7 @@ jobs:
         echo after restoration
         sha256sum package.json
         ls -l
+        git status
         PATH=`pwd`/xpacks/.bin:$PATH
         ./build-release 1 lean-ftl-${{github.ref_name}}
         #./buildit on/cortex-m0 debug

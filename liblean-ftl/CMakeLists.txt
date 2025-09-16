@@ -29,7 +29,7 @@ target_compile_options(${LIB} PRIVATE
     >
     $<$<COMPILE_LANGUAGE:ASM>:-x assembler-with-cpp -MMD -MP>
     $<$<CONFIG:Debug>:-Og -g3 -ggdb>
-    $<$<CONFIG:Release>:-Og -g0>
+    $<$<CONFIG:Release>:-Os -g0>
 )
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/git_version.cmake")

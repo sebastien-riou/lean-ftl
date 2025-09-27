@@ -4,6 +4,8 @@ set -ex
 
 PRESET=${1:-minSizeRel}
 
+./buildit on/linux $PRESET
+
 WCH=`which riscv-wch-elf-gcc || true`
 if [[ ! -z "$WCH" ]]; then
     # if WCH toolchain seems to be present

@@ -1,6 +1,7 @@
 # lean-ftl
 
 [![Push build](https://github.com/sebastien-riou/lean-ftl/actions/workflows/push.yml/badge.svg)](https://github.com/sebastien-riou/lean-ftl/actions/workflows/push.yml)
+[![Documentation Status](https://readthedocs.org/projects/lean-ftl/badge/?version=latest)](https://lean-ftl.readthedocs.io/en/latest/?badge=latest)
 
 Minimal flash translation layer meant for embedded systems (wear leveling + anti tearing).
 
@@ -40,6 +41,8 @@ Release package contains binaries for the following platforms:
 - RISC-V:
     - RV32IMC
         - CH32V307 (includes accessors)
+
+[Full user documentation](https://lean-ftl.rtfd.io) is hosted on readthedocs.
 
 ## Concept
 

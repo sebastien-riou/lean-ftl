@@ -42,6 +42,8 @@ Release package contains binaries for the following platforms:
     - RV32IMC
         - CH32V307 (includes accessors)
 
+## Documentation
+
 [Full user documentation](https://lean-ftl.rtfd.io) is hosted on readthedocs.
 
 ## Concept

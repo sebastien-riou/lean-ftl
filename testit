@@ -12,7 +12,7 @@ cd $OUTDIR
 
 INCLUDES="-I../../liblean-ftl/include -I../../liblean-ftl-test/include" 
 LIBS="-Lliblean-ftl -llean-ftl"
-DEFINES="-DLFTL_PAGE_SIZE=8*1024 -DLFTL_WU_SIZE=16 -DLINUX=1"
+DEFINES="-DLFTL_PAGE_SIZE=(8*1024) -DLFTL_WU_SIZE=16 -DLINUX=1"
 
 gcc -Og ../../examples/hello/main.c -o hello $INCLUDES $LIBS 
 

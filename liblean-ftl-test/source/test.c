@@ -104,6 +104,46 @@ data_flash_t nvm_ref;
 data_flash_t nvm_ref_previous_state;
 data_flash_t transaction_buf_ref;
 
+#define N_ERASE_UNITS (sizeof(data_flash_t) / (LFTL_PAGE_SIZE))
+uint32_t erase_cnt[N_ERASE_UNITS];
+volatile bool erase_cnt_enabled;
+void erase_cnt_init(){
+  memset(erase_cnt,0,sizeof erase_cnt);
+}
+void erase_cnt_inc(unsigned int index){
+  if(erase_cnt_enabled){
+    const uint32_t current = erase_cnt[index];
+    if(current != 0xFFFFFFFF){
+      const uint32_t next = current + 1;
+      erase_cnt[index] = next;
+    }
+  }
+}
+void erase_cnt_update(void*base_address, unsigned int n_pages){
+  uintptr_t offset = (uintptr_t)base_address - (uintptr_t)&nvm;
+  for(unsigned int i=offset/LFTL_PAGE_SIZE;i<n_pages;i++){
+    erase_cnt_inc(i);
+  }
+}
+void print_erase_cnt_stats(){
+  uint32_t min = 0xFFFFFFFF;
+  uint32_t max = 0;
+  uint64_t sum = 0;
+  for(unsigned int i=0;i<N_ERASE_UNITS;i++){
+    const uint32_t n = erase_cnt[i];
+    sum += n;
+    if(n<min) min = n;
+    if(n>max) max = n;
+  }
+  uint32_t avg = sum / N_ERASE_UNITS;
+  PRINTLN("Pages erase count statistics:");
+  PRINTLN("   %lu page erase in total", sum);
+  PRINTLN("   %lu pages (size of data_flash_t = %lu, page size = %u)", N_ERASE_UNITS, sizeof(data_flash_t), LFTL_PAGE_SIZE);
+  PRINTLN("   Min: %u", min);
+  PRINTLN("   Avg: %u", avg);
+  PRINTLN("   Max: %u", max);
+}
+
 void tearing_sim_lftl_format(lftl_ctx_t*ctx){
   //note: we do not support anti tearing during format
   //we implement this function merely to keep nvm_ref in sync with nvm
@@ -135,6 +175,9 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
   memset(dst+offset,0xFF,size);
   //emulate call to nvm_erase rather than calling it, to make sure we do not trigger tearing here
   memset(base_address,0xFF,size);
+  for(unsigned int i=offset/LFTL_PAGE_SIZE;i<n_pages;i++){
+    erase_cnt_inc(i);
+  }
   return 0;
 }
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
@@ -552,6 +595,9 @@ void test_and_simulate_tearing(void (*dut)()){
   led1(1);
   if(0 == (err_code = setjmp(exception_ctx))){
     #ifdef HAS_TEARING_SIMULATION
+    PRINTLN("test_and_simulate_tearing for DUT at 0x%lx",(uintptr_t)dut);
+    erase_cnt_init();
+    erase_cnt_enabled = 1;
     tearing_sim_init(); // ensure any previous tearing sim is stopped at this point
     #endif
     lftl_init_lib();
@@ -569,7 +615,9 @@ void test_and_simulate_tearing(void (*dut)()){
     exception_handler(err_code);
   }
   #ifdef HAS_TEARING_SIMULATION
+    erase_cnt_enabled = 0;
     tearing_sim_check_nvm();//sanity check that model is in sync
+    print_erase_cnt_stats();
     const unsigned int target_max = tearing_sim_get_max_target();
     PRINTF("%u targets for tearing simulation\n",target_max);
     led1(1);

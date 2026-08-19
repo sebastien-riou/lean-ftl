@@ -79,6 +79,9 @@ uint32_t get_alignement_requirement(uint32_t original_req){
 }
 void dump_core(uintptr_t addr, uintptr_t size, uintptr_t display_addr);
 
+void erase_cnt_update(void*base_address, unsigned int n_pages);
+void __attribute__((weak)) erase_cnt_update(void*base_address, unsigned int n_pages){}
+
 uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   const uintptr_t size = n_pages * nvm_erase_size;
   if(trace_accessors){
@@ -94,6 +97,7 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   if(save_nvm_file_name){
     write_file(save_nvm_file_name,nvm_base,nvm_size);
   }
+  erase_cnt_update(base_address, n_pages);
   return tearing ? SIMULATED_TEARING:0;
 }
 

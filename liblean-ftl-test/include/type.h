@@ -25,14 +25,14 @@ typedef struct data_flash_struct {
   LFTL_AREA(a,
     uint64_t data0[SIZE64(DATA_SIZE)];
     uint64_t data1[SIZE64(DATA_SIZE)];
-    ,2)
+    ,LFTL_WEAR_LEVELING_FACTOR(2))
   
   LFTL_AREA(b,
     uint64_t data2[SIZE64(DATA_SIZE)];
     uint64_t data3[SIZE64(DATA_SIZE)];
-    ,2)
+    ,LFTL_WEAR_LEVELING_FACTOR(2))
   union {
-    flash_sw_page_t unmanaged_page;
+  flash_sw_page_t unmanaged_page;
     struct {
       uint64_t unmanaged_data0[SIZE64(DATA_SIZE)];
       uint64_t unmanaged_data1[SIZE64(DATA_SIZE)];

@@ -113,3 +113,23 @@ This project is funded through [NGI0 Commons Fund](https://nlnet.nl/commonsfund)
 
 [<img src="https://nlnet.nl/logo/banner.png" alt="NLnet foundation logo" width="20%" />](https://nlnet.nl)
 [<img src="https://nlnet.nl/image/logos/NGI0_tag.svg" alt="NGI Zero Logo" width="20%" />](https://nlnet.nl/commonsfund)
+
+## Other project worth checking out
+The projects listed here are like `lean-ftl`: open-source and independant of any hardware / OS.
+
+- Specialized file systems (more flexibility than lean-ftl):
+    - [littleFS](https://github.com/littlefs-project/littlefs)
+        - It provides anti-tearing and wear leveling.
+        - It can detect 'bad blocks' and work around them.
+        - Not sur it supports transaction but one can argue that a file is equivalent to a lean-ftl area. In that sense, it does.
+        - Not sure if it suffers from fragmentation or not.
+        - Not sure how it compares to lean-ftl in terms of performances.
+        - Consider it if you prefer having a file systems rather than manipulating your variables directly.
+    - [reliance-edge](https://github.com/tuxera/reliance-edge)
+        - Similar functionality as littleFS
+        - Commercial support available
+        - Did not find documentation on how it works.
+- Key-Value storage systems (less flexibility than lean-ftl):
+    - [EasyFlash](https://github.com/armink/EasyFlash#1-introduction)
+        - It provides anti-tearing and wear leveling.
+        - Doc in english is "coming soon"

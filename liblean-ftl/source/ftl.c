@@ -299,7 +299,8 @@ static unsigned int next_slot(lftl_ctx_t*ctx){
 
 static void erase_slot(lftl_ctx_t*ctx, unsigned int slot_index){
   void*base = slot_base(ctx, slot_index);
-  nvm_erase(ctx,base,n_pages_in_slot(ctx));
+  const uint32_t slot_pages = n_pages_in_slot(ctx);
+  nvm_erase(ctx,base,slot_pages);
 }
 
 static uintptr_t n_pages(lftl_ctx_t*ctx){

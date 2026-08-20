@@ -428,19 +428,17 @@ static void write_src_phy_addr_to_dst_phy_addr(
   }
 }
 
-static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool transaction, bool aligned){
-  DEBUG_PRINTLN("write_core(%p,%p,%p,%u,%u,%u) entry",ctx,dst_nvm_addr,src,size,transaction,aligned);
+static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool transaction, bool aligned){
+  DEBUG_PRINTLN("write_core(%p,%p,%p,%u,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,transaction,aligned);
   //printf("src=%p, size=0x%08lx\n",src,size);
-  const uint32_t write_size = ctx->nvm_props->write_size;
+  const uint32_t write_size = dst_ctx->nvm_props->write_size;
   uintptr_t dst_nvm_addr_aligned;
   uintptr_t addr_misalignement;
   uintptr_t size_aligned;
-  uint64_t wu[SIZE64(write_size)];
-  memset(&wu,0x55,sizeof(wu));
   if(aligned){
     // check that the args are indeed aligned
-    if(0 != ((uintptr_t)dst_nvm_addr % write_size)) ctx->error_handler(LFTL_ERROR_BASE_MISALIGNED);
-    if(0 != (size % write_size)) ctx->error_handler(LFTL_ERROR_SIZE_MISALIGNED);
+    if(0 != ((uintptr_t)dst_nvm_addr % write_size)) dst_ctx->error_handler(LFTL_ERROR_BASE_MISALIGNED);
+    if(0 != (size % write_size)) dst_ctx->error_handler(LFTL_ERROR_SIZE_MISALIGNED);
     addr_misalignement = 0;
     dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr;
     size_aligned = size;
@@ -455,23 +453,24 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   }
   const uint32_t size_misalignement = size % write_size;
 
-  const void*const current_phy_addr = translate_addr(ctx, (void*)dst_nvm_addr_aligned, size_aligned);
-  const uint8_t*const current_base = slot_base(ctx,get_current_slot_index(ctx));
-  uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)ctx->data;
+  const void*const current_phy_addr = translate_addr(dst_ctx, (void*)dst_nvm_addr_aligned, size_aligned);
+  const uint8_t*const current_base = slot_base(dst_ctx,get_current_slot_index(dst_ctx));
+  uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)dst_ctx->data;
   //const uintptr_t end_offset = offset+size_aligned;
-  const unsigned int index = next_slot(ctx);
-  uint8_t*const dst_base = slot_base(ctx, index);
-  if(dst_base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
+  const unsigned int index = next_slot(dst_ctx);
+  uint8_t*const dst_base = slot_base(dst_ctx, index);
+  if(dst_base == current_base) dst_ctx->error_handler(LFTL_INTERNAL_ERROR);
   const uint8_t* src_phy_addr = src;
-  lftl_ctx_t* src_ctx = ctx;
+  lftl_ctx_t* src_ctx = dst_ctx;
   check_src_phy_addr(&src_ctx,&src_phy_addr,size);
   if(!transaction){
-    if(LFTL_INVALID_POINTER != ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_TRANSACTION_ONGOING);
+    if(LFTL_INVALID_POINTER != dst_ctx->transaction_tracker) dst_ctx->error_handler(LFTL_ERROR_TRANSACTION_ONGOING);
     //erase next slot
-    erase_slot(ctx,index);
+    erase_slot(dst_ctx,index);
   }
+  //write new data in next slot
   write_src_phy_addr_to_dst_phy_addr(
-    ctx,
+    dst_ctx,
     offset,
     size,
     dst_base,
@@ -487,18 +486,18 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   );
   if(!transaction){
     //increment version and write new meta data in next slot
-    const uint32_t version = 1 + get_slot_version(ctx, get_current_slot_index(ctx));
-    write_meta(ctx, index, version);
+    const uint32_t version = 1 + get_slot_version(dst_ctx, get_current_slot_index(dst_ctx));
+    write_meta(dst_ctx, index, version);
     //update context
-    ctx->data = dst_base;
+    dst_ctx->data = dst_base;
   }
   DEBUG_PRINTLN("write_core exit");
 }
 
-static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
-  DEBUG_PRINTLN("write_ewlf(%p,%p,%p,%u) entry",ctx,dst_nvm_addr,src,size);
+static void write_ewlf(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+  DEBUG_PRINTLN("write_ewlf(%p,%p,%p,%u) entry",dst_ctx,dst_nvm_addr,src,size);
   //printf("src=%p, size=0x%08lx\n",src,size);
-  const uint32_t write_size = ctx->nvm_props->write_size;
+  const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uintptr_t addr_misalignement = ((uintptr_t)dst_nvm_addr % write_size);
   const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
   const uint32_t size_misalignement = size % write_size;
@@ -510,20 +509,20 @@ static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
       size_aligned += write_size - size_aligned % write_size;
     }
   }
-  const void*const current_phy_addr = translate_addr(ctx, (void*)dst_nvm_addr_aligned, size_aligned);
-  const uint8_t*const current_base = slot_base(ctx,get_current_slot_index(ctx));
-  uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)ctx->data;
-  const unsigned int index = next_slot(ctx);
-  uint8_t*const dst_base = slot_base(ctx, index);
-  if(dst_base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
+  const void*const current_phy_addr = translate_addr(dst_ctx, (void*)dst_nvm_addr_aligned, size_aligned);
+  const uint8_t*const current_base = slot_base(dst_ctx,get_current_slot_index(dst_ctx));
+  uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)dst_ctx->data;
+  const unsigned int index = next_slot(dst_ctx);
+  uint8_t*const dst_base = slot_base(dst_ctx, index);
+  if(dst_base == current_base) dst_ctx->error_handler(LFTL_INTERNAL_ERROR);
   const uint8_t* src_phy_addr = src;
-  lftl_ctx_t* src_ctx = ctx;
+  lftl_ctx_t* src_ctx = dst_ctx;
   check_src_phy_addr(&src_ctx,&src_phy_addr,size);
   //erase next slot
-  erase_slot(ctx,index);
+  erase_slot(dst_ctx,index);
   //write new data in next slot
   write_src_phy_addr_to_dst_phy_addr(
-    ctx,
+    dst_ctx,
     offset,
     size,
     dst_base,
@@ -538,10 +537,10 @@ static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
     0 // no transaction      
   );
   //increment version and write new meta data in next slot
-  const uint32_t version = 1 + get_slot_version(ctx, get_current_slot_index(ctx));
-  write_meta(ctx, index, version);
+  const uint32_t version = 1 + get_slot_version(dst_ctx, get_current_slot_index(dst_ctx));
+  write_meta(dst_ctx, index, version);
   //update context
-  ctx->data = dst_base;
+  dst_ctx->data = dst_base;
 
   DEBUG_PRINTLN("write_ewlf exit");
 }
@@ -645,9 +644,9 @@ void lftl_erase_all(lftl_ctx_t*ctx){
   erase(ctx, ctx->area, ctx->data_size);//dst_nvm_addr is area because erase function does the address translation
 }
 
-void lftl_basic_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+void lftl_basic_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   if(0==size) return;
-  write_core(ctx,dst_nvm_addr,src,size,NO_TRANSACTION,UNALIGNED);
+  write_core(dst_ctx,dst_nvm_addr,src,size,NO_TRANSACTION,UNALIGNED);
 }
 
 void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
@@ -658,70 +657,70 @@ void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_
   DEBUG_PRINTLN("lftl_read exit");
 }
 
-void lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker){
-  if(LFTL_INVALID_POINTER != ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_TRANSACTION_ONGOING);
-  ctx->transaction_tracker = transaction_tracker;
-  const uint32_t size = LFTL_TRANSACTION_TRACKER_SIZE(ctx);
-  memset(ctx->transaction_tracker,0,size);
-  const unsigned int index = next_slot(ctx);
+void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker){
+  if(LFTL_INVALID_POINTER != dst_ctx->transaction_tracker) dst_ctx->error_handler(LFTL_ERROR_TRANSACTION_ONGOING);
+  dst_ctx->transaction_tracker = transaction_tracker;
+  const uint32_t size = LFTL_TRANSACTION_TRACKER_SIZE(dst_ctx);
+  memset(dst_ctx->transaction_tracker,0,size);
+  const unsigned int index = next_slot(dst_ctx);
   //erase next slot
-  erase_slot(ctx,index);
+  erase_slot(dst_ctx,index);
 }
 
-void lftl_transaction_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
-  if(LFTL_INVALID_POINTER == ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
+void lftl_transaction_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+  if(LFTL_INVALID_POINTER == dst_ctx->transaction_tracker) dst_ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
   //check/update transaction tracker
-  const uint32_t write_size = ctx->nvm_props->write_size;
+  const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uint32_t n_write_units = size / write_size;
-  const uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)ctx->area;
+  const uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)dst_ctx->area;
   const uint32_t offset_wu = offset / write_size;
-  uint8_t*tracker = (uint8_t*)ctx->transaction_tracker;
+  uint8_t*tracker = (uint8_t*)dst_ctx->transaction_tracker;
   for(uintptr_t i = 0; i < n_write_units; i++){
     const uint32_t wu_index = offset_wu+i;
     const uint32_t byte_index = wu_index / BITS_PER_BYTE;
     const uint32_t bit_index = wu_index % BITS_PER_BYTE;
     const uint8_t mask = 1 << bit_index;
-    if(tracker[byte_index] & mask) ctx->error_handler(LFTL_ERROR_TRANSACTION_OVERWRITE);
+    if(tracker[byte_index] & mask) dst_ctx->error_handler(LFTL_ERROR_TRANSACTION_OVERWRITE);
     tracker[byte_index] |= mask;
   }
-  write_core(ctx,dst_nvm_addr,src,size,TRANSACTION, ALIGNED);
+  write_core(dst_ctx,dst_nvm_addr,src,size,TRANSACTION, ALIGNED);
 }
 
-void lftl_transaction_write_any(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
-  const uint32_t write_size = ctx->nvm_props->write_size;
+void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+  const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uintptr_t addr_misalignement = ((uintptr_t)dst_nvm_addr % write_size);
   const bool addr_is_aligned = 0 == addr_misalignement;
   const bool size_is_aligned = 0 == (size % write_size);
   if(addr_is_aligned & size_is_aligned) {
-    lftl_transaction_write(ctx, dst_nvm_addr, src, size);
+    lftl_transaction_write(dst_ctx, dst_nvm_addr, src, size);
   } else {
-    if(LFTL_INVALID_POINTER == ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
+    if(LFTL_INVALID_POINTER == dst_ctx->transaction_tracker) dst_ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
     //check/update transaction tracker
     const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
     const uint32_t n_write_units = LFTL_DIV_CEIL(size+addr_misalignement,write_size);
-    const uintptr_t offset = dst_nvm_addr_aligned - (uintptr_t)ctx->area;
+    const uintptr_t offset = dst_nvm_addr_aligned - (uintptr_t)dst_ctx->area;
     const uint32_t offset_wu = offset / write_size;
-    uint8_t*tracker = (uint8_t*)ctx->transaction_tracker;
+    uint8_t*tracker = (uint8_t*)dst_ctx->transaction_tracker;
     for(uintptr_t i = 0; i < n_write_units; i++){
       const uint32_t wu_index = offset_wu+i;
       const uint32_t byte_index = wu_index / BITS_PER_BYTE;
       const uint32_t bit_index = wu_index % BITS_PER_BYTE;
       const uint8_t mask = 1 << bit_index;
-      if(tracker[byte_index] & mask) ctx->error_handler(LFTL_ERROR_TRANSACTION_OVERWRITE);
+      if(tracker[byte_index] & mask) dst_ctx->error_handler(LFTL_ERROR_TRANSACTION_OVERWRITE);
       tracker[byte_index] |= mask;
     }
-    write_core(ctx,dst_nvm_addr,src,size,TRANSACTION, UNALIGNED);
+    write_core(dst_ctx,dst_nvm_addr,src,size,TRANSACTION, UNALIGNED);
   }
   
 }
 
-void lftl_transaction_commit(lftl_ctx_t*ctx){
-  if(LFTL_INVALID_POINTER == ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
+void lftl_transaction_commit(lftl_ctx_t*dst_ctx){
+  if(LFTL_INVALID_POINTER == dst_ctx->transaction_tracker) dst_ctx->error_handler(LFTL_ERROR_NO_TRANSACTION);
   //lookup transaction tracker and copy unwritten write units
-  const uint32_t write_size = ctx->nvm_props->write_size;
-  const uint32_t n_write_units = ctx->data_size / write_size;
-  uintptr_t nvm_addr = (uintptr_t)ctx->area;
-  uint8_t*tracker = (uint8_t*)ctx->transaction_tracker;
+  const uint32_t write_size = dst_ctx->nvm_props->write_size;
+  const uint32_t n_write_units = dst_ctx->data_size / write_size;
+  uintptr_t nvm_addr = (uintptr_t)dst_ctx->area;
+  uint8_t*tracker = (uint8_t*)dst_ctx->transaction_tracker;
   uint32_t wu_cnt=0;
   for(uintptr_t i = 0; i < LFTL_DIV_CEIL(n_write_units,BITS_PER_BYTE); i++){
     const uint8_t track_byte = tracker[i];
@@ -729,8 +728,8 @@ void lftl_transaction_commit(lftl_ctx_t*ctx){
     for(unsigned int bi = 0; bi < BITS_PER_BYTE; bi++){
       if(0 == (track_byte & mask)){
         uint64_t buf[SIZE64(write_size)];
-        lftl_read(ctx,buf,(void*)nvm_addr,write_size);
-        write_core(ctx,(void*)nvm_addr,buf,write_size,TRANSACTION,ALIGNED);//TODO: optimize, at least by doing address translation once and calling nvm_write directly.
+        lftl_read(dst_ctx,buf,(void*)nvm_addr,write_size);
+        write_core(dst_ctx,(void*)nvm_addr,buf,write_size,TRANSACTION,ALIGNED);//TODO: optimize, at least by doing address translation once and calling nvm_write directly.
       }
       mask = mask << 1;
       nvm_addr += write_size;
@@ -739,17 +738,17 @@ void lftl_transaction_commit(lftl_ctx_t*ctx){
     }
   }
   //increment version and write new meta data in next slot
-  const unsigned int index = next_slot(ctx);
-  uint8_t*const base = slot_base(ctx, index);
-  const uint32_t version = 1 + get_slot_version(ctx, get_current_slot_index(ctx));
-  write_meta(ctx, index, version);
+  const unsigned int index = next_slot(dst_ctx);
+  uint8_t*const base = slot_base(dst_ctx, index);
+  const uint32_t version = 1 + get_slot_version(dst_ctx, get_current_slot_index(dst_ctx));
+  write_meta(dst_ctx, index, version);
   //update context
-  ctx->data = base;
-  ctx->transaction_tracker = LFTL_INVALID_POINTER;
+  dst_ctx->data = base;
+  dst_ctx->transaction_tracker = LFTL_INVALID_POINTER;
 }
 
-void lftl_transaction_abort(lftl_ctx_t*ctx){
-  ctx->transaction_tracker = LFTL_INVALID_POINTER;
+void lftl_transaction_abort(lftl_ctx_t*dst_ctx){
+  dst_ctx->transaction_tracker = LFTL_INVALID_POINTER;
 }
 
 void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
@@ -781,25 +780,25 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
   }
 }
 
-void lftl_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+void lftl_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   if(0==size) return;
-  if(lftl_is_ewlf(ctx)){
-    write_ewlf(ctx, dst_nvm_addr, src, size);
+  if(lftl_is_ewlf(dst_ctx)){
+    write_ewlf(dst_ctx, dst_nvm_addr, src, size);
   }else{
-    if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
-      lftl_basic_write(ctx, dst_nvm_addr, src, size);
+    if(dst_ctx->transaction_tracker == LFTL_INVALID_POINTER){
+      lftl_basic_write(dst_ctx, dst_nvm_addr, src, size);
     } else {
-      lftl_transaction_write(ctx, dst_nvm_addr, src, size);
+      lftl_transaction_write(dst_ctx, dst_nvm_addr, src, size);
     }
   }
 }
 
-void lftl_write_any(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+void lftl_write_any(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   if(0==size) return;
-  if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
-    lftl_basic_write(ctx, dst_nvm_addr, src, size);
+  if(dst_ctx->transaction_tracker == LFTL_INVALID_POINTER){
+    lftl_basic_write(dst_ctx, dst_nvm_addr, src, size);
   } else {
-    lftl_transaction_write_any(ctx, dst_nvm_addr, src, size);
+    lftl_transaction_write_any(dst_ctx, dst_nvm_addr, src, size);
   }
 }
 

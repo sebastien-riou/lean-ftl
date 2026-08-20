@@ -302,10 +302,10 @@ void lftl_erase_all(lftl_ctx_t*ctx);
 ///
 /// Performance considerations: this function erase one slot.
 ///
-/// \param ctx Context of the target LFTL area
+/// \param dst_ctx Context of the target LFTL area
 /// \param transaction_tracker Volatile buffer, see ::LFTL_TRANSACTION_TRACKER_SIZE
 ////////////////////////////////////////////////////////////
-void lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker);
+void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker);
 
 ////////////////////////////////////////////////////////////
 /// \brief Commit a transaction
@@ -315,29 +315,29 @@ void lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker);
 /// Performance considerations: this function writes at most
 /// one slot + meta data.
 ///
-/// \param ctx Context of the target LFTL area
+/// \param dst_ctx Context of the target LFTL area
 ////////////////////////////////////////////////////////////
-void lftl_transaction_commit(lftl_ctx_t*ctx);
+void lftl_transaction_commit(lftl_ctx_t*dst_ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Abort a transaction
 ///
 /// After this call, the transaction_tracker buffer can be discarded.
-/// \param ctx Context of the target LFTL area
+/// \param dst_ctx Context of the target LFTL area
 ////////////////////////////////////////////////////////////
-void lftl_transaction_abort(lftl_ctx_t*ctx);
+void lftl_transaction_abort(lftl_ctx_t*dst_ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Write aligned data to NVM
 ///
 /// This function detects if the write is part of a transaction 
 /// or not.
-/// \param ctx          Context of the target LFTL area
+/// \param dst_ctx          Context of the target LFTL area
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (LFTL_WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes, MUST be multiple of write unit size (LFTL_WU_SIZE)
 ////////////////////////////////////////////////////////////
-void lftl_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_write(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Read data from LFTL area
@@ -410,13 +410,13 @@ void lftl_memread_newer(void*dst, const void*const src, uintptr_t size);
 /// Each call performs a full erase and write of one slot and meta-data.
 /// The only exception is if size is 0, then it just returns without touching the NVM at all.
 ///
-/// \param ctx          LFTL area context
+/// \param dst_ctx      LFTL area context
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ///
 ////////////////////////////////////////////////////////////
-void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_basic_write(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Write aligned data to NVM in an LFTL area
@@ -427,13 +427,13 @@ void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, u
 /// Performance considerations: 
 /// Each call writes the specified number of bytes to NVM.
 ///
-/// \param ctx          LFTL area context
+/// \param dst_ctx      LFTL area context
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (LFTL_WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes, MUST be multiple of write unit size (LFTL_WU_SIZE)
 ///
 ////////////////////////////////////////////////////////////
-void lftl_transaction_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_transaction_write(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Read data from NVM
@@ -471,12 +471,12 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 ///
 /// This function detects if the write is part of a transaction 
 /// or not.
-/// \param ctx          Context of the target LFTL area
+/// \param dst_ctx      Context of the target LFTL area
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
-void lftl_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_write_any(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Write aligned or unaligned data to NVM in an LFTL area
@@ -487,13 +487,13 @@ void lftl_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uin
 /// Performance considerations: 
 /// Each call writes the specified number of bytes to NVM.
 ///
-/// \param ctx          LFTL area context
+/// \param dst_ctx      LFTL area context
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ///
 ////////////////////////////////////////////////////////////
-void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 /** @} */
 

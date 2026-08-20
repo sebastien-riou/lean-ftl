@@ -20,17 +20,33 @@
 
 #define DATA_SIZE (4*LFTL_WU_SIZE)
 
+//Use a huge size for EWLF data to reduce the number of tests
+#define EWLF_DATA_SIZE (LFTL_PAGE_SIZE / 3)
+
 typedef struct data_flash_struct {
 
   LFTL_AREA(a,
     uint64_t data0[SIZE64(DATA_SIZE)];
     uint64_t data1[SIZE64(DATA_SIZE)];
-    ,LFTL_WEAR_LEVELING_FACTOR(2))
+    ,LFTL_WEAR_LEVELING_FACTOR(2)
+  )
   
   LFTL_AREA(b,
     uint64_t data2[SIZE64(DATA_SIZE)];
     uint64_t data3[SIZE64(DATA_SIZE)];
-    ,LFTL_WEAR_LEVELING_FACTOR(2))
+    ,LFTL_WEAR_LEVELING_FACTOR(2)
+  )
+
+  LFTL_AREA_EWLF(ewlfa,
+    uint64_t data4[SIZE64(EWLF_DATA_SIZE)];
+    ,LFTL_WEAR_LEVELING_FACTOR(5)
+  )
+
+  LFTL_AREA_EWLF(ewlfb,
+    uint64_t data5[SIZE64(EWLF_DATA_SIZE)];
+    ,LFTL_WEAR_LEVELING_FACTOR(10)
+  )
+
   union {
   flash_sw_page_t unmanaged_page;
     struct {

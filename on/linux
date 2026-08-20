@@ -7,6 +7,7 @@ set(target_SRCS
 add_definitions( -DHAS_SAFE_BUTTON )
 add_definitions( -DHAS_TEARING_SIMULATION )
 add_definitions( -DHAS_PRINTF )
+#add_definitions( -DLFTL_DEBUG )
 
 set(target_include_sys_c_DIRS 
 	${LINUX_TARGET_DIR}

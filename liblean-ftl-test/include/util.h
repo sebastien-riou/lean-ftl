@@ -14,7 +14,7 @@
 #define PRINTLN(...) do{PRINTF( __VA_ARGS__ );PRINTF("\n\r");}while(0)
 #ifdef LFTL_DEBUG
   #define DEBUG_PRINTF(...) PRINTF( __VA_ARGS__ )
-  #define DEBUG_PRINTLN(...) PRINTLN( __VA_ARG__ )
+  #define DEBUG_PRINTLN(...) PRINTLN( __VA_ARGS__ )
   #define DEBUG_DUMP_CORE(addr,size,display_addr) dump_core(addr,size,display_addr)
   #define DEBUG_DUMP(addr,size) dump(addr,size)
 #else

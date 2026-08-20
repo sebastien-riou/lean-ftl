@@ -42,5 +42,35 @@ lftl_ctx_t nvmb = {
   .next = LFTL_INVALID_POINTER
 };
 
+lftl_ctx_t ewlfa = {
+  .nvm_props = &nvm_props,
+  .area = &nvm.ewlfa_pages,
+  .area_size = sizeof(nvm.ewlfa_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.ewlfa_data),
+  .erase = nvm_erase,
+  .write = nvm_write,
+  .read = nvm_read,
+  .error_handler = throw_exception,
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
+
+lftl_ctx_t ewlfb = {
+  .nvm_props = &nvm_props,
+  .area = &nvm.ewlfb_pages,
+  .area_size = sizeof(nvm.ewlfb_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.ewlfb_data),
+  .erase = nvm_erase,
+  .write = nvm_write,
+  .read = nvm_read,
+  .error_handler = throw_exception,
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
+
 int test_main();
 void test_callbacks();

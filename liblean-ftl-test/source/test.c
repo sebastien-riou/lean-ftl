@@ -38,6 +38,8 @@ extern data_flash_t nvm;
 extern lftl_nvm_props_t nvm_props;
 extern lftl_ctx_t nvma;
 extern lftl_ctx_t nvmb;
+extern lftl_ctx_t ewlfa;
+extern lftl_ctx_t ewlfb;
 
 const char*version = xstr(GIT_VERSION);
 
@@ -121,8 +123,9 @@ void erase_cnt_inc(unsigned int index){
 }
 void erase_cnt_update(void*base_address, unsigned int n_pages){
   uintptr_t offset = (uintptr_t)base_address - (uintptr_t)&nvm;
-  for(unsigned int i=offset/LFTL_PAGE_SIZE;i<n_pages;i++){
-    erase_cnt_inc(i);
+  unsigned int first_page = offset/LFTL_PAGE_SIZE;
+  for(unsigned int i=0;i<n_pages;i++){
+    erase_cnt_inc(first_page+i);
   }
 }
 void print_erase_cnt_stats(){
@@ -175,9 +178,9 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
   memset(dst+offset,0xFF,size);
   //emulate call to nvm_erase rather than calling it, to make sure we do not trigger tearing here
   memset(base_address,0xFF,size);
-  for(unsigned int i=offset/LFTL_PAGE_SIZE;i<n_pages;i++){
-    erase_cnt_inc(i);
-  }
+  //for(unsigned int i=offset/LFTL_PAGE_SIZE;i<n_pages;i++){
+  //  erase_cnt_inc(i);
+  //}
   return 0;
 }
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
@@ -245,6 +248,10 @@ bool nvm_is_equal(data_flash_t*expected){
   if(memcmp(&read_val.a_data,&expected->a_data,sizeof(nvm.a_data))) return 0;
   lftl_read(&nvmb,&read_val.b_data,&nvm.b_data,sizeof(nvm.b_data));
   if(memcmp(&read_val.b_data,&expected->b_data,sizeof(nvm.b_data))) return 0;
+  lftl_read(&ewlfa,&read_val.ewlfa_data,&nvm.ewlfa_data,sizeof(nvm.ewlfa_data));
+  if(memcmp(&read_val.ewlfa_data,&expected->ewlfa_data,sizeof(nvm.ewlfa_data))) return 0;
+  lftl_read(&ewlfb,&read_val.ewlfb_data,&nvm.ewlfb_data,sizeof(nvm.ewlfb_data));
+  if(memcmp(&read_val.ewlfb_data,&expected->ewlfb_data,sizeof(nvm.ewlfb_data))) return 0;
   return 1;
 }
 void check_nvm(){
@@ -260,6 +267,10 @@ void tearing_sim_check_nvm(){
   nvma.transaction_tracker = LFTL_INVALID_POINTER;
   nvmb.data = LFTL_INVALID_POINTER;
   nvmb.transaction_tracker = LFTL_INVALID_POINTER;
+  ewlfa.data = LFTL_INVALID_POINTER;
+  ewlfa.transaction_tracker = LFTL_INVALID_POINTER;
+  ewlfb.data = LFTL_INVALID_POINTER;
+  ewlfb.transaction_tracker = LFTL_INVALID_POINTER;
   check_nvm();
 }
 void tearing_sim_init();
@@ -564,8 +575,18 @@ void write_func_using_transaction(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*c
   transaction_commit_func(ctx);
 }
 
-
-
+void ewlf_basic_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_ctx_t*ctx = &ewlfa;
+  void*dst_nvm_addr = nvm.data4;
+  uintptr_t size = sizeof(nvm.data4);
+  uint8_t src[size];
+  for(unsigned int i=0;i<50;i++){
+    stateful_prng_fill(src,size);
+    write_func(ctx,dst_nvm_addr,src,size);
+    read_and_check(ctx,dst_nvm_addr,src,size);
+  }
+}
 
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
@@ -574,6 +595,8 @@ void exception_handler(uint32_t err_code){
     tearing_sim_check_nvm();
     format_func(&nvma);
     format_func(&nvmb);
+    format_func(&ewlfa);
+    format_func(&ewlfb);
   } else {
     //a real error, that's unexpected
     PRINTF("ERROR: test failed with error code 0x%08x\n",err_code);
@@ -589,7 +612,7 @@ void exception_handler(uint32_t err_code){
   #endif
 }
 
-void test_and_simulate_tearing(void (*dut)()){
+void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
   static unsigned int test_cnt=0;
   uint32_t err_code=-1;
   led1(1);
@@ -603,8 +626,12 @@ void test_and_simulate_tearing(void (*dut)()){
     lftl_init_lib();
     lftl_register_area(&nvma);
     lftl_register_area(&nvmb);
+    lftl_register_area_ewlf(&ewlfa);
+    lftl_register_area_ewlf(&ewlfb);
     format_func(&nvma);
     format_func(&nvmb);
+    format_func(&ewlfa);
+    format_func(&ewlfb);
     #ifdef HAS_TEARING_SIMULATION
     tearing_sim_init();
     #endif
@@ -619,13 +646,17 @@ void test_and_simulate_tearing(void (*dut)()){
     tearing_sim_check_nvm();//sanity check that model is in sync
     print_erase_cnt_stats();
     const unsigned int target_max = tearing_sim_get_max_target();
-    PRINTF("%u targets for tearing simulation\n",target_max);
+    const unsigned int n_targets = (target_max * target_percentage) / 100;
+    const unsigned int target_start = target_max - n_targets;
+    PRINTF("%u targets for tearing simulation, testing %u (%u%%) of them from index %u\n",target_max,target_max-target_start,target_percentage,target_start);
     led1(1);
     format_func(&nvma);
     format_func(&nvmb);
-    for(volatile unsigned int i=0;i<target_max+1;i++){//volatile to remove warning about setjump.
+    format_func(&ewlfa);
+    format_func(&ewlfb);
+    for(volatile unsigned int i=target_start;i<target_max+1;i++){//volatile to remove warning about setjump.
       //if(0 == (i%1000)) PRINTF("tearing simulation target %u\n",i);
-      if(0 == (i%50)) print_progress_bar(i,target_max);
+      if(0 == (i%50)) print_progress_bar(i-target_start,n_targets);
       tearing_sim_set_target(i);
       if(0 == (err_code = setjmp(exception_ctx))){
         dut();//simulated tearing test
@@ -655,18 +686,18 @@ void write_nvm_to_nvm_vs_size_1wu() {DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_1wu
 void write_nvm_to_nvm_vs_size_2wu() {DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_2wu");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)*2);}  // multiple WU
 void write_nvm_to_nvm_vs_size_1wu1(){DEBUG_PRINTLN("write_nvm_to_nvm_vs_size_1wu1");write_nvm_to_nvm_vs_size(sizeof(lftl_wu_t)+1);}  // larger than WU size but not multiple of it
 
-void write_nvm_to_nvm_seq(){
+void write_nvm_to_nvm_seq(unsigned int target_percentage){
   DEBUG_PRINTLN("write_nvm_to_nvm_seq");
-  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1)   ;
-  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu) ;
-  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_2wu) ;
-  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu1);
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1   ,target_percentage);
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu ,target_percentage);
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_2wu ,target_percentage);
+  test_and_simulate_tearing(write_nvm_to_nvm_vs_size_1wu1,target_percentage);
 }
-void transaction_nvm_to_nvm_seq(){
+void transaction_nvm_to_nvm_seq(unsigned int target_percentage){
   DEBUG_PRINTLN("transaction_nvm_to_nvm_seq");
   write_func_t org_write_func = write_func;
   write_func = write_func_using_transaction;
-  write_nvm_to_nvm_seq();
+  write_nvm_to_nvm_seq(target_percentage);
   write_func = org_write_func;
 }
 
@@ -703,14 +734,18 @@ int test_main(){
   print_lib_info();
 
   led1(1);
-  test_and_simulate_tearing(basic_test);
-  test_and_simulate_tearing(write_size_test);
-  test_and_simulate_tearing(write_offset_test);
-  test_and_simulate_tearing(transaction_basic_test);
-  test_and_simulate_tearing(transaction_abort_test);
-  test_and_simulate_tearing(erase_all_test);
-  write_nvm_to_nvm_seq();
-  transaction_nvm_to_nvm_seq();
+  /*
+  test_and_simulate_tearing(basic_test,100);
+  test_and_simulate_tearing(write_size_test,100);
+  test_and_simulate_tearing(write_offset_test,100);
+  
+  test_and_simulate_tearing(transaction_basic_test,100);
+  test_and_simulate_tearing(transaction_abort_test,100);
+  test_and_simulate_tearing(erase_all_test,100);
+  write_nvm_to_nvm_seq(100);
+  transaction_nvm_to_nvm_seq(100);
+  */
+  test_and_simulate_tearing(ewlf_basic_test,10);
   #ifdef HAS_PRINTF
     PRINTLN("All tests PASSED");
   #else

@@ -87,6 +87,7 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   if(trace_accessors){
     printf("nvm_erase @0x%08lx, %lu bytes\n\r",(uintptr_t)base_address,size);
   }
+  erase_cnt_update(base_address, n_pages);
   if(base_address < nvm_base) return 1;
   if(((uintptr_t)base_address + size) > ((uintptr_t)nvm_base + nvm_size)) return 2;
   //Linux makes it hard to get nvm aligned to large units like 4k or 8k, so we check against the minimum between the original constraint and the alignement of nvm
@@ -97,7 +98,6 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   if(save_nvm_file_name){
     write_file(save_nvm_file_name,nvm_base,nvm_size);
   }
-  erase_cnt_update(base_address, n_pages);
   return tearing ? SIMULATED_TEARING:0;
 }
 

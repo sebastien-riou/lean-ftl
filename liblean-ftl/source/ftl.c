@@ -4,6 +4,8 @@
 
 #include "lean-ftl.h"
 
+#define LFTL_EWLF_MARKER LFTL_INVALID_POINTER2
+
 #ifdef LFTL_DEBUG
   #ifdef HAS_PRINTF
     #include <stdio.h>
@@ -251,19 +253,26 @@ static lftl_ctx_t*get_any_ctx(lftl_ctx_t*ctx, const void*const nvm_addr){
   return get_other_ctx(ctx,nvm_addr);
 }
 
+static lftl_ctx_t*first_area = LFTL_INVALID_POINTER;
+static lftl_ctx_t*last_area = LFTL_INVALID_POINTER;
+static lftl_ctx_t*first_area_ewlf = LFTL_INVALID_POINTER;
+static lftl_ctx_t*last_area_ewlf = LFTL_INVALID_POINTER;
 
-bool has_several_nvms = 0;
-lftl_ctx_t*first_area = LFTL_INVALID_POINTER;
-lftl_ctx_t*last_area = LFTL_INVALID_POINTER;
+static bool has_several_areas(){
+  return first_area != last_area;
+}
+static bool has_several_areas_ewlf(){
+  return first_area_ewlf != last_area_ewlf;
+}
 
-static lftl_ctx_t*is_in_any_nvm(const void*const addr){
-  lftl_ctx_t*ctx = first_area;
+static lftl_ctx_t*is_in_any_area_core(const void*const addr, lftl_ctx_t*first){
+  lftl_ctx_t*ctx = first;
   ctx = get_any_ctx(ctx, addr); // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
   if(LFTL_INVALID_POINTER!=ctx) return ctx;
   // addr is not in LFTL areas, check other NVM addresses
-  ctx = first_area;
+  ctx = first;
   if(is_in_nvm(ctx,addr)) return ctx;
-  if(has_several_nvms){
+  if(has_several_areas()){
     const lftl_ctx_t*stop=ctx;
     while(ctx->next != stop){
       if(LFTL_INVALID_POINTER==ctx->next) break;
@@ -272,6 +281,14 @@ static lftl_ctx_t*is_in_any_nvm(const void*const addr){
     }
   }
   return LFTL_INVALID_POINTER;
+}
+
+static lftl_ctx_t*is_in_any_area(const void*const addr){
+  return is_in_any_area_core(addr, first_area);
+}
+
+static lftl_ctx_t*is_in_any_area_ewlf(const void*const addr){
+  return is_in_any_area_core(addr, first_area_ewlf);
 }
 
 static void*translate_addr(lftl_ctx_t*ctx, const void*const nvm_addr, uintptr_t size){
@@ -351,7 +368,7 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   if(base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
   void* phy_addr = base + offset;
   const uint8_t* src_phy_addr = src;
-  lftl_ctx_t* src_ctx = is_in_any_nvm(src_phy_addr);
+  lftl_ctx_t* src_ctx = is_in_any_area(src_phy_addr);
   if(LFTL_INVALID_POINTER!=src_ctx){
     if(is_in_data(src_ctx,src_phy_addr)){ // src is in an LFTL area
       src_phy_addr = translate_addr(src_ctx, (void*)src_phy_addr, size);
@@ -419,6 +436,97 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   DEBUG_PRINTLN("write_core exit");
 }
 
+static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
+  DEBUG_PRINTLN("write_ewlf(%p,%p,%p,%u) entry",ctx,dst_nvm_addr,src,size);
+  //printf("src=%p, size=0x%08lx\n",src,size);
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  const uintptr_t addr_misalignement = ((uintptr_t)dst_nvm_addr % write_size);
+  const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
+  const uint32_t size_misalignement = size % write_size;
+  const bool aligned = (0 == addr_misalignement) && (0 == size_misalignement);
+  uint64_t wu[SIZE64(write_size)];
+  memset(&wu,0x55,sizeof(wu));
+  uintptr_t size_aligned = size + addr_misalignement;
+  if(!aligned){
+    // unaligned: extend the start address and end address to start of WU and end of WU respectively
+    if(0 != (size_aligned % write_size)){
+      size_aligned += write_size - size_aligned % write_size;
+    }
+  }
+  const void*const current_phy_addr = translate_addr(ctx, (void*)dst_nvm_addr_aligned, size_aligned);
+  const uint8_t*const current_base = slot_base(ctx,get_current_slot_index(ctx));
+  uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)ctx->data;
+  const uintptr_t end_offset = offset+size_aligned;
+  const unsigned int index = next_slot(ctx);
+  uint8_t*const base = slot_base(ctx, index);
+  if(base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
+  void* phy_addr = base + offset;
+  const uint8_t* src_phy_addr = src;
+  lftl_ctx_t* src_ctx = is_in_any_area(src_phy_addr);
+  if(LFTL_INVALID_POINTER!=src_ctx){
+    if(is_in_data(src_ctx,src_phy_addr)){ // src is in an LFTL area
+      src_phy_addr = translate_addr(src_ctx, (void*)src_phy_addr, size);
+    }
+  }else{
+    src_ctx = ctx;
+  }
+  //erase next slot
+  erase_slot(ctx,index);
+  //write new data in next slot
+  if(offset){
+    nvm_write(ctx, base, current_base, offset);
+  }
+  if(addr_misalignement){
+    // fix up first WU
+    uintptr_t size_consumed = write_size - addr_misalignement;
+    if(size_consumed > size){
+      const uintptr_t tail_size = size_consumed - size;
+      size_consumed = size;
+      nvm_read(ctx, ((uint8_t*)&wu) + addr_misalignement + size, current_base+offset+ addr_misalignement+size, tail_size);
+    }
+    nvm_read(ctx, &wu, current_base+offset, addr_misalignement);
+    mem_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
+    nvm_write(ctx,phy_addr,&wu,write_size);
+    // adjust write range
+    offset += write_size;
+    phy_addr = base + offset;
+    src_phy_addr += size_consumed;
+    size_aligned -= write_size;
+    size -= size_consumed;
+  }
+  if(size != size_aligned){
+    //remove the last write unit from the write range as it needs special handling
+    size_aligned -= write_size;
+  }
+  //at this point size_aligned >= size
+  nvm_write(ctx,phy_addr,src_phy_addr,size_aligned);
+  if(size != size_aligned){
+    const uintptr_t last_wu_offset = offset+size_aligned;
+    // fix up last WU
+    uintptr_t size_misalignement = size % write_size;//((uintptr_t)dst_nvm_addr + size) % write_size;
+    const uintptr_t wu_part1_size = size_misalignement;
+    const uint8_t* wu_part1_src = ((uint8_t*)src_phy_addr) + size_aligned;
+    mem_read(src_ctx,&wu,wu_part1_src, wu_part1_size);
+    uint8_t*const wu_part2_base = ((uint8_t*)&wu) + size_misalignement;
+    const uintptr_t wu_part2_size = write_size - size_misalignement;
+    const uint8_t* wu_part2_src = current_base + last_wu_offset + size_misalignement;
+    nvm_read(ctx, wu_part2_base, wu_part2_src, wu_part2_size);
+    nvm_write(ctx, base+last_wu_offset, &wu, write_size);
+  }
+  
+  const uintptr_t remaining = ctx->data_size - end_offset;
+  if(remaining){
+    nvm_write(ctx, base+end_offset, current_base + end_offset, remaining);
+  }
+  //increment version and write new meta data in next slot
+  const uint32_t version = 1 + get_slot_version(ctx, get_current_slot_index(ctx));
+  write_meta(ctx, index, version);
+  //update context
+  ctx->data = base;
+
+  DEBUG_PRINTLN("write_ewlf exit");
+}
+
 static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
   DEBUG_PRINTLN("erase entry");
   const uint32_t write_size = ctx->nvm_props->write_size;
@@ -470,20 +578,29 @@ const char* lftl_build_type(){
 }
 
 void lftl_init_lib(){
-  has_several_nvms = 0;
   first_area = LFTL_INVALID_POINTER;
   last_area = LFTL_INVALID_POINTER;
+  first_area_ewlf = LFTL_INVALID_POINTER;
+  last_area_ewlf = LFTL_INVALID_POINTER;
+}
+
+static void lftl_register_area_core(lftl_ctx_t*ctx, lftl_ctx_t**first, lftl_ctx_t**last){
+  if(LFTL_INVALID_POINTER==*first){
+    *first = ctx;
+  } else {
+    (*last)->next = ctx;
+  }
+  *last = ctx;
+  ctx->next = *first;
 }
 
 void lftl_register_area(lftl_ctx_t*ctx){
-  if(LFTL_INVALID_POINTER==first_area){
-    first_area = ctx;
-  } else {
-    last_area->next = ctx;
-    if(ctx->nvm_props!=first_area->nvm_props) has_several_nvms = 1;
-  }
-  last_area = ctx;
-  ctx->next = first_area;
+  lftl_register_area_core(ctx, &first_area, &last_area);
+}
+
+void lftl_register_area_ewlf(lftl_ctx_t*ctx){
+  ctx->transaction_tracker = LFTL_EWLF_MARKER;
+  lftl_register_area_core(ctx, &first_area_ewlf, &last_area_ewlf);
 }
 
 void lftl_format(lftl_ctx_t*ctx){
@@ -499,6 +616,10 @@ lftl_ctx_t*lftl_get_ctx(const void*const addr){
   lftl_ctx_t*ctx = first_area;
   if(is_in_data(ctx,addr)) return ctx;
   return get_other_ctx(ctx,addr);
+}
+
+bool lftl_is_ewlf(const lftl_ctx_t*const ctx){
+  return ctx->transaction_tracker == LFTL_EWLF_MARKER;
 }
 
 void lftl_erase_all(lftl_ctx_t*ctx){
@@ -643,10 +764,14 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 
 void lftl_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   if(0==size) return;
-  if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
-    lftl_basic_write(ctx, dst_nvm_addr, src, size);
-  } else {
-    lftl_transaction_write(ctx, dst_nvm_addr, src, size);
+  if(lftl_is_ewlf(ctx)){
+    write_ewlf(ctx, dst_nvm_addr, src, size);
+  }else{
+    if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
+      lftl_basic_write(ctx, dst_nvm_addr, src, size);
+    } else {
+      lftl_transaction_write(ctx, dst_nvm_addr, src, size);
+    }
   }
 }
 
@@ -672,7 +797,7 @@ void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, ui
 
 void lftl_memread(void*dst, const void*const src, uintptr_t size){
   DEBUG_PRINTLN("lftl_memread entry");
-  lftl_ctx_t*ctx = is_in_any_nvm(src);
+  lftl_ctx_t*ctx = is_in_any_area(src);
   if(LFTL_INVALID_POINTER==ctx) { // regular memory
     memcpy(dst,src,size);
   } else { // NVM, in or out of any LFTL area
@@ -684,7 +809,7 @@ void lftl_memread(void*dst, const void*const src, uintptr_t size){
 
 void lftl_memread_newer(void*dst, const void*const src, uintptr_t size){
   DEBUG_PRINTLN("lftl_memread_newer entry");
-  lftl_ctx_t*ctx = is_in_any_nvm(src);
+  lftl_ctx_t*ctx = is_in_any_area(src);
   if(LFTL_INVALID_POINTER==ctx) { // regular memory
     memcpy(dst,src,size);
   } else { // NVM, in or out of any LFTL area

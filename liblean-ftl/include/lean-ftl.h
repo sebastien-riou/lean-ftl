@@ -2,9 +2,11 @@
 
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 /// Value used for invalid pointers.
 #define LFTL_INVALID_POINTER ((void*)-1)
+#define LFTL_INVALID_POINTER2 ((void*)-2)
 
 #ifndef LFTL_WU_MAX_SIZE
   #define LFTL_WU_MAX_SIZE 128 
@@ -217,7 +219,7 @@ void lftl_init_lib();
 ////////////////////////////////////////////////////////////
 /// \brief Register an LFTL area
 ///
-/// Register and LFTL area. This allows to 
+/// Register an LFTL area. This allows to 
 /// be able to copy data from the LFTL area into 
 /// another by using the write functions, i.e., without
 /// intermediate buffering.
@@ -227,6 +229,20 @@ void lftl_init_lib();
 ///
 ////////////////////////////////////////////////////////////
 void lftl_register_area(lftl_ctx_t*ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief Register an LFTL EWLF area
+///
+/// Register an LFTL EWLF area. This allows to 
+/// be able to copy data from the LFTL area into 
+/// another by using the write functions, i.e., without
+/// intermediate buffering.
+/// Call this for each area, after ::lftl_init_lib
+/// and before any other function (except the Meta information API group).
+/// \param ctx Context of the LFTL area to register
+///
+////////////////////////////////////////////////////////////
+void lftl_register_area_ewlf(lftl_ctx_t*ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Format an LFTL area
@@ -257,6 +273,14 @@ void lftl_format(lftl_ctx_t*ctx);//NOT covered by anti-tearing
 /// \returns a valid LFTL context or LFTL_INVALID_POINTER
 ////////////////////////////////////////////////////////////
 lftl_ctx_t*lftl_get_ctx(const void*const addr);
+
+////////////////////////////////////////////////////////////
+/// \brief Indicates if the LFTL context is an EWLF area.
+///
+/// \param ctx A valid LFTL context
+/// \returns 0 or 1
+////////////////////////////////////////////////////////////
+bool lftl_is_ewlf(const lftl_ctx_t*const ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Erase all the data of an LFTL area
@@ -489,6 +513,8 @@ void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*co
 #define LFTL_DIV_CEIL(d,q) (((d)+(q)-1)/(q))
 
 
+#define LFTL_MAX(a,b) ( (a) > (b) ? (a) : (b) )
+
 #ifdef LFTL_DEFINE_HELPERS
 //helpers to declare LFTL areas
 //assumes they are all within a variable named "nvm"
@@ -572,6 +598,20 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA(name, area_content, wear_leveling_factor) union {\
   flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_WU_SIZE)*(wear_leveling_factor)];\
+  struct {area_content} name##_data;\
+  struct {area_content};\
+  struct {area_content} _##name##_data;\
+  };
+
+#define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
+#define LFTL_EWLF_RECORD_SIZE(area_content) (sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_WU_SIZE)
+
+/// Declare an LFTL area with Extreme Wear Leveling Factor
+/// \param name Name of the LFTL area.
+/// \param area_content Members of the LFTL area.
+/// \param wear_leveling_factor Only integers are supported, minimum is 2.
+#define LFTL_AREA_EWLF(name, area_content, wear_leveling_factor) union {\
+  flash_sw_page_t name##_pages[LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
   struct {area_content} name##_data;\
   struct {area_content};\
   struct {area_content} _##name##_data;\

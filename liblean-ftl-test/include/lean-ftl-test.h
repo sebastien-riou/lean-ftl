@@ -12,6 +12,10 @@ lftl_nvm_props_t nvm_props = {
     .size = sizeof(nvm),
     .write_size = LFTL_WU_SIZE,
     .erase_size = LFTL_PAGE_SIZE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
   };
 
 lftl_ctx_t nvma = {
@@ -20,10 +24,6 @@ lftl_ctx_t nvma = {
   .area_size = sizeof(nvm.a_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.a_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER,
   .next = LFTL_INVALID_POINTER
 };
@@ -34,10 +34,6 @@ lftl_ctx_t nvmb = {
   .area_size = sizeof(nvm.b_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.b_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER,
   .next = LFTL_INVALID_POINTER
 };
@@ -48,10 +44,6 @@ lftl_ctx_t ewlfa = {
   .area_size = sizeof(nvm.ewlfa_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.ewlfa_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER,
   .next = LFTL_INVALID_POINTER
 };
@@ -63,10 +55,6 @@ lftl_ctx_t ewlfb = {
   .area_size = sizeof(nvm.ewlfb_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.ewlfb_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER,
   .next = LFTL_INVALID_POINTER
 };

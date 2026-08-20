@@ -63,17 +63,6 @@
 #define LFTL_INTERNAL_ERROR -1
 /// @}
 
-/** @struct lftl_nvm_props_struct
- *  Properties of the physical NVM
- *
- */
-typedef struct lftl_nvm_props_struct {
-  void*base;          /**< the base address of the entire NVM */
-  uintptr_t size;     /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
-  uint32_t write_size;/**< at least what the NVM is supporting, or a multiple of it */
-  uint32_t erase_size;/**< at least what the NVM is supporting, or a multiple of it */
-} lftl_nvm_props_t;
-
 /**
  * \brief Callback to erase physical NVM
  *
@@ -136,6 +125,22 @@ typedef uint8_t (*nvm_read_t)(void* dst, const void*const src_nvm_addr, uintptr_
  */
 typedef void (*error_handler_t)(uint32_t err_code);
 
+/** @struct lftl_nvm_props_struct
+ *  Properties of the physical NVM
+ *
+ */
+typedef struct lftl_nvm_props_struct {
+  void*base;            /**< the base address of the entire NVM */
+  uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
+  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it */
+  uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it */
+  nvm_erase_t erase;    /**< Erase function for this area. */
+  nvm_write_t write;    /**< Write function for this area. */
+  nvm_read_t read;      /**< Read function for this area. */
+  error_handler_t error_handler;  /**< Error handler function for this area. */
+  void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
+} lftl_nvm_props_t;
+
 /** @struct lftl_ctx_struct
  *  Structure defining the context for an LFTL area.
  * 
@@ -147,10 +152,6 @@ typedef struct lftl_ctx_struct {
   uintptr_t area_size;            /**< Total size in bytes of the LFTL area. */
   void *data;                     /**< Initialize it to ::LFTL_INVALID_POINTER. */
   uintptr_t data_size;            /**< Size in bytes of the data in this LFTL area. */
-  nvm_erase_t erase;              /**< Erase function for this area. */
-  nvm_write_t write;              /**< Write function for this area. */
-  nvm_read_t read;                /**< Read function for this area. */
-  error_handler_t error_handler;  /**< Error handler function for this area. */
   void *transaction_tracker;      /**< Initialize it ::LFTL_INVALID_POINTER. */
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
 } lftl_ctx_t;
@@ -229,6 +230,8 @@ void lftl_init_lib();
 ///
 ////////////////////////////////////////////////////////////
 void lftl_register_area(lftl_ctx_t*ctx);
+
+void lftl_register_nvm(lftl_nvm_props_t*ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Register an LFTL EWLF area

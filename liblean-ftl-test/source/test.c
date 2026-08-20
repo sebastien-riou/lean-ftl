@@ -734,7 +734,7 @@ int test_main(){
   print_lib_info();
 
   led1(1);
-  /*
+
   test_and_simulate_tearing(basic_test,100);
   test_and_simulate_tearing(write_size_test,100);
   test_and_simulate_tearing(write_offset_test,100);
@@ -744,7 +744,7 @@ int test_main(){
   test_and_simulate_tearing(erase_all_test,100);
   write_nvm_to_nvm_seq(100);
   transaction_nvm_to_nvm_seq(100);
-  */
+  
   test_and_simulate_tearing(ewlf_basic_test,10);
   #ifdef HAS_PRINTF
     PRINTLN("All tests PASSED");

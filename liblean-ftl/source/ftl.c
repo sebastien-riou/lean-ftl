@@ -334,6 +334,31 @@ void dbg_memcpy(void*dst, const void*const src, uintptr_t size){
   }
 }
 */
+
+//if *src_phy_addr is managed by LFTL
+//  correct it to target the valid data
+//  correct *src_ctx to point to the right context
+//else
+//  leave inputs intact
+static void check_src_phy_addr(lftl_ctx_t**src_ctx, const uint8_t**p_src_phy_addr, uintptr_t size){
+  const uint8_t*src_phy_addr = *p_src_phy_addr;
+  lftl_ctx_t* ctx = is_in_any_area(src_phy_addr);
+  if(LFTL_INVALID_POINTER!=ctx){
+    if(is_in_data(ctx,src_phy_addr)){ // src is in an LFTL area
+      *p_src_phy_addr = translate_addr(ctx, (void*)src_phy_addr, size);
+      *src_ctx = ctx;
+    }
+  }else{
+    ctx = is_in_any_area_ewlf(src_phy_addr);
+    if(LFTL_INVALID_POINTER!=ctx){
+      if(is_in_data(ctx,src_phy_addr)){ // src is in an LFTL area
+        *p_src_phy_addr = translate_addr(ctx, (void*)src_phy_addr, size);
+        *src_ctx = ctx;
+      }
+    }
+  }
+}
+
 static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool transaction, bool aligned){
   DEBUG_PRINTLN("write_core(%p,%p,%p,%u,%u,%u) entry",ctx,dst_nvm_addr,src,size,transaction,aligned);
   //printf("src=%p, size=0x%08lx\n",src,size);
@@ -368,14 +393,8 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   if(base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
   void* phy_addr = base + offset;
   const uint8_t* src_phy_addr = src;
-  lftl_ctx_t* src_ctx = is_in_any_area(src_phy_addr);
-  if(LFTL_INVALID_POINTER!=src_ctx){
-    if(is_in_data(src_ctx,src_phy_addr)){ // src is in an LFTL area
-      src_phy_addr = translate_addr(src_ctx, (void*)src_phy_addr, size);
-    }
-  }else{
-    src_ctx = ctx;
-  }
+  lftl_ctx_t* src_ctx = ctx;
+  check_src_phy_addr(&src_ctx,&src_phy_addr,size);
   if(!transaction){
     if(LFTL_INVALID_POINTER != ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_TRANSACTION_ONGOING);
     //erase next slot
@@ -462,14 +481,8 @@ static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   if(base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
   void* phy_addr = base + offset;
   const uint8_t* src_phy_addr = src;
-  lftl_ctx_t* src_ctx = is_in_any_area(src_phy_addr);
-  if(LFTL_INVALID_POINTER!=src_ctx){
-    if(is_in_data(src_ctx,src_phy_addr)){ // src is in an LFTL area
-      src_phy_addr = translate_addr(src_ctx, (void*)src_phy_addr, size);
-    }
-  }else{
-    src_ctx = ctx;
-  }
+  lftl_ctx_t* src_ctx = ctx;
+  check_src_phy_addr(&src_ctx,&src_phy_addr,size);
   //erase next slot
   erase_slot(ctx,index);
   //write new data in next slot

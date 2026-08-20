@@ -359,6 +359,75 @@ static void check_src_phy_addr(lftl_ctx_t**src_ctx, const uint8_t**p_src_phy_add
   }
 }
 
+static void write_src_phy_addr_to_dst_phy_addr(
+  lftl_ctx_t*dst_ctx,
+  uintptr_t offset,
+  uintptr_t size,
+  uint8_t*const dst_base,
+  const uint8_t*const current_base,
+  lftl_ctx_t*src_ctx,
+  const uint8_t* src_phy_addr,
+  uint32_t write_size,
+  uintptr_t addr_misalignement,
+  uintptr_t dst_nvm_addr_aligned,
+  uint32_t size_misalignement,
+  uintptr_t size_aligned,
+  bool transaction
+){
+  const uintptr_t end_offset = offset+size_aligned;
+  uint64_t wu[SIZE64(write_size)];
+  memset(&wu,0x55,sizeof(wu));
+  void* dst_phy_addr = dst_base + offset;
+  if(!transaction){
+    if(offset){
+      nvm_write(dst_ctx, dst_base, current_base, offset);
+    }
+  }
+  if(addr_misalignement){
+    // fix up first WU
+    uintptr_t size_consumed = write_size - addr_misalignement;
+    if(size_consumed > size){
+      const uintptr_t tail_size = size_consumed - size;
+      size_consumed = size;
+      nvm_read(dst_ctx, ((uint8_t*)&wu) + addr_misalignement + size, current_base+offset+ addr_misalignement+size, tail_size);
+    }
+    nvm_read(dst_ctx, &wu, current_base+offset, addr_misalignement);
+    mem_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
+    nvm_write(dst_ctx,dst_phy_addr,&wu,write_size);
+    // adjust write range
+    offset += write_size;
+    dst_phy_addr = dst_base + offset;
+    src_phy_addr += size_consumed;
+    size_aligned -= write_size;
+    size -= size_consumed;
+  }
+  if(size != size_aligned){
+    //remove the last write unit from the write range as it needs special handling
+    size_aligned -= write_size;
+  }
+  //at this point size_aligned >= size
+  nvm_write(dst_ctx,dst_phy_addr,src_phy_addr,size_aligned);
+  if(size != size_aligned){
+    const uintptr_t last_wu_offset = offset+size_aligned;
+    // fix up last WU
+    uintptr_t size_misalignement = size % write_size;//((uintptr_t)dst_nvm_addr + size) % write_size;
+    const uintptr_t wu_part1_size = size_misalignement;
+    const uint8_t* wu_part1_src = ((uint8_t*)src_phy_addr) + size_aligned;
+    mem_read(src_ctx,&wu,wu_part1_src, wu_part1_size);
+    uint8_t*const wu_part2_base = ((uint8_t*)&wu) + size_misalignement;
+    const uintptr_t wu_part2_size = write_size - size_misalignement;
+    const uint8_t* wu_part2_src = current_base + last_wu_offset + size_misalignement;
+    nvm_read(dst_ctx, wu_part2_base, wu_part2_src, wu_part2_size);
+    nvm_write(dst_ctx, dst_base+last_wu_offset, &wu, write_size);
+  }
+  if(!transaction){
+    const uintptr_t remaining = dst_ctx->data_size - end_offset;
+    if(remaining){
+      nvm_write(dst_ctx, dst_base+end_offset, current_base + end_offset, remaining);
+    }
+  }
+}
+
 static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool transaction, bool aligned){
   DEBUG_PRINTLN("write_core(%p,%p,%p,%u,%u,%u) entry",ctx,dst_nvm_addr,src,size,transaction,aligned);
   //printf("src=%p, size=0x%08lx\n",src,size);
@@ -384,14 +453,15 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
       size_aligned += write_size - size_aligned % write_size;
     }
   }
+  const uint32_t size_misalignement = size % write_size;
+
   const void*const current_phy_addr = translate_addr(ctx, (void*)dst_nvm_addr_aligned, size_aligned);
   const uint8_t*const current_base = slot_base(ctx,get_current_slot_index(ctx));
   uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)ctx->data;
-  const uintptr_t end_offset = offset+size_aligned;
+  //const uintptr_t end_offset = offset+size_aligned;
   const unsigned int index = next_slot(ctx);
-  uint8_t*const base = slot_base(ctx, index);
-  if(base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
-  void* phy_addr = base + offset;
+  uint8_t*const dst_base = slot_base(ctx, index);
+  if(dst_base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
   const uint8_t* src_phy_addr = src;
   lftl_ctx_t* src_ctx = ctx;
   check_src_phy_addr(&src_ctx,&src_phy_addr,size);
@@ -399,58 +469,28 @@ static void write_core(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
     if(LFTL_INVALID_POINTER != ctx->transaction_tracker) ctx->error_handler(LFTL_ERROR_TRANSACTION_ONGOING);
     //erase next slot
     erase_slot(ctx,index);
-    //write new data in next slot
-    if(offset){
-      nvm_write(ctx, base, current_base, offset);
-    }
   }
-  if(addr_misalignement){
-    // fix up first WU
-    uintptr_t size_consumed = write_size - addr_misalignement;
-    if(size_consumed > size){
-      const uintptr_t tail_size = size_consumed - size;
-      size_consumed = size;
-      nvm_read(ctx, ((uint8_t*)&wu) + addr_misalignement + size, current_base+offset+ addr_misalignement+size, tail_size);
-    }
-    nvm_read(ctx, &wu, current_base+offset, addr_misalignement);
-    mem_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
-    nvm_write(ctx,phy_addr,&wu,write_size);
-    // adjust write range
-    offset += write_size;
-    phy_addr = base + offset;
-    src_phy_addr += size_consumed;
-    size_aligned -= write_size;
-    size -= size_consumed;
-  }
-  if(size != size_aligned){
-    //remove the last write unit from the write range as it needs special handling
-    size_aligned -= write_size;
-  }
-  //at this point size_aligned >= size
-  nvm_write(ctx,phy_addr,src_phy_addr,size_aligned);
-  if(size != size_aligned){
-    const uintptr_t last_wu_offset = offset+size_aligned;
-    // fix up last WU
-    uintptr_t size_misalignement = size % write_size;//((uintptr_t)dst_nvm_addr + size) % write_size;
-    const uintptr_t wu_part1_size = size_misalignement;
-    const uint8_t* wu_part1_src = ((uint8_t*)src_phy_addr) + size_aligned;
-    mem_read(src_ctx,&wu,wu_part1_src, wu_part1_size);
-    uint8_t*const wu_part2_base = ((uint8_t*)&wu) + size_misalignement;
-    const uintptr_t wu_part2_size = write_size - size_misalignement;
-    const uint8_t* wu_part2_src = current_base + last_wu_offset + size_misalignement;
-    nvm_read(ctx, wu_part2_base, wu_part2_src, wu_part2_size);
-    nvm_write(ctx, base+last_wu_offset, &wu, write_size);
-  }
+  write_src_phy_addr_to_dst_phy_addr(
+    ctx,
+    offset,
+    size,
+    dst_base,
+    current_base,
+    src_ctx,
+    src_phy_addr,
+    write_size,
+    addr_misalignement,
+    dst_nvm_addr_aligned,
+    size_misalignement,
+    size_aligned,
+    transaction      
+  );
   if(!transaction){
-    const uintptr_t remaining = ctx->data_size - end_offset;
-    if(remaining){
-      nvm_write(ctx, base+end_offset, current_base + end_offset, remaining);
-    }
     //increment version and write new meta data in next slot
     const uint32_t version = 1 + get_slot_version(ctx, get_current_slot_index(ctx));
     write_meta(ctx, index, version);
     //update context
-    ctx->data = base;
+    ctx->data = dst_base;
   }
   DEBUG_PRINTLN("write_core exit");
 }
@@ -463,8 +503,6 @@ static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
   const uint32_t size_misalignement = size % write_size;
   const bool aligned = (0 == addr_misalignement) && (0 == size_misalignement);
-  uint64_t wu[SIZE64(write_size)];
-  memset(&wu,0x55,sizeof(wu));
   uintptr_t size_aligned = size + addr_misalignement;
   if(!aligned){
     // unaligned: extend the start address and end address to start of WU and end of WU respectively
@@ -475,67 +513,35 @@ static void write_ewlf(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const
   const void*const current_phy_addr = translate_addr(ctx, (void*)dst_nvm_addr_aligned, size_aligned);
   const uint8_t*const current_base = slot_base(ctx,get_current_slot_index(ctx));
   uintptr_t offset = (uintptr_t)current_phy_addr - (uintptr_t)ctx->data;
-  const uintptr_t end_offset = offset+size_aligned;
   const unsigned int index = next_slot(ctx);
-  uint8_t*const base = slot_base(ctx, index);
-  if(base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
-  void* phy_addr = base + offset;
+  uint8_t*const dst_base = slot_base(ctx, index);
+  if(dst_base == current_base) ctx->error_handler(LFTL_INTERNAL_ERROR);
   const uint8_t* src_phy_addr = src;
   lftl_ctx_t* src_ctx = ctx;
   check_src_phy_addr(&src_ctx,&src_phy_addr,size);
   //erase next slot
   erase_slot(ctx,index);
   //write new data in next slot
-  if(offset){
-    nvm_write(ctx, base, current_base, offset);
-  }
-  if(addr_misalignement){
-    // fix up first WU
-    uintptr_t size_consumed = write_size - addr_misalignement;
-    if(size_consumed > size){
-      const uintptr_t tail_size = size_consumed - size;
-      size_consumed = size;
-      nvm_read(ctx, ((uint8_t*)&wu) + addr_misalignement + size, current_base+offset+ addr_misalignement+size, tail_size);
-    }
-    nvm_read(ctx, &wu, current_base+offset, addr_misalignement);
-    mem_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
-    nvm_write(ctx,phy_addr,&wu,write_size);
-    // adjust write range
-    offset += write_size;
-    phy_addr = base + offset;
-    src_phy_addr += size_consumed;
-    size_aligned -= write_size;
-    size -= size_consumed;
-  }
-  if(size != size_aligned){
-    //remove the last write unit from the write range as it needs special handling
-    size_aligned -= write_size;
-  }
-  //at this point size_aligned >= size
-  nvm_write(ctx,phy_addr,src_phy_addr,size_aligned);
-  if(size != size_aligned){
-    const uintptr_t last_wu_offset = offset+size_aligned;
-    // fix up last WU
-    uintptr_t size_misalignement = size % write_size;//((uintptr_t)dst_nvm_addr + size) % write_size;
-    const uintptr_t wu_part1_size = size_misalignement;
-    const uint8_t* wu_part1_src = ((uint8_t*)src_phy_addr) + size_aligned;
-    mem_read(src_ctx,&wu,wu_part1_src, wu_part1_size);
-    uint8_t*const wu_part2_base = ((uint8_t*)&wu) + size_misalignement;
-    const uintptr_t wu_part2_size = write_size - size_misalignement;
-    const uint8_t* wu_part2_src = current_base + last_wu_offset + size_misalignement;
-    nvm_read(ctx, wu_part2_base, wu_part2_src, wu_part2_size);
-    nvm_write(ctx, base+last_wu_offset, &wu, write_size);
-  }
-  
-  const uintptr_t remaining = ctx->data_size - end_offset;
-  if(remaining){
-    nvm_write(ctx, base+end_offset, current_base + end_offset, remaining);
-  }
+  write_src_phy_addr_to_dst_phy_addr(
+    ctx,
+    offset,
+    size,
+    dst_base,
+    current_base,
+    src_ctx,
+    src_phy_addr,
+    write_size,
+    addr_misalignement,
+    dst_nvm_addr_aligned,
+    size_misalignement,
+    size_aligned,
+    0 // no transaction      
+  );
   //increment version and write new meta data in next slot
   const uint32_t version = 1 + get_slot_version(ctx, get_current_slot_index(ctx));
   write_meta(ctx, index, version);
   //update context
-  ctx->data = base;
+  ctx->data = dst_base;
 
   DEBUG_PRINTLN("write_ewlf exit");
 }

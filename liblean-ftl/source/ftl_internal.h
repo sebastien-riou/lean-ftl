@@ -103,7 +103,7 @@ static lftl_ctx_t*get_other_ctx(lftl_ctx_t*ctx, const void*const nvm_addr){
 }
 
 static lftl_ctx_t*get_any_ctx(lftl_ctx_t*ctx, const void*const nvm_addr){
-  if(is_in_data(ctx,nvm_addr)) return ctx;
+  if((LFTL_INVALID_POINTER!=ctx) && is_in_data(ctx,nvm_addr)) return ctx;
   return get_other_ctx(ctx,nvm_addr);
 }
 
@@ -175,6 +175,7 @@ static lftl_nvm_props_t*is_in_any_nvm(const void*const addr, lftl_ctx_t**ctx){
 }
 
 static lftl_ctx_t*is_in_any_area_core(const void*const addr, lftl_ctx_t*first){
+  if(LFTL_INVALID_POINTER == first) return LFTL_INVALID_POINTER;
   lftl_ctx_t*ctx = first;
   ctx = get_any_ctx(ctx, addr); // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
   if(LFTL_INVALID_POINTER!=ctx) return ctx;

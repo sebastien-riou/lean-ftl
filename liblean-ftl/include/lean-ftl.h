@@ -374,7 +374,7 @@ void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, ui
 /// When a transaction is on-going, read the current data,
 /// i.e., the data as it was before the start of the transaction.
 /// \param dst          Destination address, it shall be in a volatile memory
-/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param src          Source address
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_memread(void*dst, const void*const src, uintptr_t size);
@@ -387,7 +387,7 @@ void lftl_memread(void*dst, const void*const src, uintptr_t size);
 /// that the transaction may be aborded, so the data read by that
 /// function may not be available anymore.
 /// \param dst          Destination address, it shall be in a volatile memory
-/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param src          Source address
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_memread_newer(void*dst, const void*const src, uintptr_t size);

@@ -21,12 +21,10 @@ The memory layout of a record is the following:
 - data
 - pad (if needed)
 
-The data identifier allows to place several variables into a single EWLF area.
-
 The writes are done from the highest possible address towards lower address. This allows to quickly find the newest header.
 
-The read process search the data identifier in headers, starting from the base address of the EWLF area
-- check the header magic integrity:
+The read process search starting from the base address of the EWLF area:
+- check the header magic integrity
 - if the header integrity check failed, resume the search for the next header
 - if data identified matches:
     - check the data integrity

@@ -6,7 +6,6 @@
 
 /// Value used for invalid pointers.
 #define LFTL_INVALID_POINTER ((void*)-1)
-#define LFTL_INVALID_POINTER2 ((void*)-2)
 
 #ifndef LFTL_WU_MAX_SIZE
   #define LFTL_WU_MAX_SIZE 128 
@@ -53,6 +52,8 @@
 #define LFTL_ERROR_TRANSACTION_OVERWRITE 0x09
 /// Error: the write unit size is too large, max is defined by LFTL_WU_MAX_SIZE
 #define LFTL_ERROR_WU_SIZE_TOO_LARGE 0x0A
+/// Error: a transaction API call is attempted on an EWLF area, which does not support transactions
+#define LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED 0x0B
 /// Base value for errors reported by the erase function. Bits 0 to 7 may give more details.
 #define LFTL_ERROR_LOW_LEVEL_ERASE 0x0100
 /// Base value for error reported by the write function. Bits 0 to 7 may give more details.
@@ -141,9 +142,15 @@ typedef struct lftl_nvm_props_struct {
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
 } lftl_nvm_props_t;
 
+/// Type of area registered with ::lftl_register_area or ::lftl_register_area_ewlf.
+typedef enum {
+  LFTL_AREA_TYPE_STD = 0,
+  LFTL_AREA_TYPE_EWLF = 1,
+} lftl_area_type_t;
+
 /** @struct lftl_ctx_struct
  *  Structure defining the context for an LFTL area.
- * 
+ *
  *  User shall initialize each member before calling any LFTL function.
  */
 typedef struct lftl_ctx_struct {
@@ -154,6 +161,7 @@ typedef struct lftl_ctx_struct {
   uintptr_t data_size;            /**< Size in bytes of the data in this LFTL area. */
   void *transaction_tracker;      /**< Initialize it ::LFTL_INVALID_POINTER. */
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
+  lftl_area_type_t area_type;     /**< Set by ::lftl_register_area or ::lftl_register_area_ewlf. Do not set manually. */
 } lftl_ctx_t;
 
 /** @name Meta information API
@@ -606,8 +614,12 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
   struct {area_content} _##name##_data;\
   };
 
+/// Effective write-unit size used for EWLF meta-data sizing — matches the
+/// runtime's floor of the meta item size at sizeof(uint32_t) (see meta_phy_size).
+#define LFTL_EWLF_WU_SIZE ((LFTL_WU_SIZE) > 4 ? (LFTL_WU_SIZE) : 4)
+
 #define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
-#define LFTL_EWLF_RECORD_SIZE(area_content) (sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_WU_SIZE)
+#define LFTL_EWLF_RECORD_SIZE(area_content) (sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_EWLF_WU_SIZE)
 
 /// Declare an LFTL area with Extreme Wear Leveling Factor
 /// \param name Name of the LFTL area.

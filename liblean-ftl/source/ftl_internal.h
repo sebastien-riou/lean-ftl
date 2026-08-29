@@ -6,7 +6,6 @@
 
 #include "lean-ftl.h"
 
-#define LFTL_EWLF_MARKER LFTL_INVALID_POINTER2
 #define EWLF_MAGIC 0x2CF292E376D73985
 
 #ifdef LFTL_DEBUG

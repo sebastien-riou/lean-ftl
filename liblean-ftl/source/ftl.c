@@ -31,11 +31,12 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx){
 }
 
 void lftl_register_area(lftl_ctx_t*ctx){
+  ctx->area_type = LFTL_AREA_TYPE_STD;
   lftl_register_area_core(ctx, &first_area);
 }
 
 void lftl_register_area_ewlf(lftl_ctx_t*ctx){
-  ctx->transaction_tracker = LFTL_EWLF_MARKER;
+  ctx->area_type = LFTL_AREA_TYPE_EWLF;
   lftl_register_area_core(ctx, &first_area_ewlf);
 }
 
@@ -55,7 +56,7 @@ lftl_ctx_t*lftl_get_ctx(const void*const addr){
 }
 
 bool lftl_is_ewlf(const lftl_ctx_t*const ctx){
-  return ctx->transaction_tracker == LFTL_EWLF_MARKER;
+  return ctx->area_type == LFTL_AREA_TYPE_EWLF;
 }
 
 void lftl_erase_all(lftl_ctx_t*ctx){
@@ -76,6 +77,7 @@ void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_
 }
 
 void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker){
+  if(lftl_is_ewlf(dst_ctx)) raise_error(dst_ctx,LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED);
   if(LFTL_INVALID_POINTER != dst_ctx->transaction_tracker) raise_error(dst_ctx,LFTL_ERROR_TRANSACTION_ONGOING);
   dst_ctx->transaction_tracker = transaction_tracker;
   const uint32_t size = LFTL_TRANSACTION_TRACKER_SIZE(dst_ctx);

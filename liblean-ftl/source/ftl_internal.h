@@ -83,7 +83,7 @@ static bool is_in_range(const void*const addr, const void*const base, uintptr_t 
   return true;
 }
 
-static bool is_in_nvm(lftl_ctx_t*ctx, const void*const addr){
+static bool is_in_nvm_deprecated(lftl_ctx_t*ctx, const void*const addr){
   return is_in_range(addr, ctx->nvm_props->base, ctx->nvm_props->size);
 }
 
@@ -178,19 +178,7 @@ static lftl_ctx_t*is_in_any_area_core(const void*const addr, lftl_ctx_t*first){
   if(LFTL_INVALID_POINTER == first) return LFTL_INVALID_POINTER;
   lftl_ctx_t*ctx = first;
   ctx = get_any_ctx(ctx, addr); // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
-  if(LFTL_INVALID_POINTER!=ctx) return ctx;
-  // addr is not in LFTL areas, check other NVM addresses
-  ctx = first;
-  if(is_in_nvm(ctx,addr)) return ctx;
-  if(has_several_areas()){
-    const lftl_ctx_t*stop=ctx;
-    while(ctx->next != stop){
-      if(LFTL_INVALID_POINTER==ctx->next) break;
-      ctx = ctx->next;
-      if(is_in_nvm(ctx,addr)) return ctx;
-    }
-  }
-  return LFTL_INVALID_POINTER;
+  return ctx;
 }
 
 static lftl_ctx_t*is_in_any_area_std(const void*const addr){
@@ -203,13 +191,13 @@ static lftl_ctx_t*is_in_any_area_ewlf(const void*const addr){
 
 //read from ctx area if src is within it, or from a physical NVM address or from regular memory
 static void mem_read(lftl_ctx_t*ctx, void*dst, const void*const src, uintptr_t size){
-  if(is_in_nvm(ctx,src)) {
+  /*if(is_in_nvm_deprecated(ctx,src)) {
     nvm_read(ctx->nvm_props,dst,src,size);
     return;
-  }
+  }*/
   lftl_nvm_props_t*nvm_props = is_in_nvm_phy(src);
   if(LFTL_INVALID_POINTER!=nvm_props){
-    while(1);//TODO: NOT covered by any test
+    raise_error(ctx,__LINE__);//TODO: NOT covered by any test
     nvm_read(nvm_props,dst,src,size);
     return;
   }

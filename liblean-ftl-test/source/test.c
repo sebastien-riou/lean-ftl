@@ -707,52 +707,6 @@ void print_lib_info(){
   PRINTLN("build type: %s",lftl_build_type());
 }
 
-int test_main(){
-  #ifdef HAS_TEARING_SIMULATION
-    format_func = tearing_sim_lftl_format;
-    raw_nvm_write_func = tearing_sim_nvm_write;
-    raw_nvm_erase_func = tearing_sim_nvm_erase;
-    erase_all_func = tearing_sim_lftl_erase_all;
-    write_func = tearing_sim_lftl_write;
-    transaction_start_func = tearing_sim_lftl_transaction_start;
-    transaction_write_func = tearing_sim_lftl_transaction_write;
-    transaction_write_any_func = tearing_sim_lftl_transaction_write_any;
-    transaction_commit_func = tearing_sim_lftl_transaction_commit;
-    transaction_abort_func = tearing_sim_lftl_transaction_abort;
-  #else
-    format_func = lftl_format;
-    raw_nvm_write_func = nvm_write;
-    raw_nvm_erase_func = nvm_erase;
-    erase_all_func = lftl_erase_all;
-    write_func = lftl_write;
-    transaction_start_func = lftl_transaction_start;
-    transaction_write_func = lftl_transaction_write;
-    transaction_write_any_func = lftl_transaction_write_any;
-    transaction_commit_func = lftl_transaction_commit;
-    transaction_abort_func = lftl_transaction_abort;
-  #endif
-  print_lib_info();
-
-  led1(1);
-
-  test_and_simulate_tearing(basic_test,100);
-  test_and_simulate_tearing(write_size_test,100);
-  test_and_simulate_tearing(write_offset_test,100);
-  
-  test_and_simulate_tearing(transaction_basic_test,100);
-  test_and_simulate_tearing(transaction_abort_test,100);
-  test_and_simulate_tearing(erase_all_test,100);
-  write_nvm_to_nvm_seq(100);
-  transaction_nvm_to_nvm_seq(100);
-  
-  test_and_simulate_tearing(ewlf_basic_test,10);
-  #ifdef HAS_PRINTF
-    PRINTLN("All tests PASSED");
-  #else
-    while(1){ui_led1_blink_ms(1000,DUTY_CYCLE_75);}
-  #endif
-  return 0;
-}
 
 void test_callbacks(){
   print_lib_info();
@@ -827,4 +781,149 @@ void test_callbacks(){
   }
 }
 
+uint64_t get_u64_core(const char*val_str, uint64_t k){
+  char*end;
+  uint64_t out = strtoull(val_str,&end,0);
+  size_t factor=1;
+  if(*end=='K' || *end=='k') factor = k;
+  if(*end=='M' || *end=='m') factor = k*k;
+  if(*end=='G' || *end=='g') factor = k*k*k;
+  out *= factor;
+  return out;
+}
+uint64_t get_u64(const char*val_str){
+  return get_u64_core(val_str,0);
+}
+uint64_t get_u64_k(const char*val_str){
+  return get_u64_core(val_str,1000);
+}
+uint64_t get_u64_kb(const char*val_str){
+  return get_u64_core(val_str,1024);
+}
+#define U64_ARG(val,argstr,k) if(0==memcmp(argv[i],argstr,strlen(argstr))){\
+    const char*arg_val_str = argv[i]+strlen(argstr);\
+    val = get_u64_core(arg_val_str,k);\
+    DEBUG_PRINTLN("DEBUG: %s%lu",argstr,val);\
+    consumed[i]=1;\
+    continue;\
+  }
+#define ACTION_ARG(val,argstr) if(0==memcmp(argv[i],argstr,strlen(argstr))){\
+    val = 1;\
+    DEBUG_PRINTLN("DEBUG: %s set",argstr);\
+    consumed[i]=1;\
+    continue;\
+  }
+#define COV(default_coverage) (coverage ? coverage : default_coverage)
+int test_main(int argc, const char*argv[], bool consumed[]){
+  #ifdef HAS_TEARING_SIMULATION
+    format_func = tearing_sim_lftl_format;
+    raw_nvm_write_func = tearing_sim_nvm_write;
+    raw_nvm_erase_func = tearing_sim_nvm_erase;
+    erase_all_func = tearing_sim_lftl_erase_all;
+    write_func = tearing_sim_lftl_write;
+    transaction_start_func = tearing_sim_lftl_transaction_start;
+    transaction_write_func = tearing_sim_lftl_transaction_write;
+    transaction_write_any_func = tearing_sim_lftl_transaction_write_any;
+    transaction_commit_func = tearing_sim_lftl_transaction_commit;
+    transaction_abort_func = tearing_sim_lftl_transaction_abort;
+  #else
+    format_func = lftl_format;
+    raw_nvm_write_func = nvm_write;
+    raw_nvm_erase_func = nvm_erase;
+    erase_all_func = lftl_erase_all;
+    write_func = lftl_write;
+    transaction_start_func = lftl_transaction_start;
+    transaction_write_func = lftl_transaction_write;
+    transaction_write_any_func = lftl_transaction_write_any;
+    transaction_commit_func = lftl_transaction_commit;
+    transaction_abort_func = lftl_transaction_abort;
+  #endif
+  
+  #define N_TESTS 9
+  uint64_t first_index=1;
+  uint64_t last_index=N_TESTS;
+  uint64_t test_index=0;
+  uint64_t coverage=0;
+  bool report_n_tests=0;
+  bool lib_info=0;
+  bool run_test_callbacks=0;
+  for(int i=1;i<argc;i++){
+    if(consumed[i]) continue;
+    ACTION_ARG(report_n_tests,"--n-tests");
+    ACTION_ARG(lib_info,"--lib-info");
+    ACTION_ARG(run_test_callbacks,"--test-callbacks");
+    U64_ARG(test_index,"--test=",0);
+    U64_ARG(first_index,"--first=",0);
+    U64_ARG(last_index,"--last=",0);
+    U64_ARG(coverage,"--coverage=",0);
+    if(!consumed[i]){
+      printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
+      abort();
+    }
+  }
+  if(report_n_tests){
+    if(lib_info){
+      print_lib_info();
+    }
+    PRINTLN("%u",N_TESTS);
+    return 0;
+  }
+  if(lib_info){
+    print_lib_info();
+    return 0;
+  }
+  if(run_test_callbacks){
+    test_callbacks();
+  }
+  if(coverage>100){
+    PRINTLN("ERROR: max value for coverage is 100");
+    abort();
+  }
+  if(test_index){
+    first_index=test_index;
+    last_index=test_index;
+  }
+  if(first_index > last_index){
+    PRINTLN("ERROR: '--first' must be less or equal to '--last'");
+    abort();
+  }
+  if(last_index>N_TESTS){
+    PRINTLN("ERROR: '--last' max value is %u",N_TESTS);
+    abort();
+  }
+  print_lib_info();
+  led1(1);
+  for(unsigned int i=first_index;i<=last_index;i++){
+    PRINTLN("INFO: Run test %u",i);
+    switch(i){
+      case 1: test_and_simulate_tearing(basic_test,COV(100));break;
+      case 2: test_and_simulate_tearing(write_size_test,COV(100));break;
+      case 3: test_and_simulate_tearing(write_offset_test,COV(100));break;
+      case 4: test_and_simulate_tearing(transaction_basic_test,COV(100));break;
+      case 5: test_and_simulate_tearing(transaction_abort_test,COV(100));break;
+      case 6: test_and_simulate_tearing(erase_all_test,COV(100));break;
+      case 7: write_nvm_to_nvm_seq(COV(100));break;
+      case 8: transaction_nvm_to_nvm_seq(COV(100));break;
+      case 9: test_and_simulate_tearing(ewlf_basic_test,COV(10));break;
+      default:
+        PRINTLN("ERROR: bad test index %u",i);
+        abort();
+    }
+  }
+  
+  #ifdef HAS_PRINTF
+    if((0==first_index) && (N_TESTS==last_index)){ 
+      PRINTLN("All tests PASSED");
+    }else{
+      if(last_index > first_index + 1){
+        PRINTLN("Tests %lu to %lu PASSED",first_index,last_index);
+      }else{
+        PRINTLN("Test %lu PASSED",first_index);
+      }
+    }
+  #else
+    while(1){ui_led1_blink_ms(1000,DUTY_CYCLE_75);}
+  #endif
+  return 0;
+}
 

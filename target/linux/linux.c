@@ -140,23 +140,26 @@ const void* nvm_base = &nvm;
 const uintptr_t nvm_size = sizeof(nvm);
 bool trace_accessors=0;
 //Application level HAL
-void init(int argc, const char*argv[]){
+void init(int argc, const char*argv[], bool consumed[]){
+  (void)create_virtual_com_port;
   init_nvm_alignement();
   for(int i=1;i<argc;i++){
     const char*test_mode_str = "--test-mode";
     if(0==memcmp(argv[i],test_mode_str,strlen(test_mode_str)+1)){
       test_mode = 1;
+      consumed[i]=1;
       continue;
     }
     const char*trace_str = "--trace";
     if(0==memcmp(argv[i],trace_str,strlen(trace_str)+1)){
       trace_accessors = 1;
+      consumed[i]=1;
       continue;
     }
-    printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
-    abort();
+    //printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
+    //abort();
   }
-  com_port = create_virtual_com_port();
+  //com_port = create_virtual_com_port();
 }
 void led1(bool on){
   printf("led1: %d\n",on);

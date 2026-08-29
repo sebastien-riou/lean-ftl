@@ -1,11 +1,13 @@
+#include <string.h>
 #include "lean-ftl-test.h"
-void init(int argc, const char*argv[]);
-int test_main();
-void test_callbacks();
+void init(int argc, const char*argv[], bool consumed[]);
+int test_main(int argc, const char*argv[], bool consumed[]);
+
 int main(int argc, const char*argv[]){
-  init(argc,argv);
-  test_callbacks();
-  return test_main();
+  bool consumed[argc];
+  memset(consumed,0,sizeof(consumed));
+  init(argc,argv,consumed);
+  return test_main(argc,argv,consumed);
 }
 
 

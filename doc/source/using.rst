@@ -84,8 +84,39 @@ value that provides the endurance required by the use case.
 
 .. note:: Some other implementation are more efficient than *lean-ftl*
   in term of area consumption for a given wear-leveling-factor however
-  they are typically prone to fragmentation and they are more dependant on 
+  they are typically prone to fragmentation and they are more dependant on
   the usage pattern.
+
+Extreme Wear Leveling Factor (EWLF)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+With :c:macro:`LFTL_AREA`, each unit of wear-leveling-factor costs one full
+page, even if the area content is much smaller than a page. When the desired
+wear-leveling-factor is large, this can waste a lot of NVM space.
+
+:c:macro:`LFTL_AREA_EWLF` addresses this: it packs several slots into a
+single page whenever the area content is small enough, so a large
+wear-leveling-factor no longer means one page per unit. It is declared the
+same way as :c:macro:`LFTL_AREA`, just replace the macro name:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: Declaring an EWLF LFTL area
+  :name: Example: Declaring an EWLF LFTL area
+
+  typedef struct data_flash_struct {
+
+    LFTL_AREA_EWLF(c,
+      uint64_t counter;
+      ,1000)
+
+  } __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
+  data_flash_t nvm;
+
+An area declared with :c:macro:`LFTL_AREA_EWLF` must be registered with
+:func:`lftl_register_area_ewlf` instead of :func:`lftl_register_area`.
+Everything else (formatting, reading, writing, transactions) works the same
+way as for a regular area. Use :func:`lftl_is_ewlf` if you need to tell,
+given a context, whether it refers to an EWLF area or a regular one.
 
 Single LFTL area vs many
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -132,6 +163,10 @@ The integrator shall declare one :type:`lftl_nvm_props_t` for each targeted NVM.
     .size = sizeof(nvm),
     .write_size = nvm_write_size,
     .erase_size = nvm_erase_size,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
   };
 
 .. note:: ``base`` and ``size`` can be a subset of the physical NVM.
@@ -165,10 +200,6 @@ Each LFTL area has its volatile context maintained in a
     .area_size = sizeof(nvm.a_pages),
     .data = LFTL_INVALID_POINTER,
     .data_size = sizeof(nvm.a_data),
-    .erase = nvm_erase,
-    .write = nvm_write,
-    .read = nvm_read,
-    .error_handler = throw_exception,
     .transaction_tracker = LFTL_INVALID_POINTER,
     .next = LFTL_INVALID_POINTER
   };
@@ -178,10 +209,6 @@ Each LFTL area has its volatile context maintained in a
     .area_size = sizeof(nvm.b_pages),
     .data = LFTL_INVALID_POINTER,
     .data_size = sizeof(nvm.b_data),
-    .erase = nvm_erase,
-    .write = nvm_write,
-    .read = nvm_read,
-    .error_handler = throw_exception,
     .transaction_tracker = LFTL_INVALID_POINTER,
     .next = LFTL_INVALID_POINTER
   };

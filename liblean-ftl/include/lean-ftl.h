@@ -239,6 +239,21 @@ void lftl_init_lib();
 ////////////////////////////////////////////////////////////
 void lftl_register_area(lftl_ctx_t*ctx);
 
+////////////////////////////////////////////////////////////
+/// \brief Register a physical NVM
+///
+/// Registers the properties of a physical NVM so that addresses within
+/// it can be recognized even outside of any LFTL area, e.g. by
+/// ::lftl_memread and ::lftl_memread_newer.
+/// This is called automatically by ::lftl_register_area and
+/// ::lftl_register_area_ewlf for their own NVM, so it only needs to be
+/// called directly to register a physical NVM that is not (yet) backing
+/// any LFTL area.
+/// Registering an NVM whose base address is already covered by a
+/// previously registered NVM is a no-op.
+/// \param ctx Properties of the physical NVM to register
+///
+////////////////////////////////////////////////////////////
 void lftl_register_nvm(lftl_nvm_props_t*ctx);
 
 ////////////////////////////////////////////////////////////

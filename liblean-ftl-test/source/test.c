@@ -40,6 +40,8 @@ extern lftl_ctx_t nvma;
 extern lftl_ctx_t nvmb;
 extern lftl_ctx_t ewlfa;
 extern lftl_ctx_t ewlfb;
+extern lftl_nvm_props_t nvm_props2;
+extern lftl_ctx_t nvmc;
 
 const char*version = xstr(GIT_VERSION);
 
@@ -271,6 +273,8 @@ void tearing_sim_check_nvm(){
   ewlfa.transaction_tracker = LFTL_INVALID_POINTER;
   ewlfb.data = LFTL_INVALID_POINTER;
   ewlfb.transaction_tracker = LFTL_INVALID_POINTER;
+  nvmc.data = LFTL_INVALID_POINTER;
+  nvmc.transaction_tracker = LFTL_INVALID_POINTER;
   check_nvm();
 }
 void tearing_sim_init();
@@ -588,6 +592,17 @@ void ewlf_basic_test(){
   }
 }
 
+void multi_nvm_test(){
+  DEBUG_PRINTLN(__func__);
+  // nvmc uses its own, independently registered lftl_nvm_props_t (nvm_props2),
+  // distinct from the shared nvm_props used by nvma/nvmb/ewlfa/ewlfb. Writing
+  // to both, each forcing a fresh slot search (see test_write), exercises the
+  // nvm_props linked list (lftl_register_nvm/is_in_nvm_phy) with more than
+  // one registered NVM.
+  randomized_test_write(&nvmc,nvm.data6,sizeof(nvm.data6));
+  randomized_test_write(&nvma,nvm.data0,sizeof(nvm.data0));
+}
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -597,6 +612,7 @@ void exception_handler(uint32_t err_code){
     format_func(&nvmb);
     format_func(&ewlfa);
     format_func(&ewlfb);
+    format_func(&nvmc);
   } else {
     //a real error, that's unexpected
     PRINTF("ERROR: test failed with error code 0x%08x\n",err_code);
@@ -624,6 +640,12 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     tearing_sim_init(); // ensure any previous tearing sim is stopped at this point
     #endif
     lftl_init_lib();
+    // nvmc is registered first: its nvm_props (nvm_props2) covers a range nested
+    // within the shared nvm_props used below, so registering it first ensures
+    // both actually end up as distinct nodes in the nvm_props linked list
+    // (see is_in_nvm_phy/lftl_register_nvm) instead of nvm_props2 being folded
+    // into the already-registered, broader nvm_props.
+    lftl_register_area(&nvmc);
     lftl_register_area(&nvma);
     lftl_register_area(&nvmb);
     lftl_register_area_ewlf(&ewlfa);
@@ -632,6 +654,7 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     format_func(&nvmb);
     format_func(&ewlfa);
     format_func(&ewlfb);
+    format_func(&nvmc);
     #ifdef HAS_TEARING_SIMULATION
     tearing_sim_init();
     #endif
@@ -654,6 +677,7 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     format_func(&nvmb);
     format_func(&ewlfa);
     format_func(&ewlfb);
+    format_func(&nvmc);
     for(volatile unsigned int i=target_start;i<target_max+1;i++){//volatile to remove warning about setjump.
       //if(0 == (i%1000)) PRINTF("tearing simulation target %u\n",i);
       if(0 == (i%50)) print_progress_bar(i-target_start,n_targets);
@@ -839,7 +863,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 9
+  #define N_TESTS 10
   uint64_t first_index=1;
   uint64_t last_index=N_TESTS;
   uint64_t test_index=0;
@@ -905,6 +929,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 7: write_nvm_to_nvm_seq(COV(100));break;
       case 8: transaction_nvm_to_nvm_seq(COV(100));break;
       case 9: test_and_simulate_tearing(ewlf_basic_test,COV(10));break;
+      case 10: test_and_simulate_tearing(multi_nvm_test,COV(100));break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

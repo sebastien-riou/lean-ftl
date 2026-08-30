@@ -47,6 +47,12 @@ typedef struct data_flash_struct {
     ,LFTL_WEAR_LEVELING_FACTOR(10)
   )
 
+  //Area used by a second, independently registered lftl_nvm_props_t (multi_nvm_test)
+  LFTL_AREA(c,
+    uint64_t data6[SIZE64(DATA_SIZE)];
+    ,LFTL_WEAR_LEVELING_FACTOR(2)
+  )
+
   union {
   flash_sw_page_t unmanaged_page;
     struct {

@@ -59,6 +59,29 @@ lftl_ctx_t ewlfb = {
   .next = LFTL_INVALID_POINTER
 };
 
+// A second, independently registered lftl_nvm_props_t, scoped to just the
+// "c" area, used by multi_nvm_test to exercise the multi-NVM linked list.
+lftl_nvm_props_t nvm_props2 = {
+    .base = &nvm.c_pages,
+    .size = sizeof(nvm.c_pages),
+    .write_size = LFTL_WU_SIZE,
+    .erase_size = LFTL_PAGE_SIZE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
+  };
+
+lftl_ctx_t nvmc = {
+  .nvm_props = &nvm_props2,
+  .area = &nvm.c_pages,
+  .area_size = sizeof(nvm.c_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.c_data),
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
 
 int test_main();
 void test_callbacks();

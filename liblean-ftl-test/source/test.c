@@ -837,7 +837,9 @@ uint64_t get_u64_kb(const char*val_str){
     consumed[i]=1;\
     continue;\
   }
-#define COV(default_coverage) (coverage ? coverage : default_coverage)
+#define TEAR_COV(default_coverage) do{\
+    tear_cov_log[i] = tear_cov ? tear_cov : default_coverage;\
+  }while(0)
 int test_main(int argc, const char*argv[], bool consumed[]){
   #ifdef HAS_TEARING_SIMULATION
     format_func = tearing_sim_lftl_format;
@@ -864,10 +866,11 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   #endif
   
   #define N_TESTS 10
+  unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
   uint64_t last_index=N_TESTS;
   uint64_t test_index=0;
-  uint64_t coverage=0;
+  uint64_t tear_cov=0;
   bool report_n_tests=0;
   bool lib_info=0;
   bool run_test_callbacks=0;
@@ -879,7 +882,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     U64_ARG(test_index,"--test=",0);
     U64_ARG(first_index,"--first=",0);
     U64_ARG(last_index,"--last=",0);
-    U64_ARG(coverage,"--coverage=",0);
+    U64_ARG(tear_cov,"--tear-cov=",0);
     if(!consumed[i]){
       printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
       abort();
@@ -899,8 +902,8 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   if(run_test_callbacks){
     test_callbacks();
   }
-  if(coverage>100){
-    PRINTLN("ERROR: max value for coverage is 100");
+  if(tear_cov>100){
+    PRINTLN("ERROR: max value for --tear-cov is 100");
     abort();
   }
   if(test_index){
@@ -920,16 +923,16 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   for(unsigned int i=first_index;i<=last_index;i++){
     PRINTLN("INFO: Run test %u",i);
     switch(i){
-      case 1: test_and_simulate_tearing(basic_test,COV(100));break;
-      case 2: test_and_simulate_tearing(write_size_test,COV(100));break;
-      case 3: test_and_simulate_tearing(write_offset_test,COV(100));break;
-      case 4: test_and_simulate_tearing(transaction_basic_test,COV(100));break;
-      case 5: test_and_simulate_tearing(transaction_abort_test,COV(100));break;
-      case 6: test_and_simulate_tearing(erase_all_test,COV(100));break;
-      case 7: write_nvm_to_nvm_seq(COV(100));break;
-      case 8: transaction_nvm_to_nvm_seq(COV(100));break;
-      case 9: test_and_simulate_tearing(ewlf_basic_test,COV(10));break;
-      case 10: test_and_simulate_tearing(multi_nvm_test,COV(100));break;
+      case 1: TEAR_COV(100);test_and_simulate_tearing(basic_test            ,tear_cov_log[i]);break;
+      case 2: TEAR_COV(100);test_and_simulate_tearing(write_size_test       ,tear_cov_log[i]);break;
+      case 3: TEAR_COV(100);test_and_simulate_tearing(write_offset_test     ,tear_cov_log[i]);break;
+      case 4: TEAR_COV(100);test_and_simulate_tearing(transaction_basic_test,tear_cov_log[i]);break;
+      case 5: TEAR_COV(100);test_and_simulate_tearing(transaction_abort_test,tear_cov_log[i]);break;
+      case 6: TEAR_COV(100);test_and_simulate_tearing(erase_all_test        ,tear_cov_log[i]);break;
+      case 7: TEAR_COV(100);write_nvm_to_nvm_seq(                            tear_cov_log[i]);break;
+      case 8: TEAR_COV(100);transaction_nvm_to_nvm_seq(                      tear_cov_log[i]);break;
+      case 9: TEAR_COV( 10);test_and_simulate_tearing(ewlf_basic_test       ,tear_cov_log[i]);break;
+      case 10:TEAR_COV(100);test_and_simulate_tearing(multi_nvm_test        ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();
@@ -937,6 +940,16 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   }
   
   #ifdef HAS_PRINTF
+    unsigned int min_tear_coverage = 100;
+    for(unsigned int i=first_index;i<=last_index;i++){
+      if(tear_cov_log[i]){
+        PRINTLN("Test %2u run with tearing coverage of %3u%%.",i,tear_cov_log[i]);
+        min_tear_coverage = tear_cov_log[i] < min_tear_coverage ? tear_cov_log[i] : min_tear_coverage;
+      }
+    }
+    if(min_tear_coverage < 100){
+      PRINTLN("WARNING: some test ran with tearing coverage of %2u%%.",min_tear_coverage);
+    }
     if((0==first_index) && (N_TESTS==last_index)){ 
       PRINTLN("All tests PASSED");
     }else{

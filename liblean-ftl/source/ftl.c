@@ -20,13 +20,13 @@ void lftl_init_lib(){
 
 void lftl_register_nvm(lftl_nvm_props_t*ctx){
   if(LFTL_INVALID_POINTER!=addr_to_nvm(ctx->base)) return;//already registered
-  lftl_nvm_props_t*prev = first_nvm;
-  if(LFTL_INVALID_POINTER==prev){
+  if(LFTL_INVALID_POINTER==first_nvm){
     first_nvm = ctx;
     ctx->next = ctx;
   } else {
-    prev->next = ctx;
-    ctx->next = first_nvm;
+    lftl_nvm_props_t*old_second = first_nvm->next;
+    first_nvm->next = ctx;
+    ctx->next = old_second;
   }
 }
 
@@ -49,10 +49,18 @@ void lftl_format(lftl_ctx_t*ctx){
   DEBUG_PRINTLN("lftl_format exit");
 }
 
+lftl_ctx_t*lftl_get_ctx_std(const void*const addr){
+  return addr_to_area_std(addr);
+}
+
+lftl_ctx_t*lftl_get_ctx_ewlf(const void*const addr){
+  return addr_to_area_ewlf(addr);
+}
+
 lftl_ctx_t*lftl_get_ctx(const void*const addr){
-  lftl_ctx_t*ctx = first_area;
-  if(is_in_data(ctx,addr)) return ctx;
-  return get_other_ctx(ctx,addr);
+  lftl_ctx_t*ctx = lftl_get_ctx_std(addr);
+  if(LFTL_INVALID_POINTER != ctx) return ctx;
+  return lftl_get_ctx_ewlf(addr);
 }
 
 bool lftl_is_ewlf(const lftl_ctx_t*const ctx){

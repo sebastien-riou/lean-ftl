@@ -42,6 +42,8 @@ extern lftl_ctx_t ewlfa;
 extern lftl_ctx_t ewlfb;
 extern lftl_nvm_props_t nvm_props2;
 extern lftl_ctx_t nvmc;
+extern lftl_nvm_props_t nvm_props3;
+extern lftl_ctx_t nvmd;
 
 const char*version = xstr(GIT_VERSION);
 
@@ -95,6 +97,7 @@ uint8_t (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t
 uint8_t (*raw_nvm_erase_func)(void*base_address, unsigned int n_pages);
 void (*erase_all_func)(lftl_ctx_t*ctx);
 write_func_t write_func;
+write_func_t write_any_func;
 void (*transaction_start_func)(lftl_ctx_t*ctx, void *const transaction_tracker);
 void (*transaction_write_func)(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 void (*transaction_write_any_func)(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
@@ -204,6 +207,26 @@ void tearing_sim_lftl_write(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const s
   //call LFTL
   lftl_write(ctx,dst_nvm_addr,src,size);
 }
+void tearing_sim_lftl_write_any(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size){
+  //lftl_write_any dispatches to lftl_basic_write or lftl_transaction_write_any
+  //depending on whether a transaction is ongoing; mirror that here so the
+  //reference model (nvm_ref vs transaction_buf_ref) is updated the same way
+  //tearing_sim_lftl_write/tearing_sim_lftl_transaction_write_any do.
+  uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
+  if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
+    //update previous state
+    nvm_ref_previous_state = nvm_ref;
+    //compute new state
+    uint8_t*dst = (uint8_t*)&nvm_ref;
+    lftl_memread(dst+offset,src,size);
+  } else {
+    //write into transaction buffer
+    uint8_t*dst = (uint8_t*)&transaction_buf_ref;
+    lftl_memread(dst+offset,src,size);
+  }
+  //call LFTL
+  lftl_write_any(ctx,dst_nvm_addr,src,size);
+}
 void tearing_sim_lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker){
   //copy nvm to transaction buffer
   uintptr_t offset = (uintptr_t)ctx->area - (uintptr_t)&nvm;
@@ -275,6 +298,8 @@ void tearing_sim_check_nvm(){
   ewlfb.transaction_tracker = LFTL_INVALID_POINTER;
   nvmc.data = LFTL_INVALID_POINTER;
   nvmc.transaction_tracker = LFTL_INVALID_POINTER;
+  nvmd.data = LFTL_INVALID_POINTER;
+  nvmd.transaction_tracker = LFTL_INVALID_POINTER;
   check_nvm();
 }
 void tearing_sim_init();
@@ -594,13 +619,128 @@ void ewlf_basic_test(){
 
 void multi_nvm_test(){
   DEBUG_PRINTLN(__func__);
-  // nvmc uses its own, independently registered lftl_nvm_props_t (nvm_props2),
-  // distinct from the shared nvm_props used by nvma/nvmb/ewlfa/ewlfb. Writing
-  // to both, each forcing a fresh slot search (see test_write), exercises the
-  // nvm_props linked list (lftl_register_nvm/is_in_nvm_phy) with more than
-  // one registered NVM.
+  // nvmc/nvmd each use their own, independently registered lftl_nvm_props_t
+  // (nvm_props2/nvm_props3), distinct from the shared nvm_props used by
+  // nvma/nvmb/ewlfa/ewlfb. Writing to all three, each forcing a fresh slot
+  // search (see test_write), exercises the nvm_props linked list
+  // (lftl_register_nvm/addr_to_nvm) with three registered NVMs, not just two
+  // — the case that actually requires lftl_register_nvm to correctly append
+  // (rather than just insert-after-head-with-only-one-existing-node).
   randomized_test_write(&nvmc,nvm.data6,sizeof(nvm.data6));
+  randomized_test_write(&nvmd,nvm.data7,sizeof(nvm.data7));
   randomized_test_write(&nvma,nvm.data0,sizeof(nvm.data0));
+}
+
+void write_any_test(){
+  DEBUG_PRINTLN(__func__);
+  const uint32_t write_size = nvmb.nvm_props->write_size;
+  uint8_t wbuf[sizeof(nvm.b_data)];
+
+  //no active transaction: lftl_write_any dispatches to lftl_basic_write
+  stateful_prng_fill(wbuf,sizeof(nvm.data2));
+  write_any_func(&nvmb,nvm.data2,wbuf,sizeof(nvm.data2));
+  read_and_check(&nvmb,nvm.data2,wbuf,sizeof(nvm.data2));
+  SANITY_CHECK();
+
+  //unaligned range, still no active transaction
+  uint8_t*const data3_base = (uint8_t*)nvm.data3;
+  const uintptr_t unaligned_size = sizeof(nvm.data3)-write_size;
+  stateful_prng_fill(wbuf,unaligned_size);
+  write_any_func(&nvmb,data3_base+1,wbuf,unaligned_size);
+  read_and_check(&nvmb,data3_base+1,wbuf,unaligned_size);
+  SANITY_CHECK();
+
+  //size==0 is a no-op
+  write_any_func(&nvmb,nvm.data2,wbuf,0);
+  SANITY_CHECK();
+
+  //active transaction: lftl_write_any dispatches to lftl_transaction_write_any
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvmb)];
+  transaction_start_func(&nvmb,tracker);
+  stateful_prng_fill(wbuf,write_size);
+  write_any_func(&nvmb,nvm.data2,wbuf,write_size);
+  read_newer_and_check(&nvmb,nvm.data2,wbuf,write_size);
+  transaction_commit_func(&nvmb);
+  read_and_check(&nvmb,nvm.data2,wbuf,write_size);
+  SANITY_CHECK();
+}
+
+void get_ctx_test(){
+  DEBUG_PRINTLN(__func__);
+
+  //lftl_get_ctx_std only searches std areas
+  if(lftl_get_ctx_std(nvm.data0) != &nvma) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_std(nvm.data2) != &nvmb) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_std(nvm.data6) != &nvmc) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_std(nvm.data4) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_std(&nvm.unmanaged_data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+
+  //lftl_get_ctx_ewlf only searches EWLF areas
+  if(lftl_get_ctx_ewlf(nvm.data4) != &ewlfa) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_ewlf(nvm.data5) != &ewlfb) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_ewlf(nvm.data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_ewlf(&nvm.unmanaged_data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+
+  //lftl_get_ctx searches every area type
+  if(lftl_get_ctx(nvm.data0) != &nvma) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx(nvm.data2) != &nvmb) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx(nvm.data6) != &nvmc) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx(nvm.data4) != &ewlfa) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx(nvm.data5) != &ewlfb) throw_exception(ERROR_VERIFICATION_FAIL);
+  //an address not managed by any LFTL area
+  if(lftl_get_ctx(&nvm.unmanaged_data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+}
+
+void memread_newer_test(){
+  DEBUG_PRINTLN(__func__);
+  const uint32_t write_size = nvm_props.write_size;
+
+  //regular (non-NVM) memory: plain memcpy fallback
+  uint8_t src_mem[16];
+  uint8_t dst_mem[16];
+  stateful_prng_fill(src_mem,sizeof(src_mem));
+  lftl_memread_newer(dst_mem,src_mem,sizeof(src_mem));
+  if(memcmp(dst_mem,src_mem,sizeof(src_mem))) throw_exception(ERROR_VERIFICATION_FAIL);
+
+  //physical NVM address outside of any LFTL area: falls back to nvm_read
+  uint8_t wbuf[16];
+  stateful_prng_fill(wbuf,sizeof(wbuf));
+  raw_nvm_erase_func(&nvm.unmanaged_data0,1);
+  raw_nvm_write_func(&nvm.unmanaged_data0,wbuf,sizeof(wbuf));
+  uint8_t rbuf[16];
+  lftl_memread_newer(rbuf,&nvm.unmanaged_data0,sizeof(wbuf));
+  if(memcmp(rbuf,wbuf,sizeof(wbuf))) throw_exception(ERROR_VERIFICATION_FAIL);
+  SANITY_CHECK();
+
+  //inside an LFTL area, no active transaction: same as current data
+  uint8_t wbuf2[write_size];
+  stateful_prng_fill(wbuf2,write_size);
+  test_write(&nvma,nvm.data0,wbuf2,write_size);
+  uint8_t rbuf2[write_size];
+  lftl_memread_newer(rbuf2,nvm.data0,write_size);
+  if(memcmp(rbuf2,wbuf2,write_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  SANITY_CHECK();
+
+  //inside an LFTL area, with an active transaction: reads the new (uncommitted)
+  //data, which must differ from what lftl_memread (current data) still sees.
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  transaction_start_func(&nvma,tracker);
+  uint8_t wbuf3[write_size];
+  stateful_prng_fill(wbuf3,write_size);
+  transaction_write_func(&nvma,nvm.data0,wbuf3,write_size);
+
+  uint8_t current[write_size];
+  lftl_memread(current,nvm.data0,write_size);
+  if(memcmp(current,wbuf2,write_size)) throw_exception(ERROR_VERIFICATION_FAIL);//still the old/committed value
+
+  uint8_t newer[write_size];
+  lftl_memread_newer(newer,nvm.data0,write_size);
+  if(memcmp(newer,wbuf3,write_size)) throw_exception(ERROR_VERIFICATION_FAIL);//the new, uncommitted value
+
+  transaction_commit_func(&nvma);
+  lftl_memread_newer(newer,nvm.data0,write_size);
+  if(memcmp(newer,wbuf3,write_size)) throw_exception(ERROR_VERIFICATION_FAIL);//now the committed value too
+  SANITY_CHECK();
 }
 
 void exception_handler(uint32_t err_code){
@@ -613,10 +753,12 @@ void exception_handler(uint32_t err_code){
     format_func(&ewlfa);
     format_func(&ewlfb);
     format_func(&nvmc);
+    format_func(&nvmd);
   } else {
     //a real error, that's unexpected
     PRINTF("ERROR: test failed with error code 0x%08x\n",err_code);
-    ui_wait_button();
+    //ui_wait_button();
+    abort();
   }
   #else
     #ifdef HAS_PRINTF
@@ -640,12 +782,14 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     tearing_sim_init(); // ensure any previous tearing sim is stopped at this point
     #endif
     lftl_init_lib();
-    // nvmc is registered first: its nvm_props (nvm_props2) covers a range nested
-    // within the shared nvm_props used below, so registering it first ensures
-    // both actually end up as distinct nodes in the nvm_props linked list
-    // (see is_in_nvm_phy/lftl_register_nvm) instead of nvm_props2 being folded
-    // into the already-registered, broader nvm_props.
+    // nvmc/nvmd are registered first: their nvm_props (nvm_props2/nvm_props3)
+    // each cover a range nested within the shared nvm_props used below, so
+    // registering them first ensures all three actually end up as distinct
+    // nodes in the nvm_props linked list (see addr_to_nvm/lftl_register_nvm)
+    // instead of nvm_props2/nvm_props3 being folded into the already-registered,
+    // broader nvm_props.
     lftl_register_area(&nvmc);
+    lftl_register_area(&nvmd);
     lftl_register_area(&nvma);
     lftl_register_area(&nvmb);
     lftl_register_area_ewlf(&ewlfa);
@@ -655,6 +799,7 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     format_func(&ewlfa);
     format_func(&ewlfb);
     format_func(&nvmc);
+    format_func(&nvmd);
     #ifdef HAS_TEARING_SIMULATION
     tearing_sim_init();
     #endif
@@ -678,6 +823,7 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     format_func(&ewlfa);
     format_func(&ewlfb);
     format_func(&nvmc);
+    format_func(&nvmd);
     for(volatile unsigned int i=target_start;i<target_max+1;i++){//volatile to remove warning about setjump.
       //if(0 == (i%1000)) PRINTF("tearing simulation target %u\n",i);
       if(0 == (i%50)) print_progress_bar(i-target_start,n_targets);
@@ -847,6 +993,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     raw_nvm_erase_func = tearing_sim_nvm_erase;
     erase_all_func = tearing_sim_lftl_erase_all;
     write_func = tearing_sim_lftl_write;
+    write_any_func = tearing_sim_lftl_write_any;
     transaction_start_func = tearing_sim_lftl_transaction_start;
     transaction_write_func = tearing_sim_lftl_transaction_write;
     transaction_write_any_func = tearing_sim_lftl_transaction_write_any;
@@ -858,6 +1005,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     raw_nvm_erase_func = nvm_erase;
     erase_all_func = lftl_erase_all;
     write_func = lftl_write;
+    write_any_func = lftl_write_any;
     transaction_start_func = lftl_transaction_start;
     transaction_write_func = lftl_transaction_write;
     transaction_write_any_func = lftl_transaction_write_any;
@@ -865,7 +1013,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 10
+  #define N_TESTS 13
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
   uint64_t last_index=N_TESTS;
@@ -933,6 +1081,9 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 8: TEAR_COV(100);transaction_nvm_to_nvm_seq(                      tear_cov_log[i]);break;
       case 9: TEAR_COV( 10);test_and_simulate_tearing(ewlf_basic_test       ,tear_cov_log[i]);break;
       case 10:TEAR_COV(100);test_and_simulate_tearing(multi_nvm_test        ,tear_cov_log[i]);break;
+      case 11:TEAR_COV(100);test_and_simulate_tearing(write_any_test        ,tear_cov_log[i]);break;
+      case 12:TEAR_COV(100);test_and_simulate_tearing(get_ctx_test          ,tear_cov_log[i]);break;
+      case 13:TEAR_COV(100);test_and_simulate_tearing(memread_newer_test    ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

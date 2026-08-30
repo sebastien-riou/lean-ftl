@@ -292,8 +292,36 @@ void lftl_format(lftl_ctx_t*ctx);//NOT covered by anti-tearing
  */
 
 ////////////////////////////////////////////////////////////
-/// \brief Retrieve the LFTL context correponding to an 
+/// \brief Retrieve the std LFTL context correponding to an
 /// address, if any.
+///
+/// Only searches areas registered with ::lftl_register_area.
+/// See ::lftl_get_ctx to search all area types at once.
+///
+/// \param addr Address to search
+/// \returns a valid LFTL context or LFTL_INVALID_POINTER
+////////////////////////////////////////////////////////////
+lftl_ctx_t*lftl_get_ctx_std(const void*const addr);
+
+////////////////////////////////////////////////////////////
+/// \brief Retrieve the EWLF LFTL context correponding to an
+/// address, if any.
+///
+/// Only searches areas registered with ::lftl_register_area_ewlf.
+/// See ::lftl_get_ctx to search all area types at once.
+///
+/// \param addr Address to search
+/// \returns a valid LFTL context or LFTL_INVALID_POINTER
+////////////////////////////////////////////////////////////
+lftl_ctx_t*lftl_get_ctx_ewlf(const void*const addr);
+
+////////////////////////////////////////////////////////////
+/// \brief Retrieve the LFTL context correponding to an
+/// address, if any.
+///
+/// Searches areas of every type: std (::lftl_register_area) then
+/// EWLF (::lftl_register_area_ewlf). See ::lftl_get_ctx_std and
+/// ::lftl_get_ctx_ewlf to search only one area type.
 ///
 /// \param addr Address to search
 /// \returns a valid LFTL context or LFTL_INVALID_POINTER

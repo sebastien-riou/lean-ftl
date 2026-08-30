@@ -250,13 +250,13 @@ static bool has_several_nvms(){
  * \param first Pointer to the head of the target list (::first_area or ::first_area_ewlf)
  */
 static void lftl_register_area_core(lftl_ctx_t*ctx, lftl_ctx_t**first){
-  lftl_ctx_t*prev = *first;
-  if(LFTL_INVALID_POINTER==prev){
+  if(LFTL_INVALID_POINTER==*first){
     *first = ctx;
     ctx->next = ctx;
   } else {
-    prev->next = ctx;
-    ctx->next = *first;
+    lftl_ctx_t*old_second = (*first)->next;
+    (*first)->next = ctx;
+    ctx->next = old_second;
   }
   lftl_register_nvm(ctx->nvm_props);
 }

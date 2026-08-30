@@ -32,6 +32,10 @@ target_compile_options(${LIB} PRIVATE
     $<$<CONFIG:Release>:-Os -g0>
 )
 
+if(LFTL_COVERAGE)
+  target_compile_options(${LIB} PRIVATE --coverage)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/git_version.cmake")
 add_definitions( -DGIT_VERSION=${GIT_VERSION} )
 add_definitions( -DVERSION_TIMESTAMP=${VERSION_TIMESTAMP} )

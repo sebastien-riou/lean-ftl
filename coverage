@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -ex
+
+# Fast pass by default (--tear-cov=1); bump it (or drop it for the default 100%)
+# for a report that also reflects the tearing-simulation sweep.
+
+./buildit on/linux debug -DLFTL_COVERAGE=ON
+
+cd build/linux
+./lean-ftl-test-fw --tear-cov=1
+cd ../..
+
+mkdir -p build/linux/coverage-html
+pipenv run gcovr --root . --filter 'liblean-ftl/' \
+  --html-details build/linux/coverage-html/index.html --print-summary build/linux
+
+echo "Coverage report: build/linux/coverage-html/index.html"

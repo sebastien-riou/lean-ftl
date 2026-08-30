@@ -5,6 +5,8 @@ project(lean-ftl-test-fw)
 #message(WARNING "CMAKE_C_COMPILER is ${CMAKE_C_COMPILER}")
 #message(WARNING "CMAKE_AR is ${CMAKE_AR}")
 
+option(LFTL_COVERAGE "Enable gcov code coverage instrumentation (linux/gcc host builds only)" OFF)
+
 add_subdirectory(liblean-ftl)
 add_subdirectory(liblean-ftl-test)
 

@@ -8,6 +8,7 @@ sphinx = "*"
 breathe = "*"
 sphinx-rtd-theme = "*"
 sphinx-autobuild = "*"
+gcovr = "*"
 
 [dev-packages]
 

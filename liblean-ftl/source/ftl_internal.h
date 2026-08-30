@@ -78,7 +78,7 @@ static uintptr_t max_uintptr(uintptr_t a,uintptr_t b){
 
 static bool is_in_range(const void*const addr, const void*const base, uintptr_t size){
   if(addr < base) return false;
-  if((uintptr_t)addr > ((uintptr_t)base+size)) return false;
+  if((uintptr_t)addr >= ((uintptr_t)base+size)) return false;
   return true;
 }
 
@@ -161,7 +161,7 @@ static lftl_nvm_props_t*is_in_nvm_phy(const void*const addr){
       if(LFTL_INVALID_POINTER==it->next) break;
       if(is_in_range(addr, it->base, it->size)) return it;
       it = it->next;
-    }while(it->next != stop);
+    }while(it != stop);
   }
   return LFTL_INVALID_POINTER;
 }
@@ -196,7 +196,6 @@ static void mem_read(lftl_ctx_t*ctx, void*dst, const void*const src, uintptr_t s
   }*/
   lftl_nvm_props_t*nvm_props = is_in_nvm_phy(src);
   if(LFTL_INVALID_POINTER!=nvm_props){
-    raise_error(ctx,__LINE__);//TODO: NOT covered by any test
     nvm_read(nvm_props,dst,src,size);
     return;
   }

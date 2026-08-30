@@ -82,11 +82,6 @@ static bool is_in_range(const void*const addr, const void*const base, uintptr_t 
   return true;
 }
 
-static bool is_in_nvm_deprecated(lftl_ctx_t*ctx, const void*const addr){
-  return is_in_range(addr, ctx->nvm_props->base, ctx->nvm_props->size);
-}
-
-
 static bool is_in_data(lftl_ctx_t*ctx, const void*const nvm_addr){//nvm_addr is a logical address, so always between ctx->area and ctx->area+data_size
   return is_in_range(nvm_addr, ctx->area, ctx->data_size);
 }

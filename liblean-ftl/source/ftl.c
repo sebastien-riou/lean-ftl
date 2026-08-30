@@ -19,7 +19,7 @@ void lftl_init_lib(){
 }
 
 void lftl_register_nvm(lftl_nvm_props_t*ctx){
-  if(LFTL_INVALID_POINTER!=is_in_nvm_phy(ctx->base)) return;//already registered
+  if(LFTL_INVALID_POINTER!=addr_to_nvm(ctx->base)) return;//already registered
   lftl_nvm_props_t*prev = first_nvm;
   if(LFTL_INVALID_POINTER==prev){
     first_nvm = ctx;
@@ -236,7 +236,7 @@ void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, ui
 void lftl_memread(void*dst, const void*const src, uintptr_t size){
   DEBUG_PRINTLN("lftl_memread entry");
   lftl_ctx_t*ctx;
-  lftl_nvm_props_t*nvm_props = is_in_any_nvm(src,&ctx);
+  lftl_nvm_props_t*nvm_props = addr_to_area_and_nvm(src,&ctx);
   if(LFTL_INVALID_POINTER==nvm_props) { // regular memory
     memcpy(dst,src,size);
   } else { // NVM, in or out of any LFTL area
@@ -249,7 +249,7 @@ void lftl_memread(void*dst, const void*const src, uintptr_t size){
 void lftl_memread_newer(void*dst, const void*const src, uintptr_t size){
   DEBUG_PRINTLN("lftl_memread_newer entry");
   lftl_ctx_t*ctx;
-  lftl_nvm_props_t*nvm_props = is_in_any_nvm(src,&ctx);
+  lftl_nvm_props_t*nvm_props = addr_to_area_and_nvm(src,&ctx);
   if(LFTL_INVALID_POINTER==nvm_props) { // regular memory
     memcpy(dst,src,size);
   } else { // NVM, in or out of any LFTL area

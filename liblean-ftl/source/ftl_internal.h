@@ -135,25 +135,22 @@ static void lftl_register_area_core(lftl_ctx_t*ctx, lftl_ctx_t**first){
   lftl_register_nvm(ctx->nvm_props);
 }
 
-static lftl_ctx_t*addr_to_area_std(const void*const nvm_addr){
-  lftl_ctx_t*ctx = first_area;
-  if(is_in_data(ctx,nvm_addr)) return ctx;
-  return get_other_ctx(ctx,nvm_addr);
+static lftl_ctx_t*addr_to_area_core(const void*const addr, lftl_ctx_t*first){
+  if(LFTL_INVALID_POINTER == first) return LFTL_INVALID_POINTER;
+  lftl_ctx_t*ctx = first;
+  ctx = get_any_ctx(ctx, addr); // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
+  return ctx;
 }
 
-static lftl_ctx_t*addr_to_area_ewlf(const void*const nvm_addr){
-  lftl_ctx_t*ctx = first_area_ewlf;
-  if(is_in_data(ctx,nvm_addr)) return ctx;
-  return get_other_ctx(ctx,nvm_addr);
+static lftl_ctx_t*addr_to_area_std(const void*const addr){
+  return addr_to_area_core(addr, first_area);
 }
 
-static lftl_ctx_t*addr_to_area(const void*const nvm_addr){
-  lftl_ctx_t*ctx = addr_to_area_std(nvm_addr);
-  if(LFTL_INVALID_POINTER!=ctx) return ctx;
-  return addr_to_area_ewlf(nvm_addr);
+static lftl_ctx_t*addr_to_area_ewlf(const void*const addr){
+  return addr_to_area_core(addr, first_area_ewlf);
 }
 
-static lftl_nvm_props_t*is_in_nvm_phy(const void*const addr){
+static lftl_nvm_props_t*addr_to_nvm(const void*const addr){
   if(LFTL_INVALID_POINTER!=first_nvm){
     lftl_nvm_props_t*it = first_nvm;
     const lftl_nvm_props_t*stop=it;
@@ -166,35 +163,18 @@ static lftl_nvm_props_t*is_in_nvm_phy(const void*const addr){
   return LFTL_INVALID_POINTER;
 }
 
-static lftl_nvm_props_t*is_in_any_nvm(const void*const addr, lftl_ctx_t**ctx){
-  *ctx = addr_to_area(addr);// we search first within LFTL areas to return the right ctx if several areas use the same NVM.
+static lftl_nvm_props_t*addr_to_area_and_nvm(const void*const addr, lftl_ctx_t**ctx){
+  // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
+  *ctx = addr_to_area_std(addr);
+  if(LFTL_INVALID_POINTER == *ctx) *ctx = addr_to_area_ewlf(addr);
   if(LFTL_INVALID_POINTER!=*ctx) return (*ctx)->nvm_props;
   // addr is not in any LFTL areas of any kind, check other NVM addresses
-  return is_in_nvm_phy(addr);
-}
-
-static lftl_ctx_t*is_in_any_area_core(const void*const addr, lftl_ctx_t*first){
-  if(LFTL_INVALID_POINTER == first) return LFTL_INVALID_POINTER;
-  lftl_ctx_t*ctx = first;
-  ctx = get_any_ctx(ctx, addr); // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
-  return ctx;
-}
-
-static lftl_ctx_t*is_in_any_area_std(const void*const addr){
-  return is_in_any_area_core(addr, first_area);
-}
-
-static lftl_ctx_t*is_in_any_area_ewlf(const void*const addr){
-  return is_in_any_area_core(addr, first_area_ewlf);
+  return addr_to_nvm(addr);
 }
 
 //read from ctx area if src is within it, or from a physical NVM address or from regular memory
 static void mem_read(lftl_ctx_t*ctx, void*dst, const void*const src, uintptr_t size){
-  /*if(is_in_nvm_deprecated(ctx,src)) {
-    nvm_read(ctx->nvm_props,dst,src,size);
-    return;
-  }*/
-  lftl_nvm_props_t*nvm_props = is_in_nvm_phy(src);
+  lftl_nvm_props_t*nvm_props = addr_to_nvm(src);
   if(LFTL_INVALID_POINTER!=nvm_props){
     nvm_read(nvm_props,dst,src,size);
     return;
@@ -422,14 +402,14 @@ void dbg_memcpy(void*dst, const void*const src, uintptr_t size){
 //  leave inputs intact
 static void check_src_phy_addr(lftl_ctx_t**src_ctx, const uint8_t**p_src_phy_addr, uintptr_t size){
   const uint8_t*src_phy_addr = *p_src_phy_addr;
-  lftl_ctx_t* ctx = is_in_any_area_std(src_phy_addr);
+  lftl_ctx_t* ctx = addr_to_area_std(src_phy_addr);
   if(LFTL_INVALID_POINTER!=ctx){
     if(is_in_data(ctx,src_phy_addr)){ // src is in an LFTL area
       *p_src_phy_addr = translate_addr_std(ctx, (void*)src_phy_addr, size);
       *src_ctx = ctx;
     }
   }else{
-    ctx = is_in_any_area_ewlf(src_phy_addr);
+    ctx = addr_to_area_ewlf(src_phy_addr);
     if(LFTL_INVALID_POINTER!=ctx){
       if(is_in_data(ctx,src_phy_addr)){ // src is in an LFTL area
         *p_src_phy_addr = translate_addr_ewlf(ctx, (void*)src_phy_addr, size);

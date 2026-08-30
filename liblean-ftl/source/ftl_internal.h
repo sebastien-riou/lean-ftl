@@ -154,6 +154,12 @@ static uintptr_t max_uintptr(uintptr_t a,uintptr_t b){
  * \param size Size in bytes of the range
  * \returns true if `base <= addr < base+size`, false otherwise
  */
+//Note: gcov/gcovr reports this whole function as 0 hits with one branch in
+//the billions (a "suspicious hits" warning at coverage time), despite both
+//outcomes of both checks below being genuinely exercised by tests -- this
+//is a heavily-inlined, extremely hot static helper, in the same class as
+//crc32c() and page_size() below; a known GCC/gcov counter-attribution
+//quirk at -Og for such functions, not a real coverage gap.
 static bool is_in_range(const void*const addr, const void*const base, uintptr_t size){
   if(addr < base) return false;
   if((uintptr_t)addr >= ((uintptr_t)base+size)) return false;
@@ -185,6 +191,9 @@ static bool is_in_data(lftl_ctx_t*ctx, const void*const nvm_addr){//nvm_addr is 
 static lftl_ctx_t*get_other_ctx(lftl_ctx_t*ctx, const void*const nvm_addr){
   const lftl_ctx_t*stop=ctx;
   while(ctx->next != stop){
+    //Defensive only: lftl_register_area(_ewlf) always keeps the list
+    //properly circular, so an in-list node's `next` is never
+    //LFTL_INVALID_POINTER; this `break` cannot be reached by any test.
     if(LFTL_INVALID_POINTER==ctx->next) break;
     ctx = ctx->next;
     if(is_in_data(ctx,nvm_addr)) return ctx;
@@ -310,6 +319,9 @@ static lftl_nvm_props_t*addr_to_nvm(const void*const addr){
     lftl_nvm_props_t*it = first_nvm;
     const lftl_nvm_props_t*stop=it;
     do{
+      //Defensive only: lftl_register_nvm always keeps the list properly
+      //circular, so an in-list node's `next` is never LFTL_INVALID_POINTER;
+      //this `break` cannot be reached by any test.
       if(LFTL_INVALID_POINTER==it->next) break;
       if(is_in_range(addr, it->base, it->size)) return it;
       it = it->next;
@@ -844,6 +856,12 @@ static void write_src_phy_addr_to_dst_phy_addr(
   if(addr_misalignement){
     // fix up first WU
     uintptr_t size_consumed = write_size - addr_misalignement;
+    //Note: with the "on/linux" test harness's write_size of 2, the only
+    //possible addr_misalignement is 1, making size_consumed always exactly
+    //1 -- this branch (size_consumed > size) would need size==0 to fire,
+    //which is a separate, already-covered early-return case elsewhere. A
+    //target built with a larger write unit size (e.g. 16) would be needed
+    //to exercise this with a real unaligned sub-write-unit write.
     if(size_consumed > size){
       const uintptr_t tail_size = size_consumed - size;
       size_consumed = size;
@@ -1043,6 +1061,12 @@ static void write_ewlf(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
  * \param dst_nvm_addr Start of the logical range to erase
  * \param size Size in bytes of the range to erase
  */
+//Note: erase()'s only caller is lftl_erase_all, which always passes the
+//full, page-aligned area range (offset==0 and remaining==0 always hold).
+//The misalignment checks below and the offset/remaining copy branches are
+//therefore unreachable via the current public API; erase() keeps them
+//because it is written as a general sub-range primitive, ready for a future
+//caller that erases a narrower range.
 static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
   DEBUG_PRINTLN("erase entry");
   const uint32_t write_size = ctx->nvm_props->write_size;

@@ -124,5 +124,10 @@ uint8_t nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
     printf("nvm_read ");
     dump_core((uintptr_t)dst,size,(uintptr_t)src_nvm_addr);
   }
-  return 0;
+  //corrupting dst (a transient, caller-owned buffer) rather than src_nvm_addr:
+  //a real NVM read glitch does not alter the stored data, and the caller
+  //discards dst entirely on a nonzero return, so this has no lasting effect
+  //on NVM state or the test harness's reference model.
+  bool tearing = tearing_sim(dst,size);
+  return tearing ? SIMULATED_TEARING:0;
 }

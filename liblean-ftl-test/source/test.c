@@ -743,6 +743,250 @@ void memread_newer_test(){
   SANITY_CHECK();
 }
 
+// Runs `stmt` expecting it to call raise_error (via longjmp to exception_ctx)
+// with exactly `expected_err_code`; aborts (nonzero exit, no hang) if it
+// raises the wrong code or doesn't raise at all. exception_ctx is a single
+// global jmp_buf also used by test_and_simulate_tearing's own outer catch,
+// so this saves/restores it around the local setjmp: without that, once
+// this macro's setjmp target has been reached and left, it stays "primed"
+// for the rest of the enclosing function, and an unrelated tearing fault
+// raised by a later, unwrapped statement would wrongly longjmp back into
+// this (already-returned) checkpoint instead of the outer handler. The
+// restore runs before the match/mismatch check so a mismatch here is
+// always a genuine unexpected code, not a stale-jmp_buf artifact.
+#define EXPECT_ERROR(expected_err_code, stmt) do{\
+    jmp_buf __saved_ctx;\
+    memcpy(__saved_ctx, exception_ctx, sizeof(jmp_buf));\
+    uint32_t __err_code = setjmp(exception_ctx);\
+    if(0 == __err_code){\
+      stmt;\
+      memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
+      PRINTF("ERROR: expected err_code 0x%08x but none was raised\n",(unsigned)(expected_err_code));\
+      abort();\
+    }\
+    memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
+    if(__err_code != (uint32_t)(expected_err_code)){\
+      PRINTF("ERROR: expected err_code 0x%08x but got 0x%08x\n",(unsigned)(expected_err_code),__err_code);\
+      abort();\
+    }\
+  }while(0)
+
+void zero_size_test(){
+  DEBUG_PRINTLN(__func__);
+  uint8_t buf[16] = {0};
+  lftl_basic_write(&nvma,nvm.data0,buf,0);
+  lftl_read(&nvma,buf,nvm.data0,0);
+  lftl_write(&nvma,nvm.data0,buf,0);
+  lftl_read_newer(&nvma,buf,nvm.data0,0);
+  SANITY_CHECK();
+
+  //size==0 during an active transaction
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  transaction_start_func(&nvma,tracker);
+  lftl_transaction_read(&nvma,buf,nvm.data0,0);
+  transaction_abort_func(&nvma);
+  SANITY_CHECK();
+}
+
+void transaction_misuse_test(){
+  DEBUG_PRINTLN(__func__);
+  const uint32_t write_size = nvm_props.write_size;
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  uint8_t tracker2[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  uint8_t buf[write_size];
+  stateful_prng_fill(buf,write_size);
+
+  //lftl_transaction_write / _commit / _read / _write_any with no active transaction
+  EXPECT_ERROR(LFTL_ERROR_NO_TRANSACTION, lftl_transaction_write(&nvma,nvm.data0,buf,write_size));
+  EXPECT_ERROR(LFTL_ERROR_NO_TRANSACTION, lftl_transaction_commit(&nvma));
+  EXPECT_ERROR(LFTL_ERROR_NO_TRANSACTION, lftl_transaction_read(&nvma,buf,nvm.data0,write_size));
+  //unaligned lftl_transaction_write_any with no active transaction
+  EXPECT_ERROR(LFTL_ERROR_NO_TRANSACTION, lftl_transaction_write_any(&nvma,((uint8_t*)nvm.data0)+1,buf,write_size));
+  SANITY_CHECK();
+
+  transaction_start_func(&nvma,tracker);
+
+  //starting a second transaction while one is already active
+  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_transaction_start(&nvma,tracker2));
+
+  //calling the low-level lftl_basic_write directly while a transaction is
+  //active, bypassing the public lftl_write dispatcher
+  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_basic_write(&nvma,nvm.data0,buf,write_size));
+
+  //calling lftl_erase_all while a transaction is active
+  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_erase_all(&nvma));
+
+  //write the same write unit twice in one transaction
+  transaction_write_func(&nvma,nvm.data0,buf,write_size);
+  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write(&nvma,nvm.data0,buf,write_size));
+
+  //same, via the unaligned lftl_transaction_write_any path
+  uint8_t*const data1_base = (uint8_t*)nvm.data1;
+  transaction_write_any_func(&nvma,data1_base+1,buf,write_size);
+  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write_any(&nvma,data1_base+1,buf,write_size));
+
+  transaction_abort_func(&nvma);
+  SANITY_CHECK();
+
+  //lftl_write (the public dispatcher, not lftl_transaction_write directly)
+  //routed to lftl_transaction_write while a transaction IS active -- this
+  //one must succeed, not raise. Update transaction_buf_ref manually (mirroring
+  //tearing_sim_lftl_transaction_write) since lftl_write itself isn't wrapped
+  //for the transactional case the way write_func/write_any_func are.
+  transaction_start_func(&nvma,tracker);
+  {
+    uintptr_t offset = (uintptr_t)nvm.data0 - (uintptr_t)&nvm;
+    uint8_t*dst = (uint8_t*)&transaction_buf_ref;
+    lftl_memread(dst+offset,buf,write_size);
+  }
+  lftl_write(&nvma,nvm.data0,buf,write_size);
+  read_newer_and_check(&nvma,nvm.data0,buf,write_size);
+  transaction_commit_func(&nvma);
+  read_and_check(&nvma,nvm.data0,buf,write_size);
+  SANITY_CHECK();
+}
+
+void untouched_transaction_read_test(){
+  DEBUG_PRINTLN(__func__);
+  const uint32_t write_size = nvm_props.write_size;
+  uint8_t wbuf0[sizeof(nvm.a_data)];
+  stateful_prng_fill(wbuf0,sizeof(wbuf0));
+  test_write(&nvma,&nvm.a_data,wbuf0,sizeof(wbuf0));
+
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  transaction_start_func(&nvma,tracker);
+  uint8_t wbuf[write_size];
+  stateful_prng_fill(wbuf,write_size);
+  transaction_write_func(&nvma,nvm.data0,wbuf,write_size);
+  //nvm.data1 was NOT written in this transaction: lftl_transaction_read (via
+  //read_newer_and_check) must take its "read current data" branch for it.
+  read_newer_and_check(&nvma,nvm.data1,wbuf0+sizeof(nvm.data0),write_size);
+  transaction_commit_func(&nvma);
+  SANITY_CHECK();
+}
+
+void empty_registry_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_init_lib();
+  if(lftl_get_ctx_std(nvm.data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx_ewlf(nvm.data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(lftl_get_ctx(nvm.data0) != LFTL_INVALID_POINTER) throw_exception(ERROR_VERIFICATION_FAIL);
+  uint8_t dst[16];
+  uint8_t src[16];
+  stateful_prng_fill(src,sizeof(src));
+  lftl_memread(dst,src,sizeof(src)); //regular memory; nothing registered yet at all
+  if(memcmp(dst,src,sizeof(src))) throw_exception(ERROR_VERIFICATION_FAIL);
+
+  //Deliberately leaves the registry empty on return: lftl_format is
+  //documented as not tearing-safe (see tearing_sim_lftl_format), so calling
+  //it here would put a real, swept NVM operation inside dut() itself, which
+  //test_and_simulate_tearing's sweep never expects (it only times dut()'s
+  //own body, assuming registration/formatting stays in its own untimed
+  //preamble). Leaving registration to whichever test runs next is safe:
+  //every test_and_simulate_tearing call re-registers and reformats
+  //everything from scratch in its own preamble regardless of what a
+  //previous test left behind.
+}
+
+void out_of_range_test(){
+  DEBUG_PRINTLN(__func__);
+  uint8_t buf[16];
+  EXPECT_ERROR(LFTL_ERROR_FIRST_NOT_IN_DATA, lftl_read(&nvma,buf,((uint8_t*)nvma.area)-1,1));
+  EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_read(&nvma,buf,((uint8_t*)nvma.area)+nvma.data_size-1,2));
+  SANITY_CHECK();
+}
+
+void unaligned_edge_test(){
+  DEBUG_PRINTLN(__func__);
+  //a 1-byte unaligned write, smaller than one write unit: the "first WU
+  //fixup" in write_src_phy_addr_to_dst_phy_addr consumes more than the
+  //whole requested size.
+  uint8_t*const data0_base = (uint8_t*)nvm.data0;
+  uint8_t val = 0x42;
+  write_any_func(&nvma,data0_base+1,&val,1);
+  read_and_check(&nvma,data0_base+1,&val,1);
+  SANITY_CHECK();
+}
+
+void aligned_misuse_test(){
+  DEBUG_PRINTLN(__func__);
+  const uint32_t write_size = nvm_props.write_size;
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  uint8_t buf[write_size*2];
+  stateful_prng_fill(buf,sizeof(buf));
+
+  transaction_start_func(&nvma,tracker);
+  //lftl_transaction_write requires an ALIGNED address and size. Its tracker
+  //bookkeeping runs before write_core's alignment check and marks a write
+  //unit even when the call ultimately fails alignment, so the two checks
+  //below target different write units (data0 vs data1) to avoid a spurious
+  //LFTL_ERROR_TRANSACTION_OVERWRITE from the first call's tracker bit.
+  EXPECT_ERROR(LFTL_ERROR_BASE_MISALIGNED, lftl_transaction_write(&nvma,((uint8_t*)nvm.data0)+1,buf,write_size));
+  EXPECT_ERROR(LFTL_ERROR_SIZE_MISALIGNED, lftl_transaction_write(&nvma,nvm.data1,buf,write_size+1));
+  transaction_abort_func(&nvma);
+  SANITY_CHECK();
+
+  //lftl_format rejects an NVM whose write_size exceeds LFTL_WU_MAX_SIZE.
+  //nvmd/nvm_props3 are a dedicated area+nvm_props so this doesn't disturb
+  //the shared nvm_props used by nvma/nvmb/ewlfa/ewlfb. raise_error fires
+  //before any low-level NVM access, so nvm_ref needs no manual update.
+  const uint32_t saved_write_size = nvm_props3.write_size;
+  nvm_props3.write_size = LFTL_WU_MAX_SIZE+1;
+  EXPECT_ERROR(LFTL_ERROR_WU_SIZE_TOO_LARGE, lftl_format(&nvmd));
+  nvm_props3.write_size = saved_write_size;
+  SANITY_CHECK();
+}
+
+void version_collision_test(){
+  DEBUG_PRINTLN(__func__);
+  uint8_t buf[sizeof(nvm.data7)];
+  stateful_prng_fill(buf,sizeof(buf));
+  test_write(&nvmd,nvm.data7,buf,sizeof(buf));
+
+  //Compute nvmd's physical slot/meta layout from public fields only,
+  //mirroring the formulas in ftl_internal.h (meta_phy_size/n_pages_in_slot/
+  //slot_size/n_slots/slot_base/meta_offset).
+  const uint32_t write_size = nvmd.nvm_props->write_size;
+  const uint32_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t meta_phy_size = LFTL_META_N_ITEMS * item_size;
+  const uintptr_t erase_size = nvmd.nvm_props->erase_size;
+  const uintptr_t n_pages_in_slot = LFTL_DIV_CEIL(nvmd.data_size + meta_phy_size, erase_size);
+  const uintptr_t slot_size = n_pages_in_slot * erase_size;
+  const unsigned int n_slots = nvmd.area_size / slot_size;
+  if(n_slots < 2) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+
+  const unsigned int current_index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
+  const unsigned int other_index = (current_index + 1) % n_slots;
+  const uint8_t*const current_slot_base = (uint8_t*)nvmd.area + current_index*slot_size;
+  uint8_t*const other_slot_base = (uint8_t*)nvmd.area + other_index*slot_size;
+
+  //Duplicate the WHOLE current slot (data + meta-data) onto the other slot,
+  //rather than just patching its version field: find_current_slot only
+  //flags a slot as a genuine contender for "current" if its checksum (a
+  //function of that slot's own data and version) is internally consistent,
+  //so a version-only edit would leave the other slot's stale checksum
+  //failing that check and never reach the collision comparison at all. A
+  //full byte-for-byte copy makes both slots equally self-consistent for
+  //the same version, which is what actually triggers the collision.
+  uint8_t full_slot_buf[slot_size];
+  lftl_memread(full_slot_buf, current_slot_base, slot_size);
+  raw_nvm_write_func(other_slot_base, full_slot_buf, slot_size);
+  SANITY_CHECK(); //the duplicated bytes are outside any area's logical data, so nvm_ref sync is unaffected
+
+  //force a fresh slot search: two slots now share the same version number
+  nvmd.data = LFTL_INVALID_POINTER;
+  EXPECT_ERROR(LFTL_ERROR_VERSION_COLLISION, lftl_read(&nvmd,buf,nvm.data7,sizeof(buf)));
+  format_func(&nvmd); //leave nvmd clean afterward, this test intentionally corrupts it
+
+  //LFTL_ERROR_NO_VALID_VERSION: erase nvmd's raw pages directly (bypassing
+  //lftl_format's write_meta), so every slot reads as fully erased
+  //(version == 0xFFFFFFFF) and none is valid.
+  raw_nvm_erase_func(nvmd.area, nvmd.area_size/erase_size);
+  nvmd.data = LFTL_INVALID_POINTER;
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&nvmd,buf,nvm.data7,sizeof(buf)));
+  format_func(&nvmd); //leave nvmd clean for anything after this test
+}
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -1013,7 +1257,8 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 13
+  #define N_TESTS 21
+  #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
   uint64_t last_index=N_TESTS;
@@ -1084,6 +1329,22 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 11:TEAR_COV(100);test_and_simulate_tearing(write_any_test        ,tear_cov_log[i]);break;
       case 12:TEAR_COV(100);test_and_simulate_tearing(get_ctx_test          ,tear_cov_log[i]);break;
       case 13:TEAR_COV(100);test_and_simulate_tearing(memread_newer_test    ,tear_cov_log[i]);break;
+      case 14:TEAR_COV( 10);test_and_simulate_tearing(zero_size_test        ,tear_cov_log[i]);break;
+      case 15:TEAR_COV( 10);test_and_simulate_tearing(transaction_misuse_test,tear_cov_log[i]);break;
+      case 16:TEAR_COV(100);test_and_simulate_tearing(untouched_transaction_read_test,tear_cov_log[i]);break;
+      case 17:TEAR_COV(  0);test_and_simulate_tearing(empty_registry_test   ,tear_cov_log[i]);break;
+      case 18:TEAR_COV( 10);test_and_simulate_tearing(out_of_range_test     ,tear_cov_log[i]);break;
+      case 19:TEAR_COV(100);test_and_simulate_tearing(unaligned_edge_test   ,tear_cov_log[i]);break;
+      case 20:TEAR_COV( 10);test_and_simulate_tearing(aligned_misuse_test   ,tear_cov_log[i]);break;
+      case 21:
+        //Hardcoded 0, ignoring --tear-cov: find_current_slot's own meta
+        //reads happen before it can detect the deliberately-planted version
+        //collision, so an injected read failure there can legitimately
+        //produce a different (also genuine) error than the one this test
+        //expects. Sweeping adds no coverage value here anyway -- the
+        //collision comparison itself is a single, deterministic in-memory
+        //check once reached.
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(version_collision_test,0);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();
@@ -1094,8 +1355,12 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     unsigned int min_tear_coverage = 100;
     for(unsigned int i=first_index;i<=last_index;i++){
       if(tear_cov_log[i]){
-        PRINTLN("Test %2u run with tearing coverage of %3u%%.",i,tear_cov_log[i]);
-        min_tear_coverage = tear_cov_log[i] < min_tear_coverage ? tear_cov_log[i] : min_tear_coverage;
+        if(TEAR_COV_NA == tear_cov_log[i]){
+          PRINTLN("Test %2u run (tearing coverage not applicable).",i);
+        }else{
+          PRINTLN("Test %2u run with tearing coverage of %3u%%.",i,tear_cov_log[i]);
+          min_tear_coverage = tear_cov_log[i] < min_tear_coverage ? tear_cov_log[i] : min_tear_coverage;
+        }
       }
     }
     if(min_tear_coverage < 100){

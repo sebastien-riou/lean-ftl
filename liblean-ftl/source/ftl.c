@@ -153,6 +153,11 @@ void lftl_transaction_commit(lftl_ctx_t*dst_ctx){
   for(uintptr_t i = 0; i < LFTL_DIV_CEIL(n_write_units,BITS_PER_BYTE); i++){
     const uint8_t track_byte = tracker[i];
     uint8_t mask = 1;
+    //Note: this inner loop's own natural exit (bi==BITS_PER_BYTE) only
+    //happens on a byte that isn't the transaction's last tracked byte, i.e.
+    //an area with data_size > BITS_PER_BYTE*write_size; every area in the
+    //current test harness has data_size <= BITS_PER_BYTE*write_size, so the
+    //`break` below always fires first and this exit is never reached.
     for(unsigned int bi = 0; bi < BITS_PER_BYTE; bi++){
       if(0 == (track_byte & mask)){
         uint64_t buf[SIZE64(write_size)];

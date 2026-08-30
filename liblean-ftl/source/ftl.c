@@ -19,7 +19,7 @@ void lftl_init_lib(){
 }
 
 void lftl_register_nvm(lftl_nvm_props_t*ctx){
-  if(is_in_nvm_phy(ctx->base)) return;//already registered
+  if(LFTL_INVALID_POINTER!=is_in_nvm_phy(ctx->base)) return;//already registered
   lftl_nvm_props_t*prev = first_nvm;
   if(LFTL_INVALID_POINTER==prev){
     first_nvm = ctx;

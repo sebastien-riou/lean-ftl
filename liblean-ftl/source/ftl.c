@@ -43,9 +43,13 @@ void lftl_register_area_ewlf(lftl_ctx_t*ctx){
 void lftl_format(lftl_ctx_t*ctx){
   DEBUG_PRINTLN("lftl_format entry");
   if(ctx->nvm_props->write_size>LFTL_WU_MAX_SIZE) raise_error(ctx,LFTL_ERROR_WU_SIZE_TOO_LARGE);
-  nvm_erase(ctx->nvm_props,ctx->area,n_pages(ctx));
-  ctx->data = ctx->area;
-  write_meta(ctx, 0, 1);
+  if(lftl_is_ewlf(ctx)){
+    format_ewlf(ctx);
+  } else {
+    nvm_erase(ctx->nvm_props,ctx->area,n_pages(ctx));
+    ctx->data = ctx->area;
+    write_meta(ctx, 0, 1);
+  }
   DEBUG_PRINTLN("lftl_format exit");
 }
 
@@ -68,12 +72,20 @@ bool lftl_is_ewlf(const lftl_ctx_t*const ctx){
 }
 
 void lftl_erase_all(lftl_ctx_t*ctx){
-  erase(ctx, ctx->area, ctx->data_size);//dst_nvm_addr is area because erase function does the address translation
+  if(lftl_is_ewlf(ctx)){
+    erase_ewlf(ctx);
+  } else {
+    erase(ctx, ctx->area, ctx->data_size);//dst_nvm_addr is area because erase function does the address translation
+  }
 }
 
 void lftl_basic_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   if(0==size) return;
-  write_core(dst_ctx,dst_nvm_addr,src,size,NO_TRANSACTION,UNALIGNED);
+  if(lftl_is_ewlf(dst_ctx)){
+    write_ewlf(dst_ctx,dst_nvm_addr,src,size);
+  } else {
+    write_core(dst_ctx,dst_nvm_addr,src,size,NO_TRANSACTION,UNALIGNED);
+  }
 }
 
 void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){

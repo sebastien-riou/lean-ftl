@@ -617,6 +617,69 @@ void ewlf_basic_test(){
   }
 }
 
+//Sum of erase_cnt[] over every physical page belonging to an EWLF area's
+//own erase units (skips ctx->area's own page range computation duplicating
+//ftl_internal.h's private record layout: this only needs page granularity,
+//which is already public via ctx->area/ctx->area_size/LFTL_PAGE_SIZE).
+uint32_t ewlf_area_erase_cnt_sum(lftl_ctx_t*ctx){
+  const unsigned int first_page = ((uintptr_t)ctx->area - (uintptr_t)&nvm) / LFTL_PAGE_SIZE;
+  const unsigned int n_area_pages = ctx->area_size / LFTL_PAGE_SIZE;
+  uint32_t sum = 0;
+  for(unsigned int i=0;i<n_area_pages;i++){
+    sum += erase_cnt[first_page+i];
+  }
+  return sum;
+}
+
+void ewlf_packing_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_ctx_t*ctx = &ewlfa;
+  void*dst_nvm_addr = nvm.data4;
+  uintptr_t size = sizeof(nvm.data4);
+  uint8_t src[size];
+
+  //right after the preamble's format, exactly one record has been written
+  //(in the topmost erase unit); a real EWLF area packs several records per
+  //erase unit, so one more write here must NOT need a fresh erase.
+  //erase_cnt[] is only tracked during test_and_simulate_tearing's own
+  //untorn reference run (erase_cnt_enabled is off for the rest of its
+  //tearing-injection sweep), so this check is only meaningful then.
+  const uint32_t before = ewlf_area_erase_cnt_sum(ctx);
+  stateful_prng_fill(src,size);
+  write_func(ctx,dst_nvm_addr,src,size);
+  read_and_check(ctx,dst_nvm_addr,src,size);
+  const uint32_t after = ewlf_area_erase_cnt_sum(ctx);
+  if(erase_cnt_enabled && (after != before)) throw_exception(ERROR_VERIFICATION_FAIL);
+}
+
+void ewlf_rollover_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_ctx_t*ctx = &ewlfa;
+  void*dst_nvm_addr = nvm.data4;
+  uintptr_t size = sizeof(nvm.data4);
+  uint8_t src[size];
+
+  //enough writes to force at least one rollover to a fresh erase unit,
+  //given only 2-3 records fit per unit for this area's sizing; also
+  //exercises a rollover's erase+prev_erased confirmation (and, under the
+  //tearing-simulation sweep, its recovery) repeatedly. As above, the
+  //erase_cnt[]-based check is only meaningful during the untorn reference
+  //run (erase_cnt_enabled is off during the sweep itself), so only
+  //enforce it then -- correctness of the writes/reads themselves is still
+  //fully exercised either way via read_and_check.
+  uint32_t prev_sum = ewlf_area_erase_cnt_sum(ctx);
+  bool saw_new_erase = 0;
+  for(unsigned int i=0;i<20;i++){
+    stateful_prng_fill(src,size);
+    write_func(ctx,dst_nvm_addr,src,size);
+    read_and_check(ctx,dst_nvm_addr,src,size);
+    const uint32_t sum = ewlf_area_erase_cnt_sum(ctx);
+    if(sum > prev_sum) saw_new_erase = 1;
+    prev_sum = sum;
+  }
+  if(erase_cnt_enabled && !saw_new_erase) throw_exception(ERROR_VERIFICATION_FAIL);
+}
+
 void multi_nvm_test(){
   DEBUG_PRINTLN(__func__);
   // nvmc/nvmd each use their own, independently registered lftl_nvm_props_t
@@ -1257,7 +1320,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 21
+  #define N_TESTS 23
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1345,6 +1408,8 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         //collision comparison itself is a single, deterministic in-memory
         //check once reached.
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(version_collision_test,0);break;
+      case 22:TEAR_COV( 10);test_and_simulate_tearing(ewlf_packing_test     ,tear_cov_log[i]);break;
+      case 23:TEAR_COV(100);test_and_simulate_tearing(ewlf_rollover_test    ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

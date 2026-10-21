@@ -11,7 +11,6 @@ board.
 | ID | Issue | Severity | Status |
 |---|---|---|---|
 | [LFTL-002](#lftl-002) | After a power cut, the next EWLF write programs over cells that are not erased: NOR flash keeps a corrupted record that passes its checksum, STM32U5-class flash refuses every later write | High | inferred |
-| [LFTL-003](#lftl-003) | A transaction started before the area's first read erases outside the area: the STM32 callbacks reject it and the transaction cannot start, the CH32V307 callback erases the start of the firmware | High | demonstrated |
 
 ---
 
@@ -74,63 +73,3 @@ the write, so a record that did not program as intended fails its check instead 
 the tearing tests write to each area after recovering from a tear, so the simulator's refusal to
 program a non-erased write unit catches this class of bug; a write mode that ANDs would also show
 the silent corruption.
-
-<a id="lftl-003"></a>
-## LFTL-003 - A transaction started before the area's first read erases outside the area
-
-**Severity:** High · **[demonstrated]** on the host; the CH32V307 outcome is **[confirmed]** from the
-source and a 32-bit model of the arithmetic, not run on a board · reported from `THREAT-MODEL.md` as
-LF-8 (2026-10-21)
-
-**Where.** `lftl_transaction_start()` in `liblean-ftl/source/ftl.c` and `next_slot()` in
-`liblean-ftl/source/ftl_internal.h` at HEAD (501de63); the same code at d8f182f. Regular areas only:
-EWLF areas reject transactions.
-
-Every other operation locates the current slot on first use, through `translate_addr()` and
-`find_current_slot()`. `lftl_transaction_start()` does not: it sets `transaction_tracker`, then
-erases the slot `next_slot()` picks. After a reset, `ctx->data` is still `LFTL_INVALID_POINTER`, so
-`next_slot()` works from `0xFFFFFFFF - area` and `slot_base()` wraps around. On a 32-bit MCU the
-result is always page-aligned and below `slot_size`, near address 0. On a 64-bit host it is a wild
-address. What happens next depends on the erase callback:
-
-- **STM32U5 and STM32L5** reference callbacks return 1 for an address below `FLASH_BASE_NS`, so the
-  error handler gets `0x101` (`LOW_LEVEL_ERASE | 1`). The tracker was set before the erase and stays
-  set: retrying `lftl_transaction_start()` raises `TRANSACTION_ONGOING` (`0x7`), and a later
-  `lftl_write()` is routed into the dead transaction (`THREAT-MODEL.md` LF-4). An application that
-  starts with a transaction after every boot never gets one through.
-- **CH32V307** reference callback folds any address below `FLASH_BASE` into flash ("handle flash
-  address aliasing", `target/ch32v307/ch32v307-accessors.c`), so it erases a slot's worth of pages
-  from `0x08000000`: the start of the firmware, vector table included. The device runs on until the
-  next reset, then does not boot.
-
-The repository's tests never reach this: they always format or read an area before starting a
-transaction.
-
-**Evidence.** `lftl_asan_harness.c` test 6 (64-bit host): the erase callback is handed an address
-hundreds of GB past the area (the exact offset depends on where the loader puts things), and
-`memset` faults. With an erase callback that rejects out-of-range
-addresses, as the STM32 ones do (2026-10-21):
-
-```
-lftl_transaction_start first after reset:
-  error_handler(0x101)
-  transaction_tracker still set
-retry lftl_transaction_start:
-  error_handler(0x7)
-```
-
-The 32-bit addresses come from `next_slot()`, `get_current_slot_index()` and `slot_base()`
-transcribed with a 32-bit `uintptr_t`: for 224 layouts (areas from flash+64 KB to +288 KB on the
-CH32V307, slots of 1 to 4 pages of 4 KB), the erase address was always page-aligned and below
-`slot_size`. With an area at `0x08040000` and one-page slots it is `0x00000000`, which the CH32V307
-callback turns into `0x08000000`. A 32-bit host build of the same scenario could not run in the
-sandbox it was written in; not observed on a board.
-
-**Workaround.** After a reset, make the first call on each area a read, for example `lftl_read()` of
-one byte. If `lftl_transaction_start()` raised an error, call `lftl_transaction_abort()` before
-anything else.
-
-**Fix.** In `lftl_transaction_start()`, call `find_current_slot()` when `ctx->data` is
-`LFTL_INVALID_POINTER`, before `next_slot()`, and set `transaction_tracker` only once the erase has
-succeeded. Separately, the CH32V307 callback should check its range against the LFTL areas rather
-than fold out-of-range addresses into flash; that would have turned this into an error.

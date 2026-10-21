@@ -1047,6 +1047,11 @@ void version_collision_test(){
   raw_nvm_erase_func(nvmd.area, nvmd.area_size/erase_size);
   nvmd.data = LFTL_INVALID_POINTER;
   EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&nvmd,buf,nvm.data7,sizeof(buf)));
+  //same when a transaction is the first access, and the failed start must
+  //not leave a transaction behind
+  uint8_t nvmd_transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvmd)];
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_transaction_start(&nvmd,nvmd_transaction_tracker));
+  if(LFTL_INVALID_POINTER != nvmd.transaction_tracker) throw_exception(ERROR_VERIFICATION_FAIL);
   format_func(&nvmd); //leave nvmd clean for anything after this test
 }
 
@@ -1116,6 +1121,31 @@ void torn_checksum2_test(){
   DEBUG_PRINTLN(__func__);
   torn_checksum2_test_core(0); //checksum2 erased
   torn_checksum2_test_core(1); //checksum2 partially programmed
+}
+
+//After a reset, ctx->data is LFTL_INVALID_POINTER until something locates
+//the current slot: a transaction started before any read must locate it too.
+void transaction_after_reset_test(){
+  DEBUG_PRINTLN(__func__);
+  const size_t size = sizeof(nvm.a_data);
+  uint8_t rng_state = 0;
+  uint8_t wbuf0[size];
+  prng_fill(&rng_state,wbuf0,size);
+  test_write(&nvma,&nvm.a_data,wbuf0,size);
+  //simulate a reset
+  nvma.data = LFTL_INVALID_POINTER;
+  uint8_t nvma_transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
+  transaction_start_func(&nvma,nvma_transaction_tracker);
+  uint8_t wbuf[size];
+  prng_fill(&rng_state,wbuf,size);
+  transaction_write_func(&nvma,nvm.data0,wbuf,sizeof(nvm.data0));
+  transaction_commit_func(&nvma);
+  read_and_check(&nvma,nvm.data0,wbuf,sizeof(nvm.data0));//read commited data
+  read_and_check(&nvma,nvm.data1,wbuf0+sizeof(nvm.data0),sizeof(nvm.data1));//read original data
+  //force a search of the slot
+  nvma.data = LFTL_INVALID_POINTER;
+  read_and_check(&nvma,nvm.data0,wbuf,sizeof(nvm.data0));
+  SANITY_CHECK();
 }
 
 void exception_handler(uint32_t err_code){
@@ -1388,7 +1418,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 24
+  #define N_TESTS 25
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1479,6 +1509,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 22:TEAR_COV( 10);test_and_simulate_tearing(ewlf_packing_test     ,tear_cov_log[i]);break;
       case 23:TEAR_COV(100);test_and_simulate_tearing(ewlf_rollover_test    ,tear_cov_log[i]);break;
       case 24:TEAR_COV(100);test_and_simulate_tearing(torn_checksum2_test   ,tear_cov_log[i]);break;
+      case 25:TEAR_COV(100);test_and_simulate_tearing(transaction_after_reset_test,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

@@ -99,12 +99,15 @@ void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_
 void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker){
   if(lftl_is_ewlf(dst_ctx)) raise_error(dst_ctx,LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED);
   if(LFTL_INVALID_POINTER != dst_ctx->transaction_tracker) raise_error(dst_ctx,LFTL_ERROR_TRANSACTION_ONGOING);
-  dst_ctx->transaction_tracker = transaction_tracker;
-  const uint32_t size = LFTL_TRANSACTION_TRACKER_SIZE(dst_ctx);
-  memset(dst_ctx->transaction_tracker,0,size);
+  //next_slot needs the current slot, which nothing may have located yet after a reset
+  if(LFTL_INVALID_POINTER == dst_ctx->data) find_current_slot(dst_ctx);
   const unsigned int index = next_slot(dst_ctx);
   //erase next slot
   erase_slot(dst_ctx,index);
+  //start tracking only once nothing can fail anymore, so that an error leaves no transaction behind
+  dst_ctx->transaction_tracker = transaction_tracker;
+  const uint32_t size = LFTL_TRANSACTION_TRACKER_SIZE(dst_ctx);
+  memset(dst_ctx->transaction_tracker,0,size);
 }
 
 void lftl_transaction_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){

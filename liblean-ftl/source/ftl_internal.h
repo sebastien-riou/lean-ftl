@@ -470,7 +470,6 @@ typedef struct lftl_meta_struct {
     };
   };
 } lftl_meta_t;
-typedef uint32_t meta_items_worst_case_t[LFTL_META_N_ITEMS*4];//enough to support NVM with write size of 128 bits
 
 /**
  * \brief Physical size in bytes of a slot's meta-data block.
@@ -553,7 +552,7 @@ static void get_slot_meta(lftl_ctx_t*ctx, lftl_meta_t* dst, unsigned int slot_in
   const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
   const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
   uint32_t*phy_meta = (uint32_t*)(slot_base(ctx, slot_index) + meta_offset(ctx));
-  meta_items_worst_case_t buf;
+  uint32_t buf[LFTL_DIV_CEIL(meta_size,sizeof(uint32_t))];
   nvm_read(ctx,ctx->nvm_props,buf,phy_meta,meta_size);
   for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
     dst->items[i] = buf[i*item_size/sizeof(uint32_t)];
@@ -628,7 +627,8 @@ static void write_meta_core(lftl_ctx_t*ctx, unsigned int slot_index, lftl_meta_t
   const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
   uint8_t*const base = slot_base(ctx, slot_index);
   lftl_meta_t*meta_phy_addr = (lftl_meta_t*)(base + meta_offset(ctx));
-  meta_items_worst_case_t buf = {0};
+  uint32_t buf[LFTL_DIV_CEIL(meta_size,sizeof(uint32_t))];
+  memset(buf,0,sizeof(buf));
   for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
     buf[i*item_size/sizeof(uint32_t)] = meta->items[i];
   }
@@ -862,7 +862,7 @@ static void ewlf_get_record_meta(lftl_ctx_t*ctx, lftl_meta_t*dst, const uint8_t*
   const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
   const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
   const uint8_t*const meta_addr = record_addr + ewlf_magic_phy_size(ctx) + ewlf_prev_erased_phy_size(ctx);
-  meta_items_worst_case_t buf;
+  uint32_t buf[LFTL_DIV_CEIL(meta_size,sizeof(uint32_t))];
   nvm_read(ctx,ctx->nvm_props,buf,meta_addr,meta_size);
   for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
     dst->items[i] = buf[i*item_size/sizeof(uint32_t)];
@@ -896,7 +896,8 @@ static void ewlf_write_record_meta_core(lftl_ctx_t*ctx, uint8_t*record_addr, lft
   const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
   const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
   uint8_t*const meta_addr = record_addr + ewlf_magic_phy_size(ctx) + ewlf_prev_erased_phy_size(ctx);
-  meta_items_worst_case_t buf = {0};
+  uint32_t buf[LFTL_DIV_CEIL(meta_size,sizeof(uint32_t))];
+  memset(buf,0,sizeof(buf));
   for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
     buf[i*item_size/sizeof(uint32_t)] = meta->items[i];
   }

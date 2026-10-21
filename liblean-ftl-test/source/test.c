@@ -1213,6 +1213,34 @@ void transaction_after_reset_test(){
   SANITY_CHECK();
 }
 
+//Meta-data with write units larger than 16 bytes, for a regular and an EWLF
+//area: nvmd's pages through copies of its context and NVM properties with
+//32-byte write units. The copies are not registered, so area_type is set here.
+void large_write_unit_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props32 = nvm_props3;
+  props32.write_size = 32;
+  props32.next = LFTL_INVALID_POINTER;
+  for(unsigned int ewlf=0;ewlf<2;ewlf++){
+    lftl_ctx_t ctx32 = nvmd;
+    ctx32.nvm_props = &props32;
+    ctx32.data = LFTL_INVALID_POINTER;
+    ctx32.data_size = 64;
+    ctx32.transaction_tracker = LFTL_INVALID_POINTER;
+    ctx32.next = LFTL_INVALID_POINTER;
+    ctx32.area_type = ewlf ? LFTL_AREA_TYPE_EWLF : LFTL_AREA_TYPE_STD;
+    lftl_format(&ctx32);
+    uint8_t buf[64];
+    stateful_prng_fill(buf,sizeof(buf));
+    lftl_write(&ctx32,ctx32.area,buf,sizeof(buf));
+    //force a search of the slot or record
+    ctx32.data = LFTL_INVALID_POINTER;
+    read_and_check(&ctx32,ctx32.area,buf,sizeof(buf));
+  }
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -1483,7 +1511,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 25
+  #define N_TESTS 26
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1575,6 +1603,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 23:TEAR_COV(100);test_and_simulate_tearing(ewlf_rollover_test    ,tear_cov_log[i]);break;
       case 24:TEAR_COV(100);test_and_simulate_tearing(torn_checksum2_test   ,tear_cov_log[i]);break;
       case 25:TEAR_COV(100);test_and_simulate_tearing(transaction_after_reset_test,tear_cov_log[i]);break;
+      case 26:TEAR_COV(100);test_and_simulate_tearing(large_write_unit_test ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

@@ -624,13 +624,80 @@ static void write_meta(lftl_ctx_t*ctx, unsigned int slot_index, uint32_t version
 }
 
 /**
+ * \brief Index of the slot currently holding `ctx->data`.
+ *
+ * \param ctx Context of the LFTL area
+ * \returns The slot index derived from `ctx->data`'s offset within the area
+ */
+static unsigned int get_current_slot_index(lftl_ctx_t*ctx){
+  const uintptr_t offset = (uintptr_t)ctx->data - (uintptr_t)ctx->area;
+  return offset / slot_size(ctx);
+}
+
+/**
+ * \brief Index of the slot to use for the next write.
+ *
+ * Round-robins to the slot right after the current one, wrapping back to
+ * slot 0 once the area's last slot has been used.
+ *
+ * \param ctx Context of the LFTL area
+ * \returns The index of the next slot to write
+ */
+static unsigned int next_slot(lftl_ctx_t*ctx){
+  const uintptr_t area_limit = (uintptr_t)ctx->area+ctx->area_size;
+  const uintptr_t next_slot_limit = (uintptr_t)ctx->data + 2*slot_size(ctx); // 1 slot for the current data, 1 slot for the next
+  if(next_slot_limit > area_limit ){ // if equal, next slot is the last slot, we will wrap around next time
+    return 0; //wrap around
+  } else {
+    return get_current_slot_index(ctx) + 1;
+  }
+}
+
+/**
+ * \brief Erase all physical pages of a slot.
+ *
+ * \param ctx Context of the LFTL area
+ * \param slot_index Index of the slot to erase
+ */
+static void erase_slot(lftl_ctx_t*ctx, unsigned int slot_index){
+  void*base = slot_base(ctx, slot_index);
+  const uint32_t slot_pages = n_pages_in_slot(ctx);
+  nvm_erase(ctx->nvm_props,base,slot_pages);
+}
+
+/**
+ * \brief Copy the current slot's data to the next slot, with fresh meta-data.
+ *
+ * Used by ::find_current_slot to recover from a tearing while the current
+ * slot's meta-data was written. That meta-data cannot be repaired in place:
+ * it would mean programming write units that are already (maybe partially)
+ * programmed, which some flash refuses (e.g. STM32U5). This takes the normal
+ * update path instead: erase the next slot, copy the data, write the
+ * meta-data with the next version. A tearing during this call is recovered
+ * like during any other write.
+ *
+ * \param ctx Context of the LFTL area, with `ctx->data` set to the current slot
+ * \param version Version number of the current slot
+ */
+static void move_to_next_slot(lftl_ctx_t*ctx, uint32_t version){
+  const unsigned int index = next_slot(ctx);
+  uint8_t*const base = slot_base(ctx, index);
+  if(base == ctx->data) raise_error(ctx,LFTL_INTERNAL_ERROR);
+  erase_slot(ctx,index);
+  nvm_write(ctx->nvm_props,base,ctx->data,ctx->data_size);
+  write_meta(ctx, index, version+1);
+  ctx->data = base;
+}
+
+/**
  * \brief Locate the slot holding the current data and update `ctx->data`.
  *
  * Scans every slot for the highest version number whose integrity check
  * passes, raising ::LFTL_ERROR_VERSION_COLLISION or
  * ::LFTL_ERROR_NO_VALID_VERSION if the area is corrupted beyond recovery.
  * If the winning slot's checksum2 doesn't match checksum (a tearing
- * happened while writing the meta-data itself), repairs it in place.
+ * happened while writing the meta-data itself), moves its data to the next
+ * slot with fresh meta-data, see ::move_to_next_slot.
  *
  * \param ctx Context of the LFTL area
  */
@@ -660,11 +727,12 @@ static void find_current_slot(lftl_ctx_t*ctx){
   lftl_meta_t meta;
   get_slot_meta(ctx, &meta, max_version_index);
   if(meta.checksum2 != meta.checksum){
-    //A tearing happened during programming of checksum or checksum2
-    //we reprogram the whole meta again
-    //(because checksum may have been weakly programmed and checksum2 not at all)
-    meta.checksum2 = meta.checksum;
-    write_meta_core(ctx,max_version_index,&meta);
+    //A tearing happened during programming of checksum or checksum2:
+    //checksum may be weakly programmed and checksum2 erased or partially
+    //programmed. We do not reprogram them in place since some flash refuses
+    //to program a write unit which is not erased, we copy the data to the
+    //next slot with fresh meta data instead.
+    move_to_next_slot(ctx, meta.version);
   }
 }
 
@@ -969,47 +1037,6 @@ static void*translate_addr(lftl_ctx_t*ctx, const void*const nvm_addr, uintptr_t 
   return translate_addr_std(ctx,nvm_addr,size);
 }
 
-/**
- * \brief Index of the slot currently holding `ctx->data`.
- *
- * \param ctx Context of the LFTL area
- * \returns The slot index derived from `ctx->data`'s offset within the area
- */
-static unsigned int get_current_slot_index(lftl_ctx_t*ctx){
-  const uintptr_t offset = (uintptr_t)ctx->data - (uintptr_t)ctx->area;
-  return offset / slot_size(ctx);
-}
-
-/**
- * \brief Index of the slot to use for the next write.
- *
- * Round-robins to the slot right after the current one, wrapping back to
- * slot 0 once the area's last slot has been used.
- *
- * \param ctx Context of the LFTL area
- * \returns The index of the next slot to write
- */
-static unsigned int next_slot(lftl_ctx_t*ctx){
-  const uintptr_t area_limit = (uintptr_t)ctx->area+ctx->area_size;
-  const uintptr_t next_slot_limit = (uintptr_t)ctx->data + 2*slot_size(ctx); // 1 slot for the current data, 1 slot for the next
-  if(next_slot_limit > area_limit ){ // if equal, next slot is the last slot, we will wrap around next time
-    return 0; //wrap around
-  } else {
-    return get_current_slot_index(ctx) + 1;
-  }
-}
-
-/**
- * \brief Erase all physical pages of a slot.
- *
- * \param ctx Context of the LFTL area
- * \param slot_index Index of the slot to erase
- */
-static void erase_slot(lftl_ctx_t*ctx, unsigned int slot_index){
-  void*base = slot_base(ctx, slot_index);
-  const uint32_t slot_pages = n_pages_in_slot(ctx);
-  nvm_erase(ctx->nvm_props,base,slot_pages);
-}
 /*
 #include <stdio.h>
 void dbg_memcpy(void*dst, const void*const src, uintptr_t size){

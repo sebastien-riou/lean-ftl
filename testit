@@ -12,7 +12,8 @@ cd $OUTDIR
 
 INCLUDES="-I../../liblean-ftl/include -I../../liblean-ftl-test/include" 
 LIBS="-Lliblean-ftl -llean-ftl"
-DEFINES="-DLFTL_PAGE_SIZE=(8*1024) -DLFTL_WU_SIZE=16 -DLINUX=1"
+#page and write unit sizes must match on/linux: the NVM simulator linked in liblean-ftl uses those
+DEFINES="-DLFTL_PAGE_SIZE=(4*1024) -DLFTL_WU_SIZE=2 -DLINUX=1"
 
 gcc -Og ../../examples/hello/main.c -o hello $INCLUDES $LIBS 
 

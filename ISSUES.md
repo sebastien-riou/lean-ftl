@@ -10,40 +10,10 @@ board.
 
 | ID | Issue | Severity | Status |
 |---|---|---|---|
-| [LFTL-001](#lftl-001) | A torn checksum2 is repaired by reprogramming flash that STM32U5-class flash refuses to reprogram, leaving the area unreadable | Medium | inferred |
 | [LFTL-002](#lftl-002) | After a power cut, the next EWLF write programs over cells that are not erased: NOR flash keeps a corrupted record that passes its checksum, STM32U5-class flash refuses every later write | High | inferred |
 | [LFTL-003](#lftl-003) | A transaction started before the area's first read erases outside the area: the STM32 callbacks reject it and the transaction cannot start, the CH32V307 callback erases the start of the firmware | High | demonstrated |
 
 ---
-
-<a id="lftl-001"></a>
-## LFTL-001 - A torn checksum2 is repaired by reprogramming flash the STM32U5 refuses to reprogram
-
-**Severity:** Medium · **[inferred]**, needs a bench test
-
-**Where.** `find_current_slot()` and `write_meta_core()`, in `liblean-ftl/source/ftl_internal.h`
-at HEAD (501de63), in `liblean-ftl/source/ftl.c` in v0.1.0 and earlier (the same code back to at
-least v0.0.19). Regular areas only: EWLF records skip a record whose checksum2 alone fails instead
-of repairing it in place (`EWLF.md`), which leads to [LFTL-002](#lftl-002) instead.
-
-Every slot ends in three metadata items, each its own write unit when the write unit is 16 bytes
-(the STM32U5 case): version, checksum, checksum2. `write_meta_core()` programs the first two, then
-checksum2, so a power loss between them leaves checksum2 erased or half-programmed while the slot's
-CRC still checks. On the next access, `find_current_slot()` picks that slot and repairs it - the
-`meta.checksum2 != meta.checksum` branch - by calling `write_meta_core()` again, which first
-re-programs version and checksum: write units that are already programmed.
-
-RM0456 (STM32U5), FLASH_NSSR.PROGERR: *"set by hardware when a nonsecure quad-word address to be
-programmed contains a value different from all 1 before programming, except if the data to write is
-all 0."* So the repair's very first write fails. A platform `write` callback that checks the flash
-status reports it, `raise_error()` reaches the error handler, and it does so on the first access to
-that area at every boot. The area's data stays on the part but is unreachable.
-
-**Evidence.** Emulation only
-
-**Fix.** Program only what is still erased: if checksum2 reads as erased, program it alone. If it
-is half-programmed, the slot cannot be repaired in place: rewrite the data into the next slot with
-version+1, which is the normal update path and lands a clean metadata block.
 
 <a id="lftl-002"></a>
 ## LFTL-002 - After a power cut, the next EWLF write programs over cells that are not erased
@@ -75,9 +45,10 @@ What happens next depends on the flash:
   new_data_addr, ...)`), so it matches the corrupted data and the record is accepted. After an
   interrupted wrap the metadata is ANDed too: at the next reset no record checks, and every access
   raises `NO_VALID_VERSION` until the area is reformatted.
-- **STM32U5-class flash** (RM0456 PROGERR, quoted under LFTL-001): the data write fails,
-  `LOW_LEVEL_WRITE` reaches the error handler, and so does every later write. The area stays
-  readable but can never be updated again.
+- **STM32U5-class flash:** RM0456, FLASH_NSSR.PROGERR is *"set by hardware when a nonsecure
+  quad-word address to be programmed contains a value different from all 1 before programming,
+  except if the data to write is all 0."* The data write fails, `LOW_LEVEL_WRITE` reaches the error
+  handler, and so does every later write. The area stays readable but can never be updated again.
 
 **Evidence.** Emulation only: `lftl_asan_harness.c` tests 7 to 10 (2026-10-21) cut power at the two
 points above, with a write callback that ANDs (tests 7 and 9) or refuses to program a non-erased
@@ -90,17 +61,19 @@ byte (tests 8 and 10). Test 7, 64-byte records of `11`, then `0f` torn before it
 
 Test 9 reads back `5a & a5 = 00` after the write that follows the interrupted wrap, then
 `error_handler(0x2)` after a reset; tests 8 and 10 get `error_handler(0x201)` on every write after
-the reset. The repository's own tearing tests cannot see any of this: the Linux simulator
-(`target/linux/linux-accessors.c`) programs with `memcpy` and models a tear by XORing bytes, so
-writing over a torn record looks like a clean write. Not observed on a board.
+the reset. The repository's own tearing tests do not see this. The Linux simulator
+(`target/linux/linux-accessors.c`) refuses to program a write unit that is not erased, but after
+each simulated tear the tests only read the areas back, then format them, so no write ever lands on
+a torn record. Not observed on a board.
 
 **Fix.** Never program a record over cells that are not erased: before writing, check that the
 target range reads erased, and if it does not, move below it or roll over. At initialization, when
 more than one unit is programmed, keep the unit with the highest valid version and erase the others,
 as `EWLF.md` describes. Compute the checksum from the data meant to be written, not from flash after
-the write, so a record that did not program as intended fails its check instead of passing. Give the
-Linux simulator a write mode that ANDs and one that refuses non-erased cells, so tearing tests catch
-this class of bug (and LFTL-001).
+the write, so a record that did not program as intended fails its check instead of passing. Make
+the tearing tests write to each area after recovering from a tear, so the simulator's refusal to
+program a non-erased write unit catches this class of bug; a write mode that ANDs would also show
+the silent corruption.
 
 <a id="lftl-003"></a>
 ## LFTL-003 - A transaction started before the area's first read erases outside the area

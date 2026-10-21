@@ -1050,6 +1050,74 @@ void version_collision_test(){
   format_func(&nvmd); //leave nvmd clean for anything after this test
 }
 
+//Rebuild nvmd's newest slot as a tearing between the writes of checksum and
+//checksum2 leaves it: data, version and checksum programmed, checksum2 erased
+//or partially programmed. The next slot search must recover the newest data
+//without programming any write unit that is not erased, which the linux
+//simulator's nvm_write refuses like STM32U5-class flash does.
+void torn_checksum2_test_core(bool partial){
+  uint8_t buf[sizeof(nvm.data7)];
+  stateful_prng_fill(buf,sizeof(buf));
+  test_write(&nvmd,nvm.data7,buf,sizeof(buf));
+  stateful_prng_fill(buf,sizeof(buf));
+  test_write(&nvmd,nvm.data7,buf,sizeof(buf));
+
+  //nvmd's physical slot/meta layout, same formulas as version_collision_test
+  const uint32_t write_size = nvmd.nvm_props->write_size;
+  const uint32_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t meta_phy_size = LFTL_META_N_ITEMS * item_size;
+  const uintptr_t erase_size = nvmd.nvm_props->erase_size;
+  const uintptr_t n_pages_in_slot = LFTL_DIV_CEIL(nvmd.data_size + meta_phy_size, erase_size);
+  const uintptr_t slot_size = n_pages_in_slot * erase_size;
+  const unsigned int current_index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
+  uint8_t*const slot = (uint8_t*)nvmd.area + current_index*slot_size;
+  uint8_t*const meta = slot + slot_size - meta_phy_size;
+  uint8_t*const checksum2 = meta + meta_phy_size - item_size;
+
+  //Only erased write units are programmed below, so this works on real
+  //flash too. If the slot is slot 0, its data bytes are also nvm_ref's
+  //logical bytes for nvm.data7: they go through 0xFF and back to buf.
+  uint8_t data_img[nvmd.data_size];
+  uint8_t meta_img[meta_phy_size];
+  lftl_memread(data_img,slot,nvmd.data_size);
+  lftl_memread(meta_img,meta,meta_phy_size);
+  raw_nvm_erase_func(slot,n_pages_in_slot);
+  raw_nvm_write_func(slot,data_img,nvmd.data_size);
+  raw_nvm_write_func(meta,meta_img,meta_phy_size - item_size); //version and checksum
+  if(partial){
+    //the last programmed byte of checksum2's value still reads erased
+    uint8_t*const checksum2_img = meta_img + meta_phy_size - item_size;
+    for(unsigned int i=sizeof(uint32_t);i>0;i--){
+      if(0xFF != checksum2_img[i-1]){
+        checksum2_img[i-1] = 0xFF;
+        break;
+      }
+    }
+    raw_nvm_write_func(checksum2,checksum2_img,item_size);
+  }
+
+  //force a fresh slot search: it finds the torn slot and recovers its data
+  nvmd.data = LFTL_INVALID_POINTER;
+  read_and_check(&nvmd,nvm.data7,buf,sizeof(buf));
+  //the slot it settled on has complete meta-data: checksum2 == checksum
+  const unsigned int index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
+  uint8_t*const new_meta = (uint8_t*)nvmd.area + index*slot_size + slot_size - meta_phy_size;
+  uint8_t new_meta_img[meta_phy_size];
+  lftl_memread(new_meta_img,new_meta,meta_phy_size);
+  if(memcmp(new_meta_img + item_size,new_meta_img + 2*item_size,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  //it survives another reboot, and the area still takes updates
+  nvmd.data = LFTL_INVALID_POINTER;
+  read_and_check(&nvmd,nvm.data7,buf,sizeof(buf));
+  randomized_test_write(&nvmd,nvm.data7,sizeof(buf));
+  SANITY_CHECK();
+}
+
+void torn_checksum2_test(){
+  DEBUG_PRINTLN(__func__);
+  torn_checksum2_test_core(0); //checksum2 erased
+  torn_checksum2_test_core(1); //checksum2 partially programmed
+}
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -1320,7 +1388,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 23
+  #define N_TESTS 24
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1410,6 +1478,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(version_collision_test,0);break;
       case 22:TEAR_COV( 10);test_and_simulate_tearing(ewlf_packing_test     ,tear_cov_log[i]);break;
       case 23:TEAR_COV(100);test_and_simulate_tearing(ewlf_rollover_test    ,tear_cov_log[i]);break;
+      case 24:TEAR_COV(100);test_and_simulate_tearing(torn_checksum2_test   ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

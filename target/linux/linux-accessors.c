@@ -101,6 +101,13 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   return tearing ? SIMULATED_TEARING:0;
 }
 
+static bool is_all(const uint8_t*buf, uint8_t val, uintptr_t size){
+  for(uintptr_t i=0;i<size;i++){
+    if(buf[i] != val) return 0;
+  }
+  return 1;
+}
+
 uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   if(trace_accessors){
     printf("nvm_write ");
@@ -110,6 +117,13 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   if(((uintptr_t)dst_nvm_addr + size) > ((uintptr_t)nvm_base + nvm_size)) return 2;
   if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
   if(0 != (size % nvm_write_size)) return 4;
+  //like STM32U5-class flash: a write unit can be programmed only while it is
+  //erased, unless the data to write is all 0
+  for(uintptr_t i=0;i<size;i+=nvm_write_size){
+    const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr + i;
+    const uint8_t*const src8 = (const uint8_t*)src + i;
+    if(!is_all(dst8,0xFF,nvm_write_size) && !is_all(src8,0x00,nvm_write_size)) return 5;
+  }
   memcpy(dst_nvm_addr,src,size);
   bool tearing = tearing_sim(dst_nvm_addr,size);
   if(save_nvm_file_name){

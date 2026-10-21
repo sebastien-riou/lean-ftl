@@ -963,6 +963,21 @@ void out_of_range_test(){
   EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_read(&ewlfa,buf,((uint8_t*)ewlfa.area)+write_size,(uintptr_t)0-write_size));
   EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_write(&nvma,((uint8_t*)nvma.area)+1,buf,(uintptr_t)0-1));
   EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_write(&ewlfa,((uint8_t*)ewlfa.area)+1,buf,(uintptr_t)0-1));
+  //a transaction write outside the area must not touch the tracker: its bit
+  //for the write unit at beyond would be in the first guard byte
+  const uintptr_t tracker_size = LFTL_TRANSACTION_TRACKER_SIZE(&nvma);
+  uint8_t guarded_tracker[tracker_size+16];
+  memset(guarded_tracker,0,sizeof(guarded_tracker));
+  uint8_t*const beyond = ((uint8_t*)nvma.area) + tracker_size*BITS_PER_BYTE*write_size;
+  transaction_start_func(&nvma,guarded_tracker);
+  EXPECT_ERROR(LFTL_ERROR_FIRST_NOT_IN_DATA, lftl_transaction_write(&nvma,beyond,buf,write_size));
+  transaction_abort_func(&nvma);
+  transaction_start_func(&nvma,guarded_tracker);
+  EXPECT_ERROR(LFTL_ERROR_FIRST_NOT_IN_DATA, lftl_transaction_write_any(&nvma,beyond+write_size+1,buf,1));
+  transaction_abort_func(&nvma);
+  for(unsigned int i=tracker_size;i<sizeof(guarded_tracker);i++){
+    if(guarded_tracker[i]) throw_exception(ERROR_VERIFICATION_FAIL);
+  }
   SANITY_CHECK();
 }
 

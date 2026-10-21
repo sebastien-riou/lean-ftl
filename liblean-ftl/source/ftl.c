@@ -112,6 +112,8 @@ void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker)
 
 void lftl_transaction_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
   if(LFTL_INVALID_POINTER == dst_ctx->transaction_tracker) raise_error(dst_ctx,LFTL_ERROR_NO_TRANSACTION);
+  //the tracker is indexed from dst_nvm_addr: check the range first
+  check_in_data(dst_ctx, dst_nvm_addr, size);
   //check/update transaction tracker
   const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uint32_t n_write_units = size / write_size;
@@ -138,6 +140,8 @@ void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, con
     lftl_transaction_write(dst_ctx, dst_nvm_addr, src, size);
   } else {
     if(LFTL_INVALID_POINTER == dst_ctx->transaction_tracker) raise_error(dst_ctx,LFTL_ERROR_NO_TRANSACTION);
+    //the tracker is indexed from dst_nvm_addr: check the range first
+    check_in_data(dst_ctx, dst_nvm_addr, size);
     //check/update transaction tracker
     const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
     const uint32_t n_write_units = LFTL_DIV_CEIL(size+addr_misalignement,write_size);

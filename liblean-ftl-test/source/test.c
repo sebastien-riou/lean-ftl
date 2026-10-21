@@ -562,6 +562,12 @@ void transaction_basic_test(){
     read_and_check(&nvma,nvm.data1,wbuf0+data_size,write_size);//read current data
     read_newer_and_check(&nvma,nvm.data0,wbuf,write_size);//read new data
     read_newer_and_check(&nvma,nvm.data1,wbuf+write_size,write_size);//read new data
+    //unaligned read spanning written and unwritten write units
+    uint8_t newer[size];
+    memcpy(newer,wbuf0,size);
+    memcpy(newer,wbuf,write_size);
+    memcpy(newer+data_size,wbuf+write_size,write_size);
+    read_newer_and_check(&nvma,((uint8_t*)&nvm.a_data)+1,newer+1,size-2);
     transaction_commit_func(&nvma);
     read_and_check(&nvma,nvm.data0,wbuf,write_size);//read commited data
     read_and_check(&nvma,(void*)(((uintptr_t)&nvm.data0)+write_size),wbuf0+write_size,sizeof(nvm.data0) - write_size);//read original data
@@ -974,6 +980,10 @@ void out_of_range_test(){
   transaction_abort_func(&nvma);
   transaction_start_func(&nvma,guarded_tracker);
   EXPECT_ERROR(LFTL_ERROR_FIRST_NOT_IN_DATA, lftl_transaction_write_any(&nvma,beyond+write_size+1,buf,1));
+  transaction_abort_func(&nvma);
+  //reads during a transaction are range checked too
+  transaction_start_func(&nvma,guarded_tracker);
+  EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_transaction_read(&nvma,buf,((uint8_t*)nvma.area)+nvma.data_size-1,2));
   transaction_abort_func(&nvma);
   for(unsigned int i=tracker_size;i<sizeof(guarded_tracker);i++){
     if(guarded_tracker[i]) throw_exception(ERROR_VERIFICATION_FAIL);

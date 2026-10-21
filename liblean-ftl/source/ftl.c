@@ -206,29 +206,34 @@ void lftl_transaction_abort(lftl_ctx_t*dst_ctx){
 void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
   if(LFTL_INVALID_POINTER == ctx->transaction_tracker) raise_error(ctx,LFTL_ERROR_NO_TRANSACTION);
   if(0==size) return;
+  check_in_data(ctx, src_nvm_addr, size);
   const uint32_t write_size = ctx->nvm_props->write_size;
-  const uint32_t n_write_units = size / write_size;
   const uintptr_t offset = (uintptr_t)src_nvm_addr - (uintptr_t)ctx->area;
-  const uint32_t offset_wu = offset / write_size;
+  const uintptr_t end = offset + size;
   uint8_t*tracker = (uint8_t*)ctx->transaction_tracker;
   const unsigned int index = next_slot(ctx);
   uint8_t*const base = slot_base(ctx, index);
   uint8_t*dst8 = (uint8_t*)dst;
-  for(uintptr_t i = 0; i < n_write_units; i++){
-    const uint32_t wu_index = offset_wu+i;
+  uintptr_t pos = offset;
+  while(pos < end){
+    //read up to the end of the write unit holding pos (src_nvm_addr and size may be unaligned)
+    const uintptr_t wu_index = pos / write_size;
+    const uintptr_t wu_end = (wu_index + 1) * write_size;
+    const uintptr_t chunk = (wu_end < end ? wu_end : end) - pos;
     const uint32_t byte_index = wu_index / BITS_PER_BYTE;
     const uint32_t bit_index = wu_index % BITS_PER_BYTE;
     const uint8_t mask = 1 << bit_index;
     if(tracker[byte_index] & mask) {
       //read new data
-      void*phy_addr = base + wu_index*write_size;
-      nvm_read(ctx->nvm_props,dst8, phy_addr, write_size);
+      void*phy_addr = base + pos;
+      nvm_read(ctx->nvm_props,dst8, phy_addr, chunk);
     }else{
       //read current data
-      void*phy_addr = (uint8_t*)(ctx->data) + wu_index*write_size;
-      nvm_read(ctx->nvm_props,dst8, phy_addr, write_size);
+      void*phy_addr = (uint8_t*)(ctx->data) + pos;
+      nvm_read(ctx->nvm_props,dst8, phy_addr, chunk);
     }
-    dst8 += write_size;
+    dst8 += chunk;
+    pos += chunk;
   }
 }
 

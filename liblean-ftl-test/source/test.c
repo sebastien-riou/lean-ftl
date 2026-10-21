@@ -1114,6 +1114,91 @@ void bad_config_test(){
   SANITY_CHECK();
 }
 
+//Same CRC core as ftl_internal.h; a record's checksum is crc32c(0xFFFFFFFF,data)+version
+static uint32_t test_crc32c(uint32_t crc, const uint8_t*buf, uintptr_t len){
+  while(len--){
+    crc ^= *buf++;
+    for(unsigned int i=0;i<8;i++) crc = (crc >> 1) ^ (0x05EC76F1 & -(crc & 1));
+  }
+  return crc;
+}
+
+static const uint8_t*checked_area_lo;
+static const uint8_t*checked_area_hi;
+static bool out_of_area_read;
+static uint8_t area_checked_nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
+  const uint8_t*const src8 = (const uint8_t*)src_nvm_addr;
+  if((src8 < checked_area_lo) || (src8 > checked_area_hi) || (size > (uintptr_t)(checked_area_hi - src8))) out_of_area_read = 1;
+  return nvm_read(dst,src_nvm_addr,size);
+}
+
+//EWLF records are looked for only where records can start (LF-10, LF-12), on
+//an EWLF area over nvmd's pages: a copy of nvmd's context and NVM properties,
+//not registered, whose read callback flags any read outside the area.
+void ewlf_grid_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props = nvm_props3;
+  props.read = area_checked_nvm_read;
+  props.next = LFTL_INVALID_POINTER;
+  lftl_ctx_t ewlf = nvmd;
+  ewlf.nvm_props = &props;
+  ewlf.data = LFTL_INVALID_POINTER;
+  ewlf.data_size = 64;
+  ewlf.transaction_tracker = LFTL_INVALID_POINTER;
+  ewlf.next = LFTL_INVALID_POINTER;
+  ewlf.area_type = LFTL_AREA_TYPE_EWLF;
+  uint8_t*const area = (uint8_t*)ewlf.area;
+  checked_area_lo = area;
+  checked_area_hi = area + ewlf.area_size;
+  const uint32_t write_size = props.write_size;
+  const uintptr_t magic_size = write_size > 8 ? write_size : 8;
+  const uintptr_t flag_size = write_size;
+  const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t header_size = magic_size + flag_size + LFTL_META_N_ITEMS*item_size;
+  const uintptr_t record_size = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(ewlf.data_size,write_size),8);
+  const uint64_t magic = 0x2CF292E376D73985ull; //EWLF_MAGIC
+
+  //LF-10: d2's write is cut before its header, and its data holds a whole
+  //forged record at an 8-byte aligned offset that is not a record position.
+  lftl_format(&ewlf);
+  uint8_t d1[64];
+  stateful_prng_fill(d1,sizeof(d1));
+  lftl_write(&ewlf,area,d1,sizeof(d1));
+  uint8_t*const current = ((uint8_t*)ewlf.data) - header_size;
+  uint8_t*const torn = current - record_size;
+  uint8_t*const torn_data = torn + header_size;
+  uintptr_t forged_offset = 0;
+  while(0 != ((uintptr_t)(torn_data + forged_offset - area) % 8)) forged_offset++;
+  uint8_t*const forged = torn_data + forged_offset;
+  uint8_t d2[64];
+  memset(d2,0xFF,sizeof(d2));
+  memcpy(d2+forged_offset,&magic,sizeof(magic));
+  const uint32_t version = 1000;
+  memcpy(d2+forged_offset+magic_size+flag_size,&version,sizeof(version));
+  raw_nvm_write_func(torn_data,d2,sizeof(d2));
+  //its checksum covers the 64 bytes after its header, wherever they are
+  uint8_t forged_data[64];
+  lftl_memread(forged_data,forged+header_size,sizeof(forged_data));
+  const uint32_t sum = test_crc32c(0xFFFFFFFF,forged_data,sizeof(forged_data)) + version;
+  memcpy(d2+forged_offset+magic_size+flag_size+item_size,&sum,sizeof(sum));
+  memcpy(d2+forged_offset+magic_size+flag_size+2*item_size,&sum,sizeof(sum));
+  raw_nvm_write_func(torn_data,d2,sizeof(d2));
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d1,sizeof(d1));
+
+  //LF-12: an area without any valid record, holding a magic in its last 8 bytes
+  raw_nvm_erase_func(area,ewlf.area_size/props.erase_size);
+  raw_nvm_write_func(area+ewlf.area_size-sizeof(magic),&magic,sizeof(magic));
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  out_of_area_read = 0;
+  uint8_t buf[64];
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&ewlf,buf,area,sizeof(buf)));
+  if(out_of_area_read) throw_exception(ERROR_VERIFICATION_FAIL);
+
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+
 void version_collision_test(){
   DEBUG_PRINTLN(__func__);
   uint8_t buf[sizeof(nvm.data7)];
@@ -1560,7 +1645,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 27
+  #define N_TESTS 28
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1654,6 +1739,11 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 25:TEAR_COV(100);test_and_simulate_tearing(transaction_after_reset_test,tear_cov_log[i]);break;
       case 26:TEAR_COV(100);test_and_simulate_tearing(large_write_unit_test ,tear_cov_log[i]);break;
       case 27:TEAR_COV(100);test_and_simulate_tearing(bad_config_test       ,tear_cov_log[i]);break;
+      case 28:
+        //Hardcoded 0, ignoring --tear-cov, for the same reason as test 21: an
+        //injected read failure during the expected NO_VALID_VERSION scan would
+        //produce a different error, and the hand-built states are what matter.
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_grid_test,0);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

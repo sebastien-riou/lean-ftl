@@ -24,17 +24,12 @@ The memory layout of a record is the following:
 
 The writes are done from the highest possible address towards lower address. This allows to quickly find the newest header.
 
-The read process search starting from the base address of the EWLF area:
-- check the header magic
-- if the header magic is incorrect, resume the search for the next header at the next uint64_t boundary.
-- if the header magic matches:
-    - check the data integrity (same approach as with regular areas)
-    - if integrity is valid, return that version
-- else
-    - if only checksum2 check fails, skip the whole record and resume the search for the next header
-    - else, resume the search for the next header at the next uint64_t boundary.
+Records can only start at the top of an erase unit minus a multiple of the record size. The read process checks
+these positions by increasing address, starting from the base address of the EWLF area, and returns the first
+record whose header magic, data integrity (same approach as with regular areas) and checksum2 are all valid.
 
-NOTE: if only checksum2 check fails, we assume we are dealing with a real record, so we can skip the whole record.
+NOTE: checking only these positions means that data can never be mistaken for a header, even if it contains a
+copy of one, and that every record checked fits in its erase unit.
 
 The write process is the following:
 - read the current version

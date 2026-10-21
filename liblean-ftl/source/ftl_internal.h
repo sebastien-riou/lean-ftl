@@ -816,10 +816,8 @@ static uintptr_t ewlf_data_phy_size(lftl_ctx_t*ctx){
  *
  * Rounded up to a multiple of `sizeof(uint64_t)`: since records are
  * placed at successive `record_phy_size` offsets from an erase unit's
- * (8-byte-aligned) top address, this padding is what keeps every record's
- * start address on the same 8-byte grid that ::find_current_record steps
- * through on a magic mismatch -- without it, a record start could fall
- * between two scanned addresses and never be found.
+ * (8-byte-aligned) top address, this padding keeps every record, and so
+ * its 64-bit magic, 8-byte aligned.
  *
  * \param ctx Context of the EWLF area
  */
@@ -960,18 +958,36 @@ static void ewlf_write_record_prev_erased(lftl_ctx_t*ctx, uint8_t*record_addr){
 }
 
 /**
+ * \brief Check whether an EWLF record is complete and consistent.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ * \param meta Output: the record's meta-data, valid only if true is returned
+ * \returns true if the magic matches, the checksum matches the data and the
+ *   version, and checksum2 matches the checksum (a tearing while writing the
+ *   record's own meta-data leaves checksum2 erased or partially programmed)
+ */
+static bool ewlf_record_is_valid(lftl_ctx_t*ctx, const uint8_t*record_addr, lftl_meta_t*meta){
+  uint64_t magic;
+  nvm_read(ctx,ctx->nvm_props,&magic,record_addr,sizeof(magic));
+  if(magic != EWLF_MAGIC) return false;
+  ewlf_get_record_meta(ctx,meta,record_addr);
+  const uint32_t recomputed = checksum(ctx,record_addr+ewlf_header_phy_size(ctx),ctx->data_size) + meta->version;
+  if(recomputed != meta->checksum) return false;
+  return meta->checksum2 == meta->checksum;
+}
+
+/**
  * \brief Locate the current EWLF record and update `ctx->data`.
  *
- * Scans from the area's base address for the newest confirmed-valid
- * record: a matching magic followed by a version/checksum/checksum2 whose
- * recomputed checksum matches. A magic mismatch, or a checksum mismatch,
- * advances the scan by one `uint64_t`; a record whose checksum matches but
- * whose checksum2 doesn't (a tearing happened while writing that record's
- * own meta-data) is skipped by its whole record size, since its identity
- * (and hence size) is otherwise confirmed. Unlike ::find_current_slot,
- * there is no equivalent of ::LFTL_ERROR_VERSION_COLLISION here: the scan
- * returns the first (lowest-address) confirmed-valid record it finds, by
- * construction there is nothing to collide with.
+ * Records only ever start at the top of an erase unit minus a multiple of
+ * the record size, so only those positions are checked: data can never be
+ * mistaken for a header, and every candidate fits in its erase unit. They
+ * are checked by increasing address, from the area's base address, and the
+ * first valid record (see ::ewlf_record_is_valid) is the newest. Unlike
+ * ::find_current_slot, there is no equivalent of
+ * ::LFTL_ERROR_VERSION_COLLISION here: by construction there is nothing to
+ * collide with.
  *
  * If the winning record is the first (topmost) record of its erase unit,
  * a rollover happened to produce it; repairs a not-yet-confirmed
@@ -982,39 +998,26 @@ static void ewlf_write_record_prev_erased(lftl_ctx_t*ctx, uint8_t*record_addr){
  * \param ctx Context of the EWLF area
  */
 static void find_current_record(lftl_ctx_t*ctx){
-  const uint8_t*const area = (uint8_t*)ctx->area;
-  const uint8_t*const end = area + ctx->area_size;
   const uintptr_t record_size = ewlf_record_phy_size(ctx);
-  const uint8_t*scan_addr = area;
-  while(scan_addr < end){
-    uint64_t magic;
-    nvm_read(ctx,ctx->nvm_props,&magic,scan_addr,sizeof(magic));
-    if(magic != EWLF_MAGIC){
-      scan_addr += sizeof(uint64_t);
-      continue;
-    }
-    lftl_meta_t meta;
-    ewlf_get_record_meta(ctx,&meta,scan_addr);
-    const uint32_t recomputed = checksum(ctx,scan_addr+ewlf_header_phy_size(ctx),ctx->data_size) + meta.version;
-    if(recomputed != meta.checksum){
-      scan_addr += sizeof(uint64_t);
-      continue;
-    }
-    if(meta.checksum2 != meta.checksum){
-      scan_addr += record_size;
-      continue;
-    }
-    //confirmed record found
-    const unsigned int unit_index = (uintptr_t)(scan_addr - area) / page_size(ctx);
-    if(scan_addr == ewlf_unit_top_record(ctx,unit_index)){
-      if(!ewlf_record_prev_erased_confirmed(ctx,scan_addr)){
-        const unsigned int prev_unit = (unit_index + 1) % n_pages(ctx);
-        nvm_erase(ctx,ctx->nvm_props,ewlf_unit_base(ctx,prev_unit), 1);
-        ewlf_write_record_prev_erased(ctx,(uint8_t*)scan_addr);
+  const unsigned int records_per_unit = page_size(ctx) / record_size;
+  const unsigned int n_units = n_pages(ctx);
+  for(unsigned int unit_index = 0; unit_index < n_units; unit_index++){
+    const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
+    for(unsigned int i = records_per_unit; i > 0; i--){
+      const uint8_t*const record_addr = top - (i-1)*record_size;
+      lftl_meta_t meta;
+      if(!ewlf_record_is_valid(ctx,record_addr,&meta)) continue;
+      //confirmed record found
+      if(record_addr == top){
+        if(!ewlf_record_prev_erased_confirmed(ctx,record_addr)){
+          const unsigned int prev_unit = (unit_index + 1) % n_units;
+          nvm_erase(ctx,ctx->nvm_props,ewlf_unit_base(ctx,prev_unit), 1);
+          ewlf_write_record_prev_erased(ctx,(uint8_t*)record_addr);
+        }
       }
+      ctx->data = (void*)(record_addr + ewlf_header_phy_size(ctx));
+      return;
     }
-    ctx->data = (void*)(scan_addr + ewlf_header_phy_size(ctx));
-    return;
   }
   raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
 }

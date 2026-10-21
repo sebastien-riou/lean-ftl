@@ -1199,6 +1199,79 @@ void ewlf_grid_test(){
   SANITY_CHECK();
 }
 
+static int erase_calls_before_failure = -1;
+static uint8_t failing_once_nvm_erase(void*base_address, unsigned int n_pages){
+  if(0 == erase_calls_before_failure--) return 1;
+  return nvm_erase(base_address,n_pages);
+}
+
+//Power cuts in EWLF writes (LF-9, ISSUES.md LFTL-002), on an EWLF area over
+//nvmd's pages: a copy of nvmd's context and NVM properties, not registered.
+//nvm_write refuses to program cells that are not erased, like STM32U5-class
+//flash, so a write landing on a partial or complete record raises an error.
+//1000-byte data makes 1024-byte records, 4 per erase unit.
+void ewlf_tearing_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props = nvm_props3;
+  props.erase = failing_once_nvm_erase;
+  props.next = LFTL_INVALID_POINTER;
+  lftl_ctx_t ewlf = nvmd;
+  ewlf.nvm_props = &props;
+  ewlf.data = LFTL_INVALID_POINTER;
+  ewlf.data_size = 1000;
+  ewlf.transaction_tracker = LFTL_INVALID_POINTER;
+  ewlf.next = LFTL_INVALID_POINTER;
+  ewlf.area_type = LFTL_AREA_TYPE_EWLF;
+  uint8_t*const area = (uint8_t*)ewlf.area;
+  const uint32_t write_size = props.write_size;
+  const uintptr_t magic_size = write_size > 8 ? write_size : 8;
+  const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t header_size = magic_size + write_size + LFTL_META_N_ITEMS*item_size;
+  const uintptr_t record_size = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(ewlf.data_size,write_size),8);
+  uint8_t d[1000];
+
+  //a write cut while writing data leaves a partial record right below the
+  //current one: the next write must not program over it
+  lftl_format(&ewlf);
+  stateful_prng_fill(d,sizeof(d));
+  lftl_write(&ewlf,area,d,sizeof(d));
+  uint8_t*const torn_data = ((uint8_t*)ewlf.data) - record_size;
+  uint8_t partial[100];
+  stateful_prng_fill(partial,sizeof(partial));
+  raw_nvm_write_func(torn_data,partial,sizeof(partial));
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d,sizeof(d));
+  stateful_prng_fill(d,sizeof(d));
+  lftl_write(&ewlf,area,d,sizeof(d));
+  read_and_check(&ewlf,area,d,sizeof(d));
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d,sizeof(d));
+
+  //a wrap from the lowest unit back to the highest one, cut after the new
+  //record is complete but before the lowest unit is erased: the reset must
+  //find that newest record, and the next write must not program over it
+  lftl_format(&ewlf);
+  const unsigned int records_per_unit = props.erase_size / record_size;
+  const unsigned int n_units = ewlf.area_size / props.erase_size;
+  for(unsigned int i = 1; i < n_units*records_per_unit; i++){ //format wrote the first record
+    stateful_prng_fill(d,sizeof(d));
+    lftl_write(&ewlf,area,d,sizeof(d));
+  }
+  stateful_prng_fill(d,sizeof(d));
+  erase_calls_before_failure = 0;
+  EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_ERASE | 1, lftl_write(&ewlf,area,d,sizeof(d)));
+  erase_calls_before_failure = -1;
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d,sizeof(d));
+  stateful_prng_fill(d,sizeof(d));
+  lftl_write(&ewlf,area,d,sizeof(d));
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d,sizeof(d));
+
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+
 void version_collision_test(){
   DEBUG_PRINTLN(__func__);
   uint8_t buf[sizeof(nvm.data7)];
@@ -1645,7 +1718,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 28
+  #define N_TESTS 29
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1744,6 +1817,10 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         //injected read failure during the expected NO_VALID_VERSION scan would
         //produce a different error, and the hand-built states are what matter.
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_grid_test,0);break;
+      case 29:
+        //Hardcoded 0, ignoring --tear-cov: it cuts power at chosen points
+        //itself, and an injected failure would change the expected error.
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_tearing_test,0);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

@@ -33,9 +33,10 @@ copy of one, and that every record checked fits in its erase unit.
 
 The write process is the following:
 - read the current version
-- find the highest base address of the next free space in the area
+- find the next free space in the area: the first record position below the current record, in its erase unit,
+    whose cells all read erased, or else the top of the next erase unit (see the notes below)
 - write the data
-- write the header except checksum2
+- write the header except checksum2 (the checksum is computed from the data meant to be written, not read back)
 - write checksum2
 - if current version was in another erase unit:
     - erase it
@@ -48,8 +49,14 @@ NOTES:
     As a result, under normal operations exactly one erase unit is programmed at any time (the others sit erased,
     waiting for their turn); at most one previously-used unit remains additionally programmed alongside it, and only
     for the brief duration of an in-progress transition, until that unit's erase completes.
-- When a tearing occurs, the initialization of the library detect if two are programmed and erase the one containing
-    old or invalid data.
+- When a tearing occurs during a record write, it can leave a partial record below the current one. The next write
+    skips any position whose cells are not all erased, since some flash refuses to program cells that are not erased.
+    When the write rolls over to another erase unit and that unit is not erased (stale or partial records left by a
+    tearing), it is erased before the new record is written.
+- When a tearing occurs during the wrap from the lowest erase unit back to the highest, after the new record is
+    complete but before the lowest unit is erased, both units are programmed and the scan finds the older record
+    first, at a lower address. The initialization therefore also checks the top record of the next erase unit in write
+    order, takes it if its version is higher, and then completes the wrap as below.
 - Even if a single erase unit appears to be programmed, the initialization of the library check that the `prev_erased` flag is 
     set. If it is not set, the previous erase unit may be 'weakly erased'. In such case, the previous erase unit is erased again and after that the `prev_erase` flag is written.
 

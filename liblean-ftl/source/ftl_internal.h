@@ -416,20 +416,20 @@ static void mem_read(lftl_ctx_t*ctx, void*dst, const void*const src, uintptr_t s
 
 
 /**
- * \brief Compute a full CRC32C checksum over a (possibly non-RAM) range.
+ * \brief Update a CRC32C checksum with a (possibly non-RAM) range.
  *
  * Reads the range in chunks via ::mem_read so that `src` can be an LFTL
  * area, a physical NVM address, or regular memory.
  *
  * \param ctx Context of the LFTL area on whose behalf this checksum is computed
+ * \param out Checksum so far, 0xFFFFFFFF to start one
  * \param src Start address of the range to checksum
  * \param size Size in bytes of the range
- * \returns The CRC32C checksum of the range
+ * \returns The updated checksum
  */
-static uint32_t checksum(lftl_ctx_t*ctx, const void*const src, uintptr_t size){
+static uint32_t checksum_update(lftl_ctx_t*ctx, uint32_t out, const void*const src, uintptr_t size){
   const uint8_t*src8 = (const uint8_t*)src;
   uint64_t buf[16];
-  uint32_t out=0xFFFFFFFF;
   while(size){
     const uint32_t readsize = size > sizeof(buf) ? sizeof(buf) : size;
     mem_read(ctx,buf,src8,readsize);
@@ -438,6 +438,56 @@ static uint32_t checksum(lftl_ctx_t*ctx, const void*const src, uintptr_t size){
     src8 += readsize;
   }
   return out;
+}
+
+/**
+ * \brief Compute a full CRC32C checksum over a (possibly non-RAM) range.
+ *
+ * \param ctx Context of the LFTL area on whose behalf this checksum is computed
+ * \param src Start address of the range to checksum
+ * \param size Size in bytes of the range
+ * \returns The CRC32C checksum of the range
+ */
+static uint32_t checksum(lftl_ctx_t*ctx, const void*const src, uintptr_t size){
+  return checksum_update(ctx,0xFFFFFFFF,src,size);
+}
+
+/**
+ * \brief Update a CRC32C checksum with erased (0xFF) bytes.
+ *
+ * \param out Checksum so far, 0xFFFFFFFF to start one
+ * \param size Number of erased bytes
+ * \returns The updated checksum
+ */
+static uint32_t checksum_update_erased(uint32_t out, uintptr_t size){
+  const uint8_t erased = 0xFF;
+  while(size--){
+    out = crc32c(out,&erased,1);
+  }
+  return out;
+}
+
+/**
+ * \brief Check whether a physical range reads as erased.
+ *
+ * \param ctx Context of the LFTL area
+ * \param addr Physical address of the range
+ * \param size Size in bytes of the range
+ * \returns true if every byte of the range reads 0xFF
+ */
+static bool is_erased(lftl_ctx_t*ctx, const uint8_t*addr, uintptr_t size){
+  uint64_t buf[16];
+  while(size){
+    const uintptr_t readsize = size > sizeof(buf) ? sizeof(buf) : size;
+    nvm_read(ctx,ctx->nvm_props,buf,addr,readsize);
+    const uint8_t*const buf8 = (const uint8_t*)buf;
+    for(uintptr_t i = 0; i < readsize; i++){
+      if(0xFF != buf8[i]) return false;
+    }
+    size -= readsize;
+    addr += readsize;
+  }
+  return true;
 }
 
 /**
@@ -984,7 +1034,11 @@ static bool ewlf_record_is_valid(lftl_ctx_t*ctx, const uint8_t*record_addr, lftl
  * the record size, so only those positions are checked: data can never be
  * mistaken for a header, and every candidate fits in its erase unit. They
  * are checked by increasing address, from the area's base address, and the
- * first valid record (see ::ewlf_record_is_valid) is the newest. Unlike
+ * first valid record (see ::ewlf_record_is_valid) is the newest, except
+ * after a wrap from the lowest unit back to the highest one, interrupted
+ * before the lowest unit was erased: the newest record is then at the top
+ * of the highest unit, so the top record of the next unit in write order
+ * is checked too, and taken if its version is higher. Unlike
  * ::find_current_slot, there is no equivalent of
  * ::LFTL_ERROR_VERSION_COLLISION here: by construction there is nothing to
  * collide with.
@@ -1004,13 +1058,24 @@ static void find_current_record(lftl_ctx_t*ctx){
   for(unsigned int unit_index = 0; unit_index < n_units; unit_index++){
     const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
     for(unsigned int i = records_per_unit; i > 0; i--){
-      const uint8_t*const record_addr = top - (i-1)*record_size;
+      const uint8_t*record_addr = top - (i-1)*record_size;
       lftl_meta_t meta;
       if(!ewlf_record_is_valid(ctx,record_addr,&meta)) continue;
+      //a newer record can only be at the top of the next unit in write
+      //order: the other units that come later in write order are at lower
+      //addresses, so their records would have been found first
+      unsigned int record_unit = unit_index;
+      const unsigned int next_unit = (unit_index + n_units - 1) % n_units;
+      const uint8_t*const next_top = ewlf_unit_top_record(ctx,next_unit);
+      lftl_meta_t next_meta;
+      if(ewlf_record_is_valid(ctx,next_top,&next_meta) && (next_meta.version > meta.version)){
+        record_addr = next_top;
+        record_unit = next_unit;
+      }
       //confirmed record found
-      if(record_addr == top){
+      if(record_addr == ewlf_unit_top_record(ctx,record_unit)){
         if(!ewlf_record_prev_erased_confirmed(ctx,record_addr)){
-          const unsigned int prev_unit = (unit_index + 1) % n_units;
+          const unsigned int prev_unit = (record_unit + 1) % n_units;
           nvm_erase(ctx,ctx->nvm_props,ewlf_unit_base(ctx,prev_unit), 1);
           ewlf_write_record_prev_erased(ctx,(uint8_t*)record_addr);
         }
@@ -1305,14 +1370,20 @@ static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
 /**
  * \brief Shared core for ::write_ewlf and ::erase_ewlf.
  *
- * Determines whether the next record fits below the current one in its
- * own erase unit, or needs a rollover to a fresh unit (the one
- * immediately below, wrapping from the lowest unit back to the highest),
- * writes the record's data (unless `write_data` is false, in which case
- * the fresh, already-erased target data is left untouched so it reads
- * back as erased), then writes magic + version + checksum, then
- * checksum2. On a rollover, additionally erases the just-vacated unit and
- * confirms the new record's `prev_erased` flag.
+ * Places the new record below the current one in its own erase unit, at
+ * the first position whose cells all read erased (a tearing may have left
+ * a partial record right below the current one, and some flash refuses to
+ * program cells that are not erased), or else rolls over to the top of
+ * the unit immediately below, wrapping from the lowest unit back to the
+ * highest, after erasing that unit if needed: it holds no record newer
+ * than the current one. Then writes the record's data (unless
+ * `write_data` is false, in which case the fresh, already-erased target
+ * data is left untouched so it reads back as erased), then magic +
+ * version + checksum, then checksum2. The checksum is computed from the
+ * data meant to be written rather than from what reads back, so a record
+ * that did not program as intended fails its check. On a rollover,
+ * additionally erases the just-vacated unit and confirms the new record's
+ * `prev_erased` flag.
  *
  * \param dst_ctx Context of the target EWLF area
  * \param dst_nvm_addr Destination logical address (ignored if `write_data` is false)
@@ -1345,27 +1416,38 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
   const unsigned int current_unit_index = (uintptr_t)(current_record_addr - (uint8_t*)dst_ctx->area) / page_size(dst_ctx);
 
   const uintptr_t record_size = ewlf_record_phy_size(dst_ctx);
-  const uint8_t*const candidate_addr = current_record_addr - record_size;
+  //room below the current record in its unit: the first position whose cells all read erased
+  const uintptr_t unit_base = (uintptr_t)ewlf_unit_base(dst_ctx,current_unit_index);
+  uintptr_t candidate_addr = (uintptr_t)current_record_addr;
+  bool found = false;
+  while(!found && (candidate_addr - unit_base >= record_size)){
+    candidate_addr -= record_size;
+    found = is_erased(dst_ctx,(const uint8_t*)candidate_addr,record_size);
+  }
   bool rollover;
   unsigned int new_unit_index;
   uint8_t*new_record_addr;
-  if(candidate_addr >= ewlf_unit_base(dst_ctx,current_unit_index)){
-    // room for the new record below the current one, same erase unit
+  if(found){
     rollover = false;
     new_unit_index = current_unit_index;
     new_record_addr = (uint8_t*)candidate_addr;
   } else {
     // no room left: move to the unit immediately below, wrapping from
-    // the lowest unit back to the highest one
+    // the lowest unit back to the highest one; erase it first if a
+    // tearing left stale or partial records in it
     rollover = true;
     new_unit_index = (current_unit_index==0) ? (n_pages(dst_ctx)-1) : (current_unit_index-1);
+    uint8_t*const new_unit_base = ewlf_unit_base(dst_ctx,new_unit_index);
+    if(!is_erased(dst_ctx,new_unit_base,page_size(dst_ctx))){
+      nvm_erase(dst_ctx,dst_ctx->nvm_props,new_unit_base,1);
+    }
     new_record_addr = ewlf_unit_top_record(dst_ctx,new_unit_index);
   }
   uint8_t*const new_data_addr = new_record_addr + header_size;
 
+  const uint8_t* src_phy_addr = src;
+  lftl_ctx_t* src_ctx = dst_ctx;
   if(write_data){
-    const uint8_t* src_phy_addr = src;
-    lftl_ctx_t* src_ctx = dst_ctx;
     check_src_phy_addr(&src_ctx,&src_phy_addr,size);
     write_src_phy_addr_to_dst_phy_addr(
       dst_ctx,
@@ -1383,14 +1465,24 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
       0 // no transaction
     );
   }
-  //write magic, then version+checksum (checksum computed from what now
-  //actually sits at new_data_addr: either the just-written data, or, if
-  //write_data is false, its untouched, already-erased content)
+  //write magic, then version+checksum (checksum of the data meant to be
+  //written: the current data with the written range replaced, or, if
+  //write_data is false, erased data)
   ewlf_write_record_magic(dst_ctx,new_record_addr);
   const uint32_t version = 1 + ewlf_get_record_version(dst_ctx, current_record_addr);
+  uint32_t sum = 0xFFFFFFFF;
+  if(write_data){
+    const uintptr_t first = (uintptr_t)dst_nvm_addr - (uintptr_t)dst_ctx->area;
+    const uint8_t*const current_data = (const uint8_t*)dst_ctx->data;
+    sum = checksum_update(dst_ctx,sum,current_data,first);
+    sum = checksum_update(src_ctx,sum,src_phy_addr,size);
+    sum = checksum_update(dst_ctx,sum,current_data+first+size,dst_ctx->data_size-first-size);
+  } else {
+    sum = checksum_update_erased(sum,dst_ctx->data_size);
+  }
   lftl_meta_t meta;
   meta.version = version;
-  meta.checksum = checksum(dst_ctx,new_data_addr,dst_ctx->data_size) + meta.version;
+  meta.checksum = sum + meta.version;
   meta.checksum2 = meta.checksum;
   ewlf_write_record_meta_core(dst_ctx,new_record_addr,&meta);
 

@@ -32,11 +32,13 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx){
 
 void lftl_register_area(lftl_ctx_t*ctx){
   ctx->area_type = LFTL_AREA_TYPE_STD;
+  check_config(ctx);
   lftl_register_area_core(ctx, &first_area);
 }
 
 void lftl_register_area_ewlf(lftl_ctx_t*ctx){
   ctx->area_type = LFTL_AREA_TYPE_EWLF;
+  check_config(ctx);
   lftl_register_area_core(ctx, &first_area_ewlf);
 }
 

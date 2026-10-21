@@ -54,6 +54,8 @@
 #define LFTL_ERROR_WU_SIZE_TOO_LARGE 0x0A
 /// Error: a transaction API call is attempted on an EWLF area, which does not support transactions
 #define LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED 0x0B
+/// Error: an area or its NVM is badly configured, see ::lftl_register_area and ::lftl_register_area_ewlf
+#define LFTL_ERROR_BAD_CONFIG 0x0C
 /// Base value for errors reported by the erase function. Bits 0 to 7 may give more details.
 #define LFTL_ERROR_LOW_LEVEL_ERASE 0x0100
 /// Base value for error reported by the write function. Bits 0 to 7 may give more details.
@@ -234,6 +236,13 @@ void lftl_init_lib();
 /// intermediate buffering.
 /// Call this for each area, after ::lftl_init_lib
 /// and before any other function (except the Meta information API group).
+///
+/// The configuration is checked first, and the area is not registered if
+/// the check fails: ::LFTL_ERROR_WU_SIZE_TOO_LARGE if the NVM's write unit
+/// is larger than ::LFTL_WU_MAX_SIZE, ::LFTL_ERROR_BAD_CONFIG if the write
+/// unit is not a power of 2 dividing the erase unit, if the area is not
+/// whole erase units within its NVM, if its data is not whole write units,
+/// or if it holds less than 2 slots.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////
@@ -265,6 +274,10 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx);
 /// intermediate buffering.
 /// Call this for each area, after ::lftl_init_lib
 /// and before any other function (except the Meta information API group).
+///
+/// The configuration is checked first, as for ::lftl_register_area, except
+/// that an EWLF area needs at least 2 erase units, and a record (its data
+/// plus a header, see ::LFTL_EWLF_RECORD_SIZE) must fit in one erase unit.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////
@@ -662,13 +675,19 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 #define LFTL_EWLF_WU_SIZE ((LFTL_WU_SIZE) > 4 ? (LFTL_WU_SIZE) : 4)
 
 #define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
-#define LFTL_EWLF_RECORD_SIZE(area_content) (sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_EWLF_WU_SIZE)
+/// Size in bytes of one EWLF record of `area_content`, as laid out at run time:
+/// the magic, the `prev_erased` flag and each meta-data item take at least one
+/// write unit, the data is rounded up to whole write units, the record to 8 bytes.
+#define LFTL_EWLF_RECORD_SIZE(area_content) LFTL_ROUND_UP(\
+  LFTL_MAX(LFTL_WU_SIZE,8) + LFTL_MAX(LFTL_WU_SIZE,1) + LFTL_META_N_ITEMS*LFTL_EWLF_WU_SIZE \
+  + LFTL_ROUND_UP(sizeof(struct {area_content}),LFTL_WU_SIZE), 8)
 
 /// Declare an LFTL area with Extreme Wear Leveling Factor
 /// \param name Name of the LFTL area.
 /// \param area_content Members of the LFTL area.
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA_EWLF(name, area_content, wear_leveling_factor) union {\
+  _Static_assert(LFTL_EWLF_RECORD_SIZE(area_content) <= LFTL_PAGE_SIZE, "EWLF area " #name ": a record must fit in a page");\
   flash_sw_page_t name##_pages[LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
   struct {area_content} name##_data;\
   struct {area_content};\

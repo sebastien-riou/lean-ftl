@@ -1065,6 +1065,55 @@ void aligned_misuse_test(){
   SANITY_CHECK();
 }
 
+//A bad configuration is refused at registration, and the area is not linked
+void bad_config_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props = nvm_props3;
+  props.next = LFTL_INVALID_POINTER;
+  lftl_ctx_t bad;
+  #define RESET_BAD_CTX() do{\
+      bad = nvmd;\
+      bad.nvm_props = &props;\
+      bad.data = LFTL_INVALID_POINTER;\
+      bad.transaction_tracker = LFTL_INVALID_POINTER;\
+      bad.next = LFTL_INVALID_POINTER;\
+    }while(0)
+  //an EWLF record larger than an erase unit (LF-11)
+  RESET_BAD_CTX();
+  bad.data_size = props.erase_size - 8;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_ewlf(&bad));
+  //an EWLF area of a single erase unit
+  RESET_BAD_CTX();
+  bad.area_size = props.erase_size;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_ewlf(&bad));
+  //less than 2 slots
+  RESET_BAD_CTX();
+  bad.data_size = props.erase_size;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area(&bad));
+  //data that is not whole write units
+  RESET_BAD_CTX();
+  bad.data_size = props.write_size + 1;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area(&bad));
+  //an area that does not start on an erase unit of its NVM
+  RESET_BAD_CTX();
+  bad.area = ((uint8_t*)nvmd.area) + props.write_size;
+  bad.area_size = props.erase_size;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area(&bad));
+  //an area that goes past the end of its NVM
+  RESET_BAD_CTX();
+  bad.area_size = props.size + props.erase_size;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area(&bad));
+  //write units that are too large, or not a power of 2
+  RESET_BAD_CTX();
+  props.write_size = LFTL_WU_MAX_SIZE*2;
+  EXPECT_ERROR(LFTL_ERROR_WU_SIZE_TOO_LARGE, lftl_register_area(&bad));
+  props.write_size = 3;
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area(&bad));
+  //none of them got linked: nvmd's data still resolves to nvmd
+  if(&nvmd != lftl_get_ctx(nvm.data7)) throw_exception(ERROR_VERIFICATION_FAIL);
+  SANITY_CHECK();
+}
+
 void version_collision_test(){
   DEBUG_PRINTLN(__func__);
   uint8_t buf[sizeof(nvm.data7)];
@@ -1511,7 +1560,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 26
+  #define N_TESTS 27
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1604,6 +1653,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 24:TEAR_COV(100);test_and_simulate_tearing(torn_checksum2_test   ,tear_cov_log[i]);break;
       case 25:TEAR_COV(100);test_and_simulate_tearing(transaction_after_reset_test,tear_cov_log[i]);break;
       case 26:TEAR_COV(100);test_and_simulate_tearing(large_write_unit_test ,tear_cov_log[i]);break;
+      case 27:TEAR_COV(100);test_and_simulate_tearing(bad_config_test       ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

@@ -1505,6 +1505,41 @@ static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
   DEBUG_PRINTLN("erase exit");
 }
 
+/**
+ * \brief Check an area's configuration, raise an error if it is bad.
+ *
+ * Called when an area is registered, before it is linked, so that a bad
+ * configuration fails there instead of corrupting memory or flash later.
+ * Raises ::LFTL_ERROR_WU_SIZE_TOO_LARGE if the write unit is larger than
+ * ::LFTL_WU_MAX_SIZE (which bounds stack buffers), ::LFTL_ERROR_BAD_CONFIG if:
+ * - the write unit is not a power of 2 dividing the erase unit,
+ * - the area is not whole erase units within its NVM,
+ * - a regular area holds less than 2 slots, or its data is not whole write
+ *   units (::lftl_transaction_commit copies whole write units only),
+ * - an EWLF area has less than 2 erase units, or a record does not fit in one.
+ *
+ * \param ctx Context of the LFTL area, with `area_type` already set
+ */
+static void check_config(lftl_ctx_t*ctx){
+  const lftl_nvm_props_t*const nvm_props = ctx->nvm_props;
+  const uint32_t write_size = nvm_props->write_size;
+  const uint32_t erase_size = nvm_props->erase_size;
+  if(write_size > LFTL_WU_MAX_SIZE) raise_error(ctx,LFTL_ERROR_WU_SIZE_TOO_LARGE);
+  if((0 == write_size) || (0 != (write_size & (write_size-1)))) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  if((0 == erase_size) || (0 != (erase_size % write_size))) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  const uintptr_t area = (uintptr_t)ctx->area;
+  const uintptr_t base = (uintptr_t)nvm_props->base;
+  if((area < base) || (area - base > nvm_props->size) || (ctx->area_size > nvm_props->size - (area - base))) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  if((0 != (area - base) % erase_size) || (0 != ctx->area_size % erase_size)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  if(lftl_is_ewlf(ctx)){
+    if(n_pages(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+    if(ewlf_record_phy_size(ctx) > erase_size) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  } else {
+    if(n_slots(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+    if(0 != (ctx->data_size % write_size)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  }
+}
+
 #define xstr(s) str(s)
 #define str(s) #s
 static const char*version = xstr(GIT_VERSION);

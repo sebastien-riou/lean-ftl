@@ -46,7 +46,7 @@ void lftl_format(lftl_ctx_t*ctx){
   if(lftl_is_ewlf(ctx)){
     format_ewlf(ctx);
   } else {
-    nvm_erase(ctx->nvm_props,ctx->area,n_pages(ctx));
+    nvm_erase(ctx,ctx->nvm_props,ctx->area,n_pages(ctx));
     ctx->data = ctx->area;
     write_meta(ctx, 0, 1);
   }
@@ -92,7 +92,7 @@ void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_
   DEBUG_PRINTLN("lftl_read entry");
   if(0==size) return;
   const void*const phy_addr = translate_addr(ctx, src_nvm_addr, size);
-  nvm_read(ctx->nvm_props,dst, phy_addr, size);
+  nvm_read(ctx,ctx->nvm_props,dst, phy_addr, size);
   DEBUG_PRINTLN("lftl_read exit");
 }
 
@@ -226,11 +226,11 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
     if(tracker[byte_index] & mask) {
       //read new data
       void*phy_addr = base + pos;
-      nvm_read(ctx->nvm_props,dst8, phy_addr, chunk);
+      nvm_read(ctx,ctx->nvm_props,dst8, phy_addr, chunk);
     }else{
       //read current data
       void*phy_addr = (uint8_t*)(ctx->data) + pos;
-      nvm_read(ctx->nvm_props,dst8, phy_addr, chunk);
+      nvm_read(ctx,ctx->nvm_props,dst8, phy_addr, chunk);
     }
     dst8 += chunk;
     pos += chunk;
@@ -278,7 +278,7 @@ void lftl_memread(void*dst, const void*const src, uintptr_t size){
     memcpy(dst,src,size);
   } else { // NVM, in or out of any LFTL area
     if(LFTL_INVALID_POINTER!=ctx) lftl_read(ctx,dst,src,size);
-    else nvm_read(nvm_props,dst,src,size); // outside of LFTL area but within NVM
+    else nvm_read(LFTL_INVALID_POINTER,nvm_props,dst,src,size); // outside of LFTL area but within NVM
   }
   DEBUG_PRINTLN("lftl_memread exit");
 }
@@ -291,7 +291,7 @@ void lftl_memread_newer(void*dst, const void*const src, uintptr_t size){
     memcpy(dst,src,size);
   } else { // NVM, in or out of any LFTL area
     if(LFTL_INVALID_POINTER!=ctx) lftl_read_newer(ctx,dst,src,size);
-    else nvm_read(nvm_props,dst,src,size); // outside of LFTL area but within NVM
+    else nvm_read(LFTL_INVALID_POINTER,nvm_props,dst,src,size); // outside of LFTL area but within NVM
   }
   DEBUG_PRINTLN("lftl_memread_newer exit");
 }

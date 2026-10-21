@@ -857,6 +857,13 @@ void zero_size_test(){
   SANITY_CHECK();
 }
 
+static uint8_t failing_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  (void)dst_nvm_addr;
+  (void)src;
+  (void)size;
+  return 1;
+}
+
 void transaction_misuse_test(){
   DEBUG_PRINTLN(__func__);
   const uint32_t write_size = nvm_props.write_size;
@@ -873,28 +880,57 @@ void transaction_misuse_test(){
   EXPECT_ERROR(LFTL_ERROR_NO_TRANSACTION, lftl_transaction_write_any(&nvma,((uint8_t*)nvm.data0)+1,buf,write_size));
   SANITY_CHECK();
 
-  transaction_start_func(&nvma,tracker);
+  //each misuse below raises an error while a transaction is active, which
+  //aborts that transaction: it may be inconsistent, and the error handler may
+  //unwind the frame holding its tracker
+  #define EXPECT_ERROR_ABORTS(ctx, expected_err_code, stmt) do{\
+      EXPECT_ERROR(expected_err_code, stmt);\
+      if(LFTL_INVALID_POINTER != (ctx)->transaction_tracker) throw_exception(ERROR_VERIFICATION_FAIL);\
+    }while(0)
 
   //starting a second transaction while one is already active
-  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_transaction_start(&nvma,tracker2));
+  transaction_start_func(&nvma,tracker);
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_TRANSACTION_ONGOING, lftl_transaction_start(&nvma,tracker2));
 
   //calling the low-level lftl_basic_write directly while a transaction is
   //active, bypassing the public lftl_write dispatcher
-  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_basic_write(&nvma,nvm.data0,buf,write_size));
+  transaction_start_func(&nvma,tracker);
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_TRANSACTION_ONGOING, lftl_basic_write(&nvma,nvm.data0,buf,write_size));
 
   //calling lftl_erase_all while a transaction is active
-  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_erase_all(&nvma));
+  transaction_start_func(&nvma,tracker);
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_TRANSACTION_ONGOING, lftl_erase_all(&nvma));
 
   //write the same write unit twice in one transaction
+  transaction_start_func(&nvma,tracker);
   transaction_write_func(&nvma,nvm.data0,buf,write_size);
-  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write(&nvma,nvm.data0,buf,write_size));
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write(&nvma,nvm.data0,buf,write_size));
 
   //same, via the unaligned lftl_transaction_write_any path
   uint8_t*const data1_base = (uint8_t*)nvm.data1;
+  transaction_start_func(&nvma,tracker);
   transaction_write_any_func(&nvma,data1_base+1,buf,write_size);
-  EXPECT_ERROR(LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write_any(&nvma,data1_base+1,buf,write_size));
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write_any(&nvma,data1_base+1,buf,write_size));
+  SANITY_CHECK();
 
-  transaction_abort_func(&nvma);
+  //once aborted, lftl_write is a plain write again instead of using the tracker
+  uint8_t buf2[write_size];
+  stateful_prng_fill(buf2,write_size);
+  test_write(&nvma,nvm.data0,buf2,write_size);
+
+  //an NVM error aborts the transaction of the area it happened for: nvmd
+  //through a copy of its NVM properties whose write callback always fails
+  lftl_nvm_props_t failing_props = nvm_props3;
+  failing_props.write = failing_nvm_write;
+  failing_props.next = LFTL_INVALID_POINTER;
+  lftl_ctx_t failing = nvmd;
+  failing.nvm_props = &failing_props;
+  failing.data = LFTL_INVALID_POINTER;
+  failing.transaction_tracker = LFTL_INVALID_POINTER;
+  failing.next = LFTL_INVALID_POINTER;
+  uint8_t failing_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&failing)];
+  lftl_transaction_start(&failing,failing_tracker);
+  EXPECT_ERROR_ABORTS(&failing, LFTL_ERROR_LOW_LEVEL_WRITE | 1, lftl_transaction_write(&failing,nvm.data7,buf,write_size));
   SANITY_CHECK();
 
   //lftl_write (the public dispatcher, not lftl_transaction_write directly)
@@ -1010,15 +1046,12 @@ void aligned_misuse_test(){
   uint8_t buf[write_size*2];
   stateful_prng_fill(buf,sizeof(buf));
 
+  //lftl_transaction_write requires an ALIGNED address and size. Each error
+  //aborts the transaction, so each check starts its own.
   transaction_start_func(&nvma,tracker);
-  //lftl_transaction_write requires an ALIGNED address and size. Its tracker
-  //bookkeeping runs before write_core's alignment check and marks a write
-  //unit even when the call ultimately fails alignment, so the two checks
-  //below target different write units (data0 vs data1) to avoid a spurious
-  //LFTL_ERROR_TRANSACTION_OVERWRITE from the first call's tracker bit.
-  EXPECT_ERROR(LFTL_ERROR_BASE_MISALIGNED, lftl_transaction_write(&nvma,((uint8_t*)nvm.data0)+1,buf,write_size));
-  EXPECT_ERROR(LFTL_ERROR_SIZE_MISALIGNED, lftl_transaction_write(&nvma,nvm.data1,buf,write_size+1));
-  transaction_abort_func(&nvma);
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_BASE_MISALIGNED, lftl_transaction_write(&nvma,((uint8_t*)nvm.data0)+1,buf,write_size));
+  transaction_start_func(&nvma,tracker);
+  EXPECT_ERROR_ABORTS(&nvma, LFTL_ERROR_SIZE_MISALIGNED, lftl_transaction_write(&nvma,nvm.data1,buf,write_size+1));
   SANITY_CHECK();
 
   //lftl_format rejects an NVM whose write_size exceeds LFTL_WU_MAX_SIZE.

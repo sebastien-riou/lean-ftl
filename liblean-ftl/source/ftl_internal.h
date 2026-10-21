@@ -179,6 +179,22 @@ static bool is_in_data(lftl_ctx_t*ctx, const void*const nvm_addr){//nvm_addr is 
 }
 
 /**
+ * \brief Check that a logical range is within an area's data, raise an error otherwise.
+ *
+ * The end of the range is checked without computing `nvm_addr+size`, so a
+ * `size` close to `UINTPTR_MAX` cannot wrap around and pass.
+ *
+ * \param ctx Context of the LFTL area
+ * \param nvm_addr Logical address of the start of the range
+ * \param size Size in bytes of the range
+ */
+static void check_in_data(lftl_ctx_t*ctx, const void*const nvm_addr, uintptr_t size){
+  if(!is_in_data(ctx, nvm_addr)) raise_error(ctx,LFTL_ERROR_FIRST_NOT_IN_DATA);
+  const uintptr_t offset = (uintptr_t)nvm_addr - (uintptr_t)ctx->area;
+  if(size > ctx->data_size - offset) raise_error(ctx,LFTL_ERROR_LAST_NOT_IN_DATA);
+}
+
+/**
  * \brief Search the registered areas other than `ctx` for one containing an address.
  *
  * Walks the circular linked list of registered areas (via `ctx->next`),
@@ -992,10 +1008,9 @@ static void find_current_record(lftl_ctx_t*ctx){
  * \returns The corresponding physical address within the current slot
  */
 static void*translate_addr_std(lftl_ctx_t*ctx, const void*const nvm_addr, uintptr_t size){
-  if(!is_in_data(ctx, nvm_addr)) raise_error(ctx,LFTL_ERROR_FIRST_NOT_IN_DATA);
+  check_in_data(ctx, nvm_addr, size);
   if(LFTL_INVALID_POINTER == ctx->data) find_current_slot(ctx);
   const uintptr_t offset = (uintptr_t)nvm_addr - (uintptr_t)ctx->area;
-  if(offset+size > ctx->data_size) raise_error(ctx,LFTL_ERROR_LAST_NOT_IN_DATA);
   return (void*)((uintptr_t)ctx->data + offset);
 }
 /**
@@ -1013,10 +1028,9 @@ static void*translate_addr_std(lftl_ctx_t*ctx, const void*const nvm_addr, uintpt
  * \returns The corresponding physical address within the current record's data
  */
 static void*translate_addr_ewlf(lftl_ctx_t*ctx, const void*const nvm_addr, uintptr_t size){
-  if(!is_in_data(ctx, nvm_addr)) raise_error(ctx,LFTL_ERROR_FIRST_NOT_IN_DATA);
+  check_in_data(ctx, nvm_addr, size);
   if(LFTL_INVALID_POINTER == ctx->data) find_current_record(ctx);
   const uintptr_t offset = (uintptr_t)nvm_addr - (uintptr_t)ctx->area;
-  if(offset+size > ctx->data_size) raise_error(ctx,LFTL_ERROR_LAST_NOT_IN_DATA);
   return (void*)((uintptr_t)ctx->data + offset);
 }
 /**
@@ -1198,6 +1212,8 @@ static void write_src_phy_addr_to_dst_phy_addr(
 static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool transaction, bool aligned){
   DEBUG_PRINTLN("write_core(%p,%p,%p,%u,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,transaction,aligned);
   //printf("src=%p, size=0x%08lx\n",src,size);
+  //check the range as requested: once extended to whole write units below, size could wrap around
+  check_in_data(dst_ctx, dst_nvm_addr, size);
   const uint32_t write_size = dst_ctx->nvm_props->write_size;
   uintptr_t dst_nvm_addr_aligned;
   uintptr_t addr_misalignement;
@@ -1283,6 +1299,8 @@ static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
  */
 static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data){
   DEBUG_PRINTLN("write_ewlf_core(%p,%p,%p,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,write_data);
+  //check the range as requested: once extended to whole write units below, size could wrap around
+  if(write_data) check_in_data(dst_ctx, dst_nvm_addr, size);
   const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uintptr_t addr_misalignement = write_data ? ((uintptr_t)dst_nvm_addr % write_size) : 0;
   const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;

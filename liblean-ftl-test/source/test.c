@@ -956,6 +956,13 @@ void out_of_range_test(){
   uint8_t buf[16];
   EXPECT_ERROR(LFTL_ERROR_FIRST_NOT_IN_DATA, lftl_read(&nvma,buf,((uint8_t*)nvma.area)-1,1));
   EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_read(&nvma,buf,((uint8_t*)nvma.area)+nvma.data_size-1,2));
+  //a size that makes offset+size wrap around must not pass the check, also
+  //once a write extends it to whole write units
+  const uintptr_t write_size = nvma.nvm_props->write_size;
+  EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_read(&nvma,buf,((uint8_t*)nvma.area)+write_size,(uintptr_t)0-write_size));
+  EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_read(&ewlfa,buf,((uint8_t*)ewlfa.area)+write_size,(uintptr_t)0-write_size));
+  EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_write(&nvma,((uint8_t*)nvma.area)+1,buf,(uintptr_t)0-1));
+  EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_write(&ewlfa,((uint8_t*)ewlfa.area)+1,buf,(uintptr_t)0-1));
   SANITY_CHECK();
 }
 

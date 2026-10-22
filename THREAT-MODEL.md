@@ -35,8 +35,6 @@ How lean-ftl works, as far as security is concerned:
 | Freshness (no rollback to an older version) | Anti-replay counters, revocation state | Protect | Not protected |
 | Availability of the area | Device must keep booting | Protect against logical attacks | Not protected |
 | Confidentiality of LFTL data | Secrets stored in NVM | Out of scope (no physical access) | Not protected |
-|  |  |  |  |
-|  |  |  |  |
 
 ## Assumptions and out of scope
 
@@ -144,8 +142,7 @@ The library cannot check the contract below itself. Each item is needed in both 
 **Contract checklist**
 
 - [ ] `error_handler` never returns: it resets, or `longjmp`s to a recovery point. One that returns hangs the device.
-- [ ] An error aborts only the transaction of the area it happened on. If the recovery point unwinds a frame holding another area's tracker, it calls `lftl_transaction_abort()` on that area before any further lean-ftl call.
-- [ ] `transaction_tracker` lives in static storage or in a frame the handler cannot unwind, and is at least `LFTL_TRANSACTION_TRACKER_SIZE(ctx)` bytes.
+- [ ] The tracker is at least `LFTL_TRANSACTION_TRACKER_SIZE(ctx)` bytes, and stays valid until the transaction ends with `lftl_transaction_commit()` or `lftl_transaction_abort()`. A tracker in static storage always does. One on the stack needs its transaction ended before that frame returns, or is unwound by an error handler, including for an error on another area: lean-ftl aborts only the transaction of the area an error happened on.
 - [ ] Before calling lean-ftl, the application checks every offset and size it derived from a message against the field it targets, overflow-safe: `off <= field_size && len <= field_size - off`. lean-ftl raises an error instead of corrupting memory, but with a handler that resets, each bad message would become a reboot.
 - [ ] Batch messages are de-duplicated before a transaction, so `TRANSACTION_OVERWRITE`, which aborts the transaction, cannot be triggered from outside.
 - [ ] No attacker-influenced pointer reaches `lftl_memread()` or the `src` of any write (T1.7).

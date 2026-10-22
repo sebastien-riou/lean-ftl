@@ -274,12 +274,14 @@ int main(int argc, char **argv) {
     break;
   }
   case 13: { /* LF-12: a magic near the end of an EWLF area makes the scan read past it */
-    init_area(WU, flash + 6 * PG, 2, 64, 1); if (setjmp(jb)) return 0;
+    if (setjmp(jb)) return 0; /* registration may refuse the configuration */
+    init_area(WU, flash + 6 * PG, 2, 32, 1); /* 112-byte records, 2 per page */
     memset(flash, 0xFF, sizeof(flash));
     const uint64_t magic = EWLF_MAGIC;
-    /* header is 16 + 16 + 48 = 80 bytes: the scan reads the metadata inside the
-       NVM through the read callback, then checksums 64 bytes past its end with
-       memcpy, without a callback line */
+    /* header is 16 + 16 + 48 = 80 bytes: before LF-12 the scan read the metadata
+       inside the NVM through the read callback, then checksummed 32 bytes past
+       its end with memcpy, without a callback line. end - 80 is not a record
+       position, so the magic is never read */
     memcpy(flash + sizeof(flash) - 80, &magic, 8);
     printf("T13/LF-12: EWLF area holding only a magic 80 bytes before its end, then lftl_read\n");
     lftl_read(&ctx, buf, flash + 6 * PG, 16);

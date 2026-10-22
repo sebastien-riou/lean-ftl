@@ -27,7 +27,10 @@ The writes are done from the highest possible address towards lower address. Thi
 
 Records can only start at the top of an erase unit minus a multiple of the record size. The read process checks
 these positions by increasing address, starting from the base address of the EWLF area, and returns the first
-record whose header magic, data integrity (same approach as with regular areas) and checksum2 are all valid.
+record whose header magic and data integrity (same approach as with regular areas) are valid. If its checksum2
+does not match its checksum, a tearing happened while its meta data was written and its checksum may be weakly
+programmed: the record is copied forward first, as a new record with complete meta data, like a torn slot of a
+regular area, so that nothing depends on how that word reads at a later boot.
 
 NOTE: checking only these positions means that data can never be mistaken for a header, even if it contains a
 copy of one, and that every record checked fits in its erase unit.
@@ -56,10 +59,13 @@ NOTES:
     tearing), it is erased before the new record is written.
 - When a tearing occurs during the wrap from the lowest erase unit back to the highest, after the new record is
     complete but before the lowest unit is erased, both units are programmed and the scan finds the older record
-    first, at a lower address. The initialization therefore also checks the top record of the next erase unit in write
-    order, takes it if its version is higher, and then completes the wrap as below.
-- Even if a single erase unit appears to be programmed, the initialization of the library check that the `prev_erased` flag is 
-    set. If it is not set, the previous erase unit may be 'weakly erased'. In such case, the previous erase unit is erased again and after that the `prev_erase` flag is written.
+    first, at a lower address. The initialization therefore also checks the newest record of the next erase unit in
+    write order (a copy forward can leave two records there), takes it if its version is higher, and then completes
+    the wrap as below.
+- The initialization checks that the `prev_erased` flag of the top record of the erase unit holding the current
+    record is set. If it is not set, the previous erase unit may not have been erased, or only 'weakly': it is erased
+    again and after that the `prev_erased` flag is written. This comes after any copy forward, so nothing is erased
+    before a complete record exists.
 
 Example with an area spanning 2 erase units, U1 at the higher address and U0 at the lower one:
 - writes start at the top of U1 and proceed downward as records accumulate
@@ -71,7 +77,8 @@ Example with an area spanning 2 erase units, U1 at the higher address and U0 at 
 
 Limitations:
 - one area can store only one data of fixed size
-- the data size must be smaller than an erase unit (a record needs to fit in an erase unit)
+- at least 2 records must fit in an erase unit, so that a record torn at the top of a unit can be copied forward
+    within that unit
 - the whole data is written every time
 - no support for transactions
 

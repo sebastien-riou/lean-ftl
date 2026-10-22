@@ -995,14 +995,21 @@ static void ewlf_write_record_prev_erased(lftl_ctx_t*ctx, uint8_t*record_addr){
 }
 
 /**
- * \brief Check whether an EWLF record is complete and consistent.
+ * \brief Check whether an EWLF record's magic and checksum are valid.
+ *
+ * checksum2 is not part of the check: as for a slot (see ::find_current_slot),
+ * a record whose data and checksum are valid is taken whatever its checksum2,
+ * and the caller copies it forward when checksum2 does not match. A tearing
+ * while writing the record's meta-data leaves checksum2 erased or partially
+ * programmed, and the checksum possibly weakly programmed; rejecting such a
+ * record would make the outcome depend on how a weakly programmed word reads
+ * at each boot (ISSUES.md LFTL-008).
  *
  * \param ctx Context of the EWLF area
  * \param record_addr Physical address of the start of the record
  * \param meta Output: the record's meta-data, valid only if true is returned
- * \returns true if the magic matches, the checksum matches the data and the
- *   version, and checksum2 matches the checksum (a tearing while writing the
- *   record's own meta-data leaves checksum2 erased or partially programmed)
+ * \returns true if the magic matches and the checksum matches the data and
+ *   the version
  */
 static bool ewlf_record_is_valid(lftl_ctx_t*ctx, const uint8_t*record_addr, lftl_meta_t*meta){
   uint64_t magic;
@@ -1010,66 +1017,107 @@ static bool ewlf_record_is_valid(lftl_ctx_t*ctx, const uint8_t*record_addr, lftl
   if(magic != EWLF_MAGIC) return false;
   ewlf_get_record_meta(ctx,meta,record_addr);
   const uint32_t recomputed = checksum(ctx,record_addr+ewlf_header_phy_size(ctx),ctx->data_size) + meta->version;
-  if(recomputed != meta->checksum) return false;
-  return meta->checksum2 == meta->checksum;
+  return recomputed == meta->checksum;
 }
+
+/**
+ * \brief Newest valid record of an EWLF erase unit, if any.
+ *
+ * Records are written from the top of a unit down, below a record whose
+ * magic was complete (a copy forward goes below a record whose checksum may
+ * be weak, never one without a magic), and a unit is only ever erased whole,
+ * so a unit whose top record has no valid magic holds no record at all: an
+ * erased unit costs one read.
+ * Otherwise the positions are checked from the lowest address up, and the
+ * first valid record (see ::ewlf_record_is_valid) is the newest.
+ *
+ * \param ctx Context of the EWLF area
+ * \param unit_index Index of the erase unit, in `[0, n_pages(ctx))`
+ * \param record_addr Output: physical address of the record found
+ * \param meta Output: its meta-data, valid only if true is returned
+ * \returns true if the unit holds a valid record
+ */
+static bool ewlf_newest_in_unit(lftl_ctx_t*ctx, unsigned int unit_index, const uint8_t**record_addr, lftl_meta_t*meta){
+  const uintptr_t record_size = ewlf_record_phy_size(ctx);
+  const unsigned int records_per_unit = page_size(ctx) / record_size;
+  const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
+  uint64_t magic;
+  nvm_read(ctx,ctx->nvm_props,&magic,top,sizeof(magic));
+  if(magic != EWLF_MAGIC) return false;
+  for(unsigned int i = records_per_unit; i > 0; i--){
+    const uint8_t*const addr = top - (i-1)*record_size;
+    if(ewlf_record_is_valid(ctx,addr,meta)){
+      *record_addr = addr;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void copy_forward_ewlf(lftl_ctx_t*ctx);
 
 /**
  * \brief Locate the current EWLF record and update `ctx->data`.
  *
  * Records only ever start at the top of an erase unit minus a multiple of
  * the record size, so only those positions are checked: data can never be
- * mistaken for a header, and every candidate fits in its erase unit. They
- * are checked by increasing address, from the area's base address, and the
- * first valid record (see ::ewlf_record_is_valid) is the newest, except
- * after a wrap from the lowest unit back to the highest one, interrupted
- * before the lowest unit was erased: the newest record is then at the top
- * of the highest unit, so the top record of the next unit in write order
- * is checked too, and taken if its version is higher. Unlike
+ * mistaken for a header, and every candidate fits in its erase unit. The
+ * units are checked by increasing address, from the area's base address,
+ * and the newest record of the first unit holding one (see
+ * ::ewlf_newest_in_unit) is the newest of the area, except after a wrap
+ * from the lowest unit back to the highest one, interrupted before the
+ * lowest unit was erased: the newest record is then in the highest unit,
+ * so the newest record of the next unit in write order is checked too, and
+ * taken if its version is higher. That unit's newest record, not only its
+ * top one: a copy forward (below) can leave two records there. Unlike
  * ::find_current_slot, there is no equivalent of
  * ::LFTL_ERROR_VERSION_COLLISION here: by construction there is nothing to
  * collide with.
  *
- * If the winning record is the first (topmost) record of its erase unit,
- * a rollover happened to produce it; repairs a not-yet-confirmed
- * `prev_erased` flag by (re-)erasing the previous erase unit -- safe
- * whether that unit was never actually erased or only "weakly" erased --
- * and then confirming the flag.
+ * If the record's checksum2 does not match its checksum, a tearing happened
+ * while its meta-data was written and its checksum may be weakly
+ * programmed: the record is copied forward first, with complete meta-data,
+ * so that nothing depends on how that word reads later (see
+ * ::copy_forward_ewlf). Nothing is erased before that copy is complete.
+ *
+ * The top record of the unit holding the current record started that unit
+ * with a rollover: if its `prev_erased` flag is not confirmed, the previous
+ * erase unit may not have been erased, or only "weakly": it is erased
+ * again and the flag confirmed. The flag is read on its own, so this works
+ * when the top record is the torn one and the current record its copy.
  *
  * \param ctx Context of the EWLF area
  */
 static void find_current_record(lftl_ctx_t*ctx){
-  const uintptr_t record_size = ewlf_record_phy_size(ctx);
-  const unsigned int records_per_unit = page_size(ctx) / record_size;
   const unsigned int n_units = n_pages(ctx);
   for(unsigned int unit_index = 0; unit_index < n_units; unit_index++){
-    const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
-    for(unsigned int i = records_per_unit; i > 0; i--){
-      const uint8_t*record_addr = top - (i-1)*record_size;
-      lftl_meta_t meta;
-      if(!ewlf_record_is_valid(ctx,record_addr,&meta)) continue;
-      //a newer record can only be at the top of the next unit in write
-      //order: the other units that come later in write order are at lower
-      //addresses, so their records would have been found first
-      unsigned int record_unit = unit_index;
-      const unsigned int next_unit = (unit_index + n_units - 1) % n_units;
-      const uint8_t*const next_top = ewlf_unit_top_record(ctx,next_unit);
-      lftl_meta_t next_meta;
-      if(ewlf_record_is_valid(ctx,next_top,&next_meta) && (next_meta.version > meta.version)){
-        record_addr = next_top;
-        record_unit = next_unit;
-      }
-      //confirmed record found
-      if(record_addr == ewlf_unit_top_record(ctx,record_unit)){
-        if(!ewlf_record_prev_erased_confirmed(ctx,record_addr)){
-          const unsigned int prev_unit = (record_unit + 1) % n_units;
-          nvm_erase(ctx,ctx->nvm_props,ewlf_unit_base(ctx,prev_unit), 1);
-          ewlf_write_record_prev_erased(ctx,(uint8_t*)record_addr);
-        }
-      }
-      ctx->data = (void*)(record_addr + ewlf_header_phy_size(ctx));
-      return;
+    const uint8_t*record_addr;
+    lftl_meta_t meta;
+    if(!ewlf_newest_in_unit(ctx,unit_index,&record_addr,&meta)) continue;
+    //a newer record can only be in the next unit in write order: the other
+    //units that come later in write order are at lower addresses, so their
+    //records would have been found first
+    unsigned int record_unit = unit_index;
+    const unsigned int next_unit = (unit_index + n_units - 1) % n_units;
+    const uint8_t*next_addr;
+    lftl_meta_t next_meta;
+    if(ewlf_newest_in_unit(ctx,next_unit,&next_addr,&next_meta) && (next_meta.version > meta.version)){
+      record_addr = next_addr;
+      record_unit = next_unit;
+      meta = next_meta;
     }
+    ctx->data = (void*)(record_addr + ewlf_header_phy_size(ctx));
+    if(meta.checksum2 != meta.checksum){
+      copy_forward_ewlf(ctx);
+      record_unit = ((uintptr_t)((uint8_t*)ctx->data - ewlf_header_phy_size(ctx) - (uint8_t*)ctx->area)) / page_size(ctx);
+    }
+    uint8_t*const top = ewlf_unit_top_record(ctx,record_unit);
+    if(!ewlf_record_prev_erased_confirmed(ctx,top)){
+      const unsigned int prev_unit = (record_unit + 1) % n_units;
+      nvm_erase(ctx,ctx->nvm_props,ewlf_unit_base(ctx,prev_unit), 1);
+      ewlf_write_record_prev_erased(ctx,top);
+    }
+    return;
   }
   raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
 }
@@ -1356,7 +1404,7 @@ static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
 }
 
 /**
- * \brief Shared core for ::write_ewlf and ::erase_ewlf.
+ * \brief Shared core for ::write_ewlf, ::erase_ewlf and ::copy_forward_ewlf.
  *
  * Places the new record below the current one in its own erase unit, at
  * the first position whose cells all read erased (a tearing may have left
@@ -1380,9 +1428,12 @@ static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
  *   the whole record's data is always (re)written as a unit)
  * \param write_data Whether to actually write new data, or leave the
  *   fresh target data in its erased state
+ * \param copy_current Whether the source is the current record's own data
+ *   (`src` is then ignored): its physical address, read as any NVM source,
+ *   which ::check_src_phy_addr could take for a logical one
  */
-static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data){
-  DEBUG_PRINTLN("write_ewlf_core(%p,%p,%p,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,write_data);
+static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data, bool copy_current){
+  DEBUG_PRINTLN("write_ewlf_core(%p,%p,%p,%u,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,write_data,copy_current);
   //check the range as requested: once extended to whole write units below, size could wrap around
   if(write_data) check_in_data(dst_ctx, dst_nvm_addr, size);
   const uint32_t write_size = dst_ctx->nvm_props->write_size;
@@ -1439,7 +1490,11 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
   const uint8_t* src_phy_addr = src;
   lftl_ctx_t* src_ctx = dst_ctx;
   if(write_data){
-    check_src_phy_addr(&src_ctx,&src_phy_addr,size);
+    if(copy_current){
+      src_phy_addr = (const uint8_t*)dst_ctx->data;
+    } else {
+      check_src_phy_addr(&src_ctx,&src_phy_addr,size);
+    }
     write_src_phy_addr_to_dst_phy_addr(
       dst_ctx,
       offset,
@@ -1499,7 +1554,25 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
  * \param size Size in bytes to write
  */
 static void write_ewlf(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size){
-  write_ewlf_core(dst_ctx,dst_nvm_addr,src,size,true);
+  write_ewlf_core(dst_ctx,dst_nvm_addr,src,size,true,false);
+}
+
+/**
+ * \brief Copy the current EWLF record forward, with complete meta-data.
+ *
+ * Used by ::find_current_record when the current record's checksum2 does
+ * not match its checksum: a tearing happened while that record's meta-data
+ * was written, so its checksum may be weakly programmed and read
+ * differently later. Like ::move_to_next_slot for a regular area, this
+ * takes the normal write path: the same data, read from the record itself,
+ * at the next free position, with the next version. With at least 2
+ * records per erase unit (see ::check_config), a copy of a unit's top
+ * record stays in that unit, so nothing is erased before it is complete.
+ *
+ * \param ctx Context of the EWLF area, with `ctx->data` set to the record to copy
+ */
+static void copy_forward_ewlf(lftl_ctx_t*ctx){
+  write_ewlf_core(ctx,ctx->area,LFTL_INVALID_POINTER,ctx->data_size,true,true);
 }
 
 /**
@@ -1512,7 +1585,7 @@ static void write_ewlf(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
  * \param ctx Context of the target EWLF area
  */
 static void erase_ewlf(lftl_ctx_t*ctx){
-  write_ewlf_core(ctx,ctx->area,LFTL_INVALID_POINTER,0,false);
+  write_ewlf_core(ctx,ctx->area,LFTL_INVALID_POINTER,0,false,false);
 }
 
 /**
@@ -1602,7 +1675,9 @@ static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
  * - the area is not whole erase units within its NVM,
  * - a regular area holds less than 2 slots, or its data is not whole write
  *   units (::lftl_transaction_commit copies whole write units only),
- * - an EWLF area has less than 2 erase units, or a record does not fit in one.
+ * - an EWLF area has less than 2 erase units, or less than 2 records fit in
+ *   one (::copy_forward_ewlf must be able to copy a unit's top record within
+ *   that unit).
  *
  * \param ctx Context of the LFTL area, with `area_type` already set
  */
@@ -1619,7 +1694,7 @@ static void check_config(lftl_ctx_t*ctx){
   if((0 != (area - base) % erase_size) || (0 != ctx->area_size % erase_size)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
   if(lftl_is_ewlf(ctx)){
     if(n_pages(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
-    if(ewlf_record_phy_size(ctx) > erase_size) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+    if(erase_size / ewlf_record_phy_size(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
   } else {
     if(n_slots(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
     if(0 != (ctx->data_size % write_size)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);

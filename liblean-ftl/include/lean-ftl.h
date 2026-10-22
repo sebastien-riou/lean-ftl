@@ -284,8 +284,9 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx);
 /// and before any other function (except the Meta information API group).
 ///
 /// The configuration is checked first, as for ::lftl_register_area, except
-/// that an EWLF area needs at least 2 erase units, and a record (its data
-/// plus a header, see ::LFTL_EWLF_RECORD_SIZE) must fit in one erase unit.
+/// that an EWLF area needs at least 2 erase units, and at least 2 records
+/// (the data plus a header each, see ::LFTL_EWLF_RECORD_SIZE) must fit in
+/// one erase unit.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////
@@ -696,7 +697,7 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 /// \param area_content Members of the LFTL area.
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA_EWLF(name, area_content, wear_leveling_factor) union {\
-  _Static_assert(LFTL_EWLF_RECORD_SIZE(area_content) <= LFTL_PAGE_SIZE, "EWLF area " #name ": a record must fit in a page");\
+  _Static_assert(LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content)) >= 2, "EWLF area " #name ": at least 2 records must fit in a page");\
   flash_sw_page_t name##_pages[LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
   struct {area_content} name##_data;\
   struct {area_content};\

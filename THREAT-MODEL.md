@@ -111,7 +111,7 @@ Every finding was reproduced at 501de63, on a host build with AddressSanitizer a
 | LF-10 | `find_current_record()` looks for a header at every 8-byte step, including inside a torn record's data | The attacker controls at least a header's worth of stored data (40 bytes with 8-byte write units, 80 with 16) and cuts power between the data write and the magic | Reads return a forged record, attacker-chosen and different from both the old and the new data | c51b414: only record positions are checked | 28 |
 | LF-11 | An EWLF record larger than an erase unit is accepted. `LFTL_EWLF_RECORD_SIZE` leaves out the magic, the `prev_erased` flag and the padding, so `LFTL_AREA_EWLF` accepts content that does not fit. | Configuration, for example 192 bytes of data with 16-byte write units on 256-byte pages | `ewlf_unit_top_record()` returns an address below its unit; on the wrap to the lowest unit, the record starts below the area | 2f2b654: the macro matches the layout, `LFTL_AREA_EWLF` refuses such content at compile time, and registration checks it | 27 |
 
-LF-5 and LF-11 were triggered by configuration, not by an attacker. They are listed because they silently corrupted memory on common targets.
+LF-5 and LF-11 were triggered by configuration, not by an attacker. They are listed because they silently corrupted memory on common targets. `LFTL_AREA` had a milder configuration bug, fixed in bf34ca6: with write units under 4 bytes, it counted each metadata item as one write unit instead of 4 bytes. An area whose data came within a few bytes of a page boundary then got fewer slots than its wear-leveling factor. Registration refuses an area left with a single slot, and the fix moves the layout of areas in those configurations only.
 
 ## Case 2: external NVM
 
@@ -175,7 +175,7 @@ The library cannot check the contract below itself. Each item is needed in both 
 - [ ] A "formatted" flag in a separate area lets the application recover from a torn `lftl_format()` (T1.6).
 - [ ] Case 2 only: the driver, the address window and the application parsing follow T2.3 to T2.8.
 
-**Defence in depth: bound the callbacks.** The cheapest high-value hardening is to make `erase`, `write` and `read` reject any range outside the LFTL areas (plus, for `write`'s `src`, the RAM and NVM ranges the application uses). This turns any future bug that reaches flash outside an area into an error. On parts with an MPU or TrustZone, also make the LFTL areas non-executable, and make firmware flash write-protected while lean-ftl runs.
+**Defence in depth: bound the callbacks.** The callbacks check that each range is a flash address. The reference `erase` and `write` callbacks do: the STM32 ones refuse anything outside the flash, and the CH32V307 one also accepts the flash's `0x00000000` alias. They cannot check that a range is inside an LFTL area, since they do not know where the areas are. An integrator who knows its layout can bound its own callbacks to the LFTL areas, which turns a future bug that reaches other flash into an error. On parts with an MPU or TrustZone, also make the LFTL areas non-executable, and make firmware flash write-protected while lean-ftl runs.
 
 **If Case 2 needs integrity or freshness after all.** lean-ftl cannot provide either, but it composes with a small wrapper:
 
@@ -186,7 +186,7 @@ The library cannot check the contract below itself. Each item is needed in both 
 
 This is the same pattern TF-M Protected Storage uses over its internal trusted storage.
 
-## Verification plan and open questions
+## Verification plan
 
 The regression tests above run in `testit` with the tearing simulation, on a simulator that refuses to program cells that are not erased. Three fuzzing harnesses on the host build, under AddressSanitizer and UndefinedBehaviorSanitizer, would widen the coverage beyond the known findings, and the tearing sweep has one known gap.
 
@@ -200,11 +200,6 @@ The regression tests above run in `testit` with the tearing simulation, on a sim
 Also worth doing: a bounded model check (CBMC or Frama-C) of `check_in_data()`, `is_in_range()`, the tracker indexing and the EWLF record placement in `find_current_record()` and `write_ewlf_core()`, which carry most of the memory-safety burden. In CI, build with `-Wconversion`, since `offset_wu` is a `uint32_t` derived from a `uintptr_t`.
 
 `lftl_asan_harness.c` (about 290 lines) reproduces the findings at 501de63 and checks the fixed behaviour since 5517f9a: an 8-page RAM-backed NVM with 256-byte pages, one area per test, `memcpy` callbacks that report any range outside the area, a `longjmp` handler, switchable NOR and STM32U5 write semantics, and power cuts at a chosen write or erase. Build and run instructions are in its header. It can seed the API fuzzer.
-
-**Open questions for the maintainer**
-
-- Would upstream accept bounds checks against the LFTL areas in the reference callbacks, as defence in depth for future bugs? The CH32V307 one folds any address below `FLASH_BASE` into flash, to support areas addressed through the `0x00000000` alias, which turned LF-8 into an erase of the firmware's first pages; a bound there would have to come from the LFTL areas.
-- `LFTL_AREA` counts the metadata of 1-byte and 2-byte write units as 1 and 2 bytes per item, while the run time uses 4. When that crosses a page boundary, an area gets fewer slots than its wear-leveling factor, and registration now refuses it if fewer than 2 remain. Should the macro count 4 bytes, at the cost of moving the layout of deployed areas in those configurations?
 
 ## Sources
 

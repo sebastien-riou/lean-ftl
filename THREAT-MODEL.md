@@ -9,7 +9,7 @@ lean-ftl is assessed against two objectives, one for each way it can be deployed
 
 At commit 400ee5d, lean-ftl meets both objectives for regular and EWLF areas, within the assumptions below. NVM content only picks among fixed slot or record positions inside an area, API arguments are range-checked without overflow, an error aborts the transaction it interrupts, bad configurations are refused at registration, and EWLF writes only program erased cells. What remains is by design or up to the integrator: `lftl_memread()` and write sources accept any pointer (T1.7), messages can drive wear-out (T1.5), `lftl_format()` is not anti-tearing (T1.6), and external NVM needs a careful driver and careful parsing (T2.3 to T2.8).
 
-No finding is open. As in ISSUES.md, findings are removed from this document once fixed; git history keeps them, including LF-1 to LF-12, which some test comments still name. Open work items, such as the gap in the tearing tests, are tracked in ISSUES.md.
+No finding is open. As in ISSUES.md, findings are removed from this document once fixed; git history keeps them, including LF-1 to LF-12, which some test comments still name. Open work items are tracked in ISSUES.md.
 
 ## Scope and system overview
 
@@ -142,7 +142,7 @@ The library cannot check the contract below itself. Each item is needed in both 
 **Contract checklist**
 
 - [ ] `error_handler` never returns: it resets, or `longjmp`s to a recovery point. One that returns hangs the device.
-- [ ] The tracker is at least `LFTL_TRANSACTION_TRACKER_SIZE(ctx)` bytes, and stays valid until the transaction ends with `lftl_transaction_commit()` or `lftl_transaction_abort()`. A tracker in static storage always does. One on the stack needs its transaction ended before that frame returns, or is unwound by an error handler, including for an error on another area: lean-ftl aborts only the transaction of the area an error happened on.
+- [ ] A transaction tracker is at least `LFTL_TRANSACTION_TRACKER_SIZE(ctx)` bytes, and stays valid until the transaction ends with `lftl_transaction_commit()` or `lftl_transaction_abort()`. A tracker in static storage always does. One on the stack needs its transaction ended before that frame returns, or is unwound by an error handler, including for an error on another area: lean-ftl aborts only the transaction of the area an error happened on.
 - [ ] Before calling lean-ftl, the application checks every offset and size it derived from a message against the field it targets, overflow-safe: `off <= field_size && len <= field_size - off`. lean-ftl raises an error instead of corrupting memory, but with a handler that resets, each bad message would become a reboot.
 - [ ] Batch messages are de-duplicated before a transaction, so `TRANSACTION_OVERWRITE`, which aborts the transaction, cannot be triggered from outside.
 - [ ] No attacker-influenced pointer reaches `lftl_memread()` or the `src` of any write (T1.7).
@@ -163,7 +163,7 @@ This is the same pattern TF-M Protected Storage uses over its internal trusted s
 
 ## Verification plan
 
-`testit` runs the test suite on the Linux NVM simulator, whose write callback refuses to program a write unit that is not erased, like STM32U5-class flash. Most tests run under the tearing simulation, which cuts power at every callback boundary and checks that the data reads back as the last or the previous committed version. Tests 24 and 29 also build torn states by hand, regular and EWLF, and check the write that follows. The sweep itself never writes after a tear (ISSUES.md LFTL-004).
+`testit` runs the test suite on the Linux NVM simulator, whose write callback refuses to program a write unit that is not erased, like STM32U5-class flash. Most tests run under the tearing simulation, which cuts power at every callback boundary and checks that the data reads back as the last or the previous committed version. After each tear and that check, the sweep writes new data to every area it checks and checks again after another simulated reset, so the first write after a power cut is covered too. Tests 24 and 29 also build specific torn states by hand, regular and EWLF.
 
 `testit` also runs `test/asan/build-and-run`, which builds `test/asan/asan_harness.c` with AddressSanitizer and UndefinedBehaviorSanitizer. The harness covers hand-built scenarios: out-of-range arguments, an error inside a transaction, write units larger than 16 bytes, a transaction started first after a reset, power cuts in EWLF writes on NOR and STM32U5-like flash, hostile EWLF content, and an oversized EWLF record. Each test must end without a sanitizer report or a callback access outside the area, and with its expected result.
 

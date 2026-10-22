@@ -311,6 +311,23 @@ void tearing_sim_check_nvm(){
   nvmd.transaction_tracker = LFTL_INVALID_POINTER;
   check_nvm();
 }
+void tearing_sim_write_area(lftl_ctx_t*ctx, void*area_data, uintptr_t size){
+  static uint8_t rng_state = 0x80;
+  uint8_t buf[size];
+  prng_fill(&rng_state,buf,size);
+  tearing_sim_lftl_write(ctx,area_data,buf,size);
+}
+//The first write after recovering from a tearing lands on the state the
+//tearing left behind: write new data to every area check_nvm verifies, then
+//check them again after another simulated reboot. nvmc and nvmd are left
+//out: some tests use them as scratch for hand-built states.
+void tearing_sim_write_after_recovery(){
+  tearing_sim_write_area(&nvma,&nvm.a_data,sizeof(nvm.a_data));
+  tearing_sim_write_area(&nvmb,&nvm.b_data,sizeof(nvm.b_data));
+  tearing_sim_write_area(&ewlfa,&nvm.ewlfa_data,sizeof(nvm.ewlfa_data));
+  tearing_sim_write_area(&ewlfb,&nvm.ewlfb_data,sizeof(nvm.ewlfb_data));
+  tearing_sim_check_nvm();
+}
 void tearing_sim_init();
 uint32_t tearing_sim_get_max_target();
 void tearing_sim_set_target(uint64_t target_write);
@@ -1460,8 +1477,9 @@ void large_write_unit_test(){
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
-    //simulated tearing, see if we recover well
+    //simulated tearing, see if we recover well, including for the next write
     tearing_sim_check_nvm();
+    tearing_sim_write_after_recovery();
     format_func(&nvma);
     format_func(&nvmb);
     format_func(&ewlfa);

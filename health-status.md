@@ -1,5 +1,5 @@
 # Health Status
-This outlines the concept to support the health status feature.
+This outlines the concept to support the health status feature (so it is a plan, not something we support currently).
 
 ## Standard health status API
 This is an API which assumes the bulk of erase operations are due to normal operations,

@@ -257,34 +257,6 @@ static lftl_ctx_t*first_area_ewlf;
 static lftl_nvm_props_t*first_nvm;
 
 /**
- * \brief Check whether more than one std area is currently registered.
- *
- * \returns true if 2 or more areas were registered via ::lftl_register_area
- */
-static bool has_several_areas(){
-  if(LFTL_INVALID_POINTER==first_area) return 0;
-  return first_area->next != first_area;
-}
-/**
- * \brief Check whether more than one EWLF area is currently registered.
- *
- * \returns true if 2 or more areas were registered via ::lftl_register_area_ewlf
- */
-static bool has_several_areas_ewlf(){
-  if(LFTL_INVALID_POINTER==first_area_ewlf) return 0;
-  return first_area_ewlf->next != first_area_ewlf;
-}
-/**
- * \brief Check whether more than one physical NVM is currently registered.
- *
- * \returns true if 2 or more ::lftl_nvm_props_t were registered via ::lftl_register_nvm
- */
-static bool has_several_nvms(){
-  if(LFTL_INVALID_POINTER==first_nvm) return 0;
-  return first_nvm->next != first_nvm;
-}
-
-/**
  * \brief Link an area into a circular list and register its NVM.
  *
  * Shared implementation for ::lftl_register_area and ::lftl_register_area_ewlf:

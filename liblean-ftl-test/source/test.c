@@ -1281,15 +1281,15 @@ static uint8_t failing_once_nvm_erase(void*base_address, unsigned int n_pages){
 //nvmd's pages: a copy of nvmd's context and NVM properties, not registered.
 //nvm_write refuses to program cells that are not erased, like STM32U5-class
 //flash, so a write landing on a partial or complete record raises an error.
-//About 1000 bytes of data, rounded to whole write units (ISSUES.md LFTL-005),
-//make records of about 1 KB: 4 per 4 KB erase unit, 7 per 8 KB one.
+//1000 bytes of data make records of about 1 KB: 4 per 4 KB erase unit, 7 per
+//8 KB one.
 void ewlf_tearing_test(){
   DEBUG_PRINTLN(__func__);
   lftl_nvm_props_t props = nvm_props3;
   props.erase = failing_once_nvm_erase;
   props.next = LFTL_INVALID_POINTER;
   const uint32_t write_size = props.write_size;
-  const uintptr_t data_size = LFTL_ROUND_UP(1000,write_size);
+  const uintptr_t data_size = 1000;
   lftl_ctx_t ewlf = nvmd;
   ewlf.nvm_props = &props;
   ewlf.data = LFTL_INVALID_POINTER;
@@ -1301,7 +1301,7 @@ void ewlf_tearing_test(){
   const uintptr_t magic_size = write_size > 8 ? write_size : 8;
   const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
   const uintptr_t header_size = magic_size + write_size + LFTL_META_N_ITEMS*item_size;
-  const uintptr_t record_size = LFTL_ROUND_UP(header_size + data_size,8);
+  const uintptr_t record_size = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(data_size,write_size),8);
   uint8_t d[data_size];
 
   //a write cut while writing data leaves a partial record right below the
@@ -1342,6 +1342,38 @@ void ewlf_tearing_test(){
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d,sizeof(d));
 
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+
+//EWLF areas accept any data size: each record pads the data to whole write
+//units. An EWLF area over nvmd's pages whose data ends 1 byte into a write
+//unit: write the whole data, then only its last bytes, and read it back after
+//a reset (ISSUES.md LFTL-005).
+void ewlf_unaligned_size_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_ctx_t ewlf = nvmd;
+  ewlf.data = LFTL_INVALID_POINTER;
+  ewlf.data_size = 8*nvm_props3.write_size + 1;
+  ewlf.transaction_tracker = LFTL_INVALID_POINTER;
+  ewlf.next = LFTL_INVALID_POINTER;
+  ewlf.area_type = LFTL_AREA_TYPE_EWLF; //not registered, so set here
+  uint8_t*const area = (uint8_t*)ewlf.area;
+  const uintptr_t data_size = ewlf.data_size;
+  uint8_t expected[data_size];
+  lftl_format(&ewlf);
+  memset(expected,0xFF,data_size); //a formatted EWLF area reads erased
+  read_and_check(&ewlf,area,expected,data_size);
+  stateful_prng_fill(expected,data_size);
+  lftl_write(&ewlf,area,expected,data_size);
+  read_and_check(&ewlf,area,expected,data_size);
+  uint8_t last[2];
+  stateful_prng_fill(last,sizeof(last));
+  lftl_write(&ewlf,area+data_size-sizeof(last),last,sizeof(last));
+  memcpy(expected+data_size-sizeof(last),last,sizeof(last));
+  read_and_check(&ewlf,area,expected,data_size);
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,expected,data_size);
   format_func(&nvmd); //resync nvm_ref with nvmd's pages
   SANITY_CHECK();
 }
@@ -1798,7 +1830,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 29
+  #define N_TESTS 30
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1901,6 +1933,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         //Hardcoded 0, ignoring --tear-cov: it cuts power at chosen points
         //itself, and an injected failure would change the expected error.
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_tearing_test,0);break;
+      case 30:TEAR_COV(100);test_and_simulate_tearing(ewlf_unaligned_size_test,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

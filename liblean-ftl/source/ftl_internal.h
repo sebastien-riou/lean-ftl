@@ -522,6 +522,20 @@ typedef struct lftl_meta_struct {
 } lftl_meta_t;
 
 /**
+ * \brief Physical size in bytes of an area's data: `data_size` rounded up to
+ * whole write units.
+ *
+ * Writes cover whole write units, so a slot or record always has room for
+ * that much data, even when `data_size` ends in the middle of a write unit.
+ *
+ * \param ctx Context of the LFTL area
+ */
+static uintptr_t data_phy_size(lftl_ctx_t*ctx){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  return LFTL_DIV_CEIL(ctx->data_size, write_size) * write_size;
+}
+
+/**
  * \brief Physical size in bytes of a slot's meta-data block.
  *
  * Each of the ::LFTL_META_N_ITEMS meta items (version, checksum,
@@ -857,8 +871,7 @@ static uintptr_t ewlf_header_phy_size(lftl_ctx_t*ctx){
  * \param ctx Context of the EWLF area
  */
 static uintptr_t ewlf_data_phy_size(lftl_ctx_t*ctx){
-  const uint32_t write_size = ctx->nvm_props->write_size;
-  return LFTL_DIV_CEIL(ctx->data_size, write_size) * write_size;
+  return data_phy_size(ctx);
 }
 
 /**
@@ -1276,7 +1289,8 @@ static void write_src_phy_addr_to_dst_phy_addr(
     nvm_write(dst_ctx,dst_ctx->nvm_props,dst_base+last_wu_offset, &wu, write_size);
   }
   if(!transaction){
-    const uintptr_t remaining = dst_ctx->data_size - end_offset;
+    //up to the data rounded up to whole write units, where end_offset may already be
+    const uintptr_t remaining = data_phy_size(dst_ctx) - end_offset;
     if(remaining){
       nvm_write(dst_ctx,dst_ctx->nvm_props,dst_base+end_offset, current_base + end_offset, remaining);
     }
@@ -1409,7 +1423,10 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
       size_aligned += write_size - size_aligned % write_size;
     }
   }
-  const void*const current_data_addr = translate_addr_ewlf(dst_ctx, (void*)dst_nvm_addr_aligned, size_aligned);
+  //locate the current record: the requested range is checked above, and once
+  //extended to whole write units it may end in the padding after data_size,
+  //which every record has room for (see data_phy_size)
+  const void*const current_data_addr = translate_addr_ewlf(dst_ctx, (void*)dst_nvm_addr_aligned, 0);
   const uintptr_t offset = (uintptr_t)current_data_addr - (uintptr_t)dst_ctx->data;
   const uintptr_t header_size = ewlf_header_phy_size(dst_ctx);
   const uint8_t*const current_record_addr = (uint8_t*)dst_ctx->data - header_size;

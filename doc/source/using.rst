@@ -192,6 +192,13 @@ https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, for CH32V307 
 https://github.com/sebastien-riou/lean-ftl/tree/main/target/ch32v307, and a RAM based
 one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
 
+.. note:: On flash with ECC that raises an NMI on a double-bit error (STM32L5, STM32U5),
+  a program or erase interrupted by a power cut can leave a word that faults when read,
+  and *lean-ftl* must read such words before it can skip them. The NMI handler must clear
+  the ECC error flag and return, so that the read completes; the STM32 callbacks above do
+  nothing about it, and a handler that loops or resets hangs the device at every boot.
+  See the integrator section of ``THREAT-MODEL.md`` in the repository.
+
 Declaring LFTL areas 
 ----------------------
 Each LFTL area has its volatile context maintained in a

@@ -749,22 +749,22 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
     src = __src8+__size;\
   }while(0)
 
-/// Set the same byte value on an entire LFTL area.
-#define LFTL_MEMSET_WHOLE_AREA(area,value) do{ \
-  uint8_t transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&area)]; \
-  lftl_transaction_start(&area, transaction_tracker); \
+/// Set the same byte value on an entire LFTL area (regular areas only: it uses a transaction).
+#define LFTL_MEMSET_WHOLE_AREA(ctx,value) do{ \
+  uint8_t transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&ctx)]; \
+  lftl_transaction_start(&ctx, transaction_tracker); \
   flash_sw_page_t buf; \
   memset(buf,value,sizeof(buf)); \
-  const unsigned int n_loops = area.data_size / sizeof(buf); \
-  uint32_t remaining = area.data_size; \
-  flash_sw_page_t*wr_addr = area.data; \
+  const unsigned int n_loops = ctx.data_size / sizeof(buf); \
+  uint32_t remaining = ctx.data_size; \
+  flash_sw_page_t*wr_addr = ctx.area; /*logical addresses: ctx.data is the current slot*/ \
   for(unsigned int i=0;i<n_loops;i++){ \
-    lftl_transaction_write(&area,wr_addr,buf,sizeof(buf)); \
+    lftl_transaction_write(&ctx,wr_addr,buf,sizeof(buf)); \
     remaining -= sizeof(buf); \
     wr_addr++; \
   } \
-  lftl_transaction_write(&area,wr_addr,buf,remaining); \
-  lftl_transaction_commit(&area); \
+  if(remaining) lftl_transaction_write(&ctx,wr_addr,buf,remaining); \
+  lftl_transaction_commit(&ctx); \
 }while(0)
 
 #endif

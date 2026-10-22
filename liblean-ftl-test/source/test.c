@@ -1378,6 +1378,53 @@ void ewlf_unaligned_size_test(){
   SANITY_CHECK();
 }
 
+//Read an area's whole data back in small chunks and check every byte
+static void check_whole_area(lftl_ctx_t*ctx, uint8_t value){
+  uint8_t*const area = (uint8_t*)ctx->area;
+  uint8_t expected[64];
+  memset(expected,value,sizeof(expected));
+  for(uintptr_t offset=0;offset<ctx->data_size;offset+=sizeof(expected)){
+    const uintptr_t remaining = ctx->data_size - offset;
+    read_and_check(ctx,area+offset,expected,remaining < sizeof(expected) ? remaining : sizeof(expected));
+  }
+}
+
+//LFTL_MEMSET_WHOLE_AREA once the current slot is not slot 0, and on data of
+//a whole number of pages (LFTL-006), in the scratch areas nvmc and nvmd: nvmd
+//itself, then one page of data in a context spanning both areas' pages (2
+//slots of 2 pages). That context is not registered, so area_type is set here.
+void memset_whole_area_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_format(&nvmd);
+  uint8_t buf[sizeof(nvm.data7)];
+  stateful_prng_fill(buf,sizeof(buf));
+  lftl_write(&nvmd,nvm.data7,buf,sizeof(buf)); //the current slot moves on
+  LFTL_MEMSET_WHOLE_AREA(nvmd,0x5A);
+  check_whole_area(&nvmd,0x5A);
+  nvmd.data = LFTL_INVALID_POINTER; //reset
+  check_whole_area(&nvmd,0x5A);
+
+  if((uint8_t*)&nvm.d_pages != (uint8_t*)&nvm.c_pages + sizeof(nvm.c_pages)) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+  lftl_ctx_t page = nvmc;
+  page.nvm_props = &nvm_props;
+  page.area_size = sizeof(nvm.c_pages) + sizeof(nvm.d_pages);
+  page.data = LFTL_INVALID_POINTER;
+  page.data_size = LFTL_PAGE_SIZE;
+  page.transaction_tracker = LFTL_INVALID_POINTER;
+  page.next = LFTL_INVALID_POINTER;
+  page.area_type = LFTL_AREA_TYPE_STD;
+  lftl_format(&page);
+  LFTL_MEMSET_WHOLE_AREA(page,0xA5);
+  check_whole_area(&page,0xA5);
+  LFTL_MEMSET_WHOLE_AREA(page,0x3C); //from the other slot
+  check_whole_area(&page,0x3C);
+  page.data = LFTL_INVALID_POINTER; //reset
+  check_whole_area(&page,0x3C);
+  format_func(&nvmc); //resync nvm_ref with nvmc's and nvmd's pages
+  format_func(&nvmd);
+  SANITY_CHECK();
+}
+
 void version_collision_test(){
   DEBUG_PRINTLN(__func__);
   uint8_t buf[sizeof(nvm.data7)];
@@ -1830,7 +1877,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 30
+  #define N_TESTS 31
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1934,6 +1981,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         //itself, and an injected failure would change the expected error.
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_tearing_test,0);break;
       case 30:TEAR_COV(100);test_and_simulate_tearing(ewlf_unaligned_size_test,tear_cov_log[i]);break;
+      case 31:TEAR_COV(100);test_and_simulate_tearing(memset_whole_area_test,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

@@ -659,20 +659,23 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 
 #define LFTL_PAGES(size) (LFTL_DIV_CEIL(size,LFTL_PAGE_SIZE))
 
+/// Size in bytes of one meta-data item (version, checksum, checksum2), as laid
+/// out at run time: one write unit, but at least sizeof(uint32_t).
+#define LFTL_META_ITEM_SIZE ((LFTL_WU_SIZE) > 4 ? (LFTL_WU_SIZE) : 4)
+
 /// Declare an LFTL area
 /// \param name Name of the LFTL area.
 /// \param area_content Members of the LFTL area.
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA(name, area_content, wear_leveling_factor) union {\
-  flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_WU_SIZE)*(wear_leveling_factor)];\
+  flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_META_ITEM_SIZE)*(wear_leveling_factor)];\
   struct {area_content} name##_data;\
   struct {area_content};\
   struct {area_content} _##name##_data;\
   };
 
-/// Effective write-unit size used for EWLF meta-data sizing — matches the
-/// runtime's floor of the meta item size at sizeof(uint32_t) (see meta_phy_size).
-#define LFTL_EWLF_WU_SIZE ((LFTL_WU_SIZE) > 4 ? (LFTL_WU_SIZE) : 4)
+/// Effective write-unit size used for EWLF meta-data sizing, same as ::LFTL_META_ITEM_SIZE.
+#define LFTL_EWLF_WU_SIZE LFTL_META_ITEM_SIZE
 
 #define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
 /// Size in bytes of one EWLF record of `area_content`, as laid out at run time:

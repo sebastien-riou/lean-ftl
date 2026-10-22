@@ -34,6 +34,15 @@ void throw_exception(uint32_t err_code){
 #include "ui.h"
 #include "nvm_state.h"
 
+//LFTL_AREA reserves room for the meta-data as laid out at run time: items of at
+//least 4 bytes, even with smaller write units. Data 8 bytes short of a page
+//then needs 2 pages per slot, so a wear-leveling factor of 2 needs 4 pages.
+typedef struct {
+  LFTL_AREA(macro_check, uint8_t macro_check_content[LFTL_PAGE_SIZE-8];, LFTL_WEAR_LEVELING_FACTOR(2))
+} lftl_area_macro_check_t;
+_Static_assert(sizeof(((lftl_area_macro_check_t*)0)->macro_check_pages) == 4*LFTL_PAGE_SIZE,
+  "LFTL_AREA must count meta-data items of at least 4 bytes");
+
 extern data_flash_t nvm;
 extern lftl_nvm_props_t nvm_props;
 extern lftl_ctx_t nvma;

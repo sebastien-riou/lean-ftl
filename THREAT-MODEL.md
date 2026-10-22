@@ -95,7 +95,7 @@ The attacker can only send messages to the application. They reach lean-ftl thro
 
 ### Findings
 
-Every finding was reproduced at 501de63, on a host build with AddressSanitizer and UndefinedBehaviorSanitizer, by `lftl_asan_harness.c`. The harness uses RAM-backed callbacks and an `error_handler` that `longjmp`s, as the documentation recommends; for LF-9 and LF-10 it also cuts power at chosen writes or erases, and models NOR flash or STM32U5-class flash. Since 5517f9a, every harness test ends in the error handler or reads back the newest data, with no sanitizer report. Each finding also has a regression test in `liblean-ftl-test/source/test.c` (test numbers below), which fails without its fix. These tests run on the Linux NVM simulator, whose write callback refuses to program a write unit that is not erased. The issue column describes 501de63, and its line numbers refer to that commit.
+Every finding was reproduced at 501de63, on a host build with AddressSanitizer and UndefinedBehaviorSanitizer, by `test/asan/asan_harness.c`. The harness uses RAM-backed callbacks and an `error_handler` that `longjmp`s, as the documentation recommends; for LF-9 and LF-10 it also cuts power at chosen writes or erases, and models NOR flash or STM32U5-class flash. Since 5517f9a, every harness test ends in the error handler or reads back the newest data, with no sanitizer report. Each finding also has a regression test in `liblean-ftl-test/source/test.c` (test numbers below), which fails without its fix. These tests run on the Linux NVM simulator, whose write callback refuses to program a write unit that is not erased. The issue column describes 501de63, and its line numbers refer to that commit.
 
 | ID | Issue at 501de63 | Trigger | Impact | Fixed in | Regression test |
 | --- | --- | --- | --- | --- | --- |
@@ -199,7 +199,7 @@ The regression tests above run in `testit` with the tearing simulation, on a sim
 
 Also worth doing: a bounded model check (CBMC or Frama-C) of `check_in_data()`, `is_in_range()`, the tracker indexing and the EWLF record placement in `find_current_record()` and `write_ewlf_core()`, which carry most of the memory-safety burden. In CI, build with `-Wconversion`, since `offset_wu` is a `uint32_t` derived from a `uintptr_t`.
 
-`lftl_asan_harness.c` (about 290 lines) reproduces the findings at 501de63 and checks the fixed behaviour since 5517f9a: an 8-page RAM-backed NVM with 256-byte pages, one area per test, `memcpy` callbacks that report any range outside the area, a `longjmp` handler, switchable NOR and STM32U5 write semantics, and power cuts at a chosen write or erase. Build and run instructions are in its header. It can seed the API fuzzer.
+`test/asan/asan_harness.c` (about 290 lines) reproduces the findings at 501de63 and checks the fixed behaviour since 5517f9a: an 8-page RAM-backed NVM with 256-byte pages, one area per test, `memcpy` callbacks that report any range outside the area, a `longjmp` handler, switchable NOR and STM32U5 write semantics, and power cuts at a chosen write or erase. `test/asan/build-and-run` builds it and runs every test under the sanitizers, checking each expected result; it fails on all 13 tests with the 501de63 library. It can seed the API fuzzer.
 
 ## Sources
 

@@ -65,7 +65,7 @@ the macro :c:macro:`LFTL_AREA`.
 
 .. note:: Members declared inside an LFTL area can be of any type however,
   in an area declared with :c:macro:`LFTL_AREA`, together they must occupy a
-  multiple of ``LFTL_WU_SIZE``: pad them if needed, :func:`lftl_register_area`
+  multiple of ``LFTL_WU_SIZE``: pad them if needed, :c:func:`lftl_register_area`
   raises :c:macro:`LFTL_ERROR_BAD_CONFIG` otherwise.
 
 Choosing the wear leveling factor
@@ -116,12 +116,12 @@ same way as :c:macro:`LFTL_AREA`, just replace the macro name:
   data_flash_t nvm;
 
 An area declared with :c:macro:`LFTL_AREA_EWLF` must be registered with
-:func:`lftl_register_area_ewlf` instead of :func:`lftl_register_area`.
+:c:func:`lftl_register_area_ewlf` instead of :c:func:`lftl_register_area`.
 Formatting, reading and writing work the same way as for a regular area,
-but EWLF areas do not support transactions: :func:`lftl_transaction_start`
+but EWLF areas do not support transactions: :c:func:`lftl_transaction_start`
 raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. A record, the area
 content plus a header, must fit in one page, and the NVM's erased bytes must
-read ``0xFF``. Use :func:`lftl_is_ewlf` if you need to tell,
+read ``0xFF``. Use :c:func:`lftl_is_ewlf` if you need to tell,
 given a context, whether it refers to an EWLF area or a regular one.
 
 Single LFTL area vs many
@@ -157,7 +157,7 @@ at least 2 NVM pages, even if the data is much smaller.
 Declaring NVM properties
 --------------------------
 *lean-ftl* needs to know few basic properties of the target(s) NVM(s).
-The integrator shall declare one :type:`lftl_nvm_props_t` for each targeted NVM.
+The integrator shall declare one :c:type:`lftl_nvm_props_t` for each targeted NVM.
 
 .. code-block:: c
   :linenos:
@@ -182,10 +182,10 @@ Implementing the callbacks
 In order to use LFTL, the following callbacks needs to be implemented
 on your target platform:
 
-- :type:`nvm_erase_t`
-- :type:`nvm_write_t`
-- :type:`nvm_read_t`
-- :type:`error_handler_t`
+- :c:type:`nvm_erase_t`
+- :c:type:`nvm_write_t`
+- :c:type:`nvm_read_t`
+- :c:type:`error_handler_t`
 
 You can find an implementation of those callbacks for STM32U5 and STM32L5 in 
 https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, for CH32V307 in
@@ -195,7 +195,7 @@ one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/lin
 Declaring LFTL areas 
 ----------------------
 Each LFTL area has its volatile context maintained in a
-:type:`lftl_ctx_t` struct.
+:c:type:`lftl_ctx_t` struct.
 
 .. code-block:: c
   :linenos:
@@ -223,8 +223,8 @@ Each LFTL area has its volatile context maintained in a
 
 Library initialization
 ------------------------
-After a power up, the library must be initialized using :func:`lftl_init_lib`.
-Each area must be registered using :func:`lftl_register_area`.
+After a power up, the library must be initialized using :c:func:`lftl_init_lib`.
+Each area must be registered using :c:func:`lftl_register_area`.
 
 .. code-block:: C
   :linenos:
@@ -238,7 +238,7 @@ Each area must be registered using :func:`lftl_register_area`.
 
 Initial formatting
 ------------------------
-Each LFTL area must be formatted before being used. This is done using :func:`lftl_format`.
+Each LFTL area must be formatted before being used. This is done using :c:func:`lftl_format`.
 
 .. code-block:: c
   :linenos:

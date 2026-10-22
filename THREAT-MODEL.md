@@ -7,13 +7,13 @@ lean-ftl is assessed against two objectives, one for each way it can be deployed
 1. **On-chip or otherwise trusted NVM (Case 1).** The attacker can only send messages to the application and cut its power. lean-ftl must keep committed data atomic and fresh, must not let logical actions brick the device, and must never give access to unrelated RAM or flash, or code execution (objectives O1 to O4).
 2. **External NVM (Case 2).** The attacker can also read and write the NVM at any time, and control its bus. lean-ftl does not protect the data then, but no NVM content or bus response may give access to the internal address space, or code execution (objective O5).
 
-At commit 0a5321a, lean-ftl meets both objectives for regular and EWLF areas, within the assumptions below. NVM content only picks among fixed slot or record positions inside an area, API arguments are range-checked without overflow, an error aborts the transaction it interrupts, bad configurations are refused at registration, and EWLF writes only program erased cells. What remains is by design or up to the integrator: `lftl_memread()` and write sources accept any pointer (T1.7), messages can drive wear-out (T1.5), `lftl_format()` is not anti-tearing (T1.6), flash with ECC needs an NMI handler that lets a read of a torn word complete (T1.13), and external NVM needs a careful driver and careful parsing (T2.3 to T2.8).
+At commit 14b3532, lean-ftl meets both objectives for regular and EWLF areas, within the assumptions below. NVM content only picks among fixed slot or record positions inside an area, API arguments are range-checked without overflow, an error aborts the transaction it interrupts, bad configurations are refused at registration, and EWLF writes only program erased cells. What remains is by design or up to the integrator: `lftl_memread()` and write sources accept any pointer (T1.7), messages can drive wear-out (T1.5), `lftl_format()` is not anti-tearing (T1.6), flash with ECC needs an NMI handler that lets a read of a torn word complete (T1.13), and external NVM needs a careful driver and careful parsing (T2.3 to T2.8).
 
 No finding is open. As in ISSUES.md, findings are removed from this document once fixed; git history keeps them, including LF-1 to LF-12, which some test comments still name. Open work items are tracked in ISSUES.md.
 
 ## Scope and system overview
 
-This model covers the core library, `liblean-ftl/source/ftl.c`, `liblean-ftl/source/ftl_internal.h` and `liblean-ftl/include/lean-ftl.h`, at [commit 0a5321a](https://github.com/sebastien-riou/lean-ftl/tree/0a5321a) (2026-10-22, branch `main`), as integrated on a bare-metal MCU. Example code, the reference callbacks under `target/` and the test harnesses are out of scope, except where the integrator contract depends on them.
+This model covers the core library, `liblean-ftl/source/ftl.c`, `liblean-ftl/source/ftl_internal.h` and `liblean-ftl/include/lean-ftl.h`, at [commit 14b3532](https://github.com/sebastien-riou/lean-ftl/tree/14b3532) (2026-10-22, branch `main`), as integrated on a bare-metal MCU. Example code, the reference callbacks under `target/` and the test harnesses are out of scope, except where the integrator contract depends on them.
 
 How lean-ftl works, as far as security is concerned:
 
@@ -185,7 +185,7 @@ Also worth doing: a bounded model check (CBMC or Frama-C) of `check_in_data()`, 
 
 ## Sources
 
-- [lean-ftl source](https://github.com/sebastien-riou/lean-ftl), `liblean-ftl/` at commit 0a5321a (2026-10-22, branch `main`), Apache-2.0
+- [lean-ftl source](https://github.com/sebastien-riou/lean-ftl), `liblean-ftl/` at commit 14b3532 (2026-10-22, branch `main`), Apache-2.0
 - `EWLF.md` and `ISSUES.md` in the same repository, at the same commit
 - [lean-ftl API reference](https://lean-ftl.readthedocs.io/en/latest/api.html)
 - [lean-ftl user guide](https://lean-ftl.readthedocs.io/en/latest/using.html)

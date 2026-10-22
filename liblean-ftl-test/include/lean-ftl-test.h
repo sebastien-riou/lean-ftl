@@ -107,5 +107,6 @@ lftl_ctx_t nvmd = {
 };
 
 
-int test_main();
+//without a command line (firmware), call test_main(0,NULL,NULL)
+int test_main(int argc, const char*argv[], bool consumed[]);
 void test_callbacks();

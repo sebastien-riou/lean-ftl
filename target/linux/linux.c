@@ -94,7 +94,7 @@ const char*save_nvm_file_name = 0;
 uint32_t nvm_alignement;
 
 uint32_t get_nvm_alignement(){
-  const uint32_t max_alignement = 1<<31;
+  const uint32_t max_alignement = 1u<<31;
   uintptr_t base = ((uintptr_t)&nvm);
   if(0==base) return max_alignement;
   uintptr_t alignement = 1;

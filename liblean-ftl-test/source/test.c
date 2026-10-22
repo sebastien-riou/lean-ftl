@@ -104,6 +104,15 @@ typedef void (*write_func_t)(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const 
 void (*format_func)(lftl_ctx_t*ctx);
 uint8_t (*raw_nvm_write_func)(void*dst_nvm_addr, const void*const src, uintptr_t size);
 uint8_t (*raw_nvm_erase_func)(void*base_address, unsigned int n_pages);
+
+//Raw NVM accesses build test states directly, bypassing lean-ftl. They must
+//succeed: on real flash, that means programming erased, whole write units.
+static void raw_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  if(raw_nvm_write_func(dst_nvm_addr,src,size)) throw_exception(INTERNAL_ERROR_NVM_WRITE);
+}
+static void raw_erase(void*base_address, unsigned int n_pages){
+  if(raw_nvm_erase_func(base_address,n_pages)) throw_exception(INTERNAL_ERROR_NVM_WRITE);
+}
 void (*erase_all_func)(lftl_ctx_t*ctx);
 write_func_t write_func;
 write_func_t write_any_func;
@@ -172,6 +181,20 @@ void tearing_sim_lftl_format(lftl_ctx_t*ctx){
   memcpy(dst+offset,base,size);
 }
 uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  //refuse what nvm_write refuses, so that tests only build states real flash can hold
+  if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
+  if(0 != (size % nvm_write_size)) return 4;
+  const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr;
+  const uint8_t*const src8 = (const uint8_t*)src;
+  for(uintptr_t i=0;i<size;i+=nvm_write_size){
+    bool erased = 1;
+    bool zero = 1;
+    for(uintptr_t j=i;j<i+nvm_write_size;j++){
+      if(0xFF != dst8[j]) erased = 0;
+      if(0x00 != src8[j]) zero = 0;
+    }
+    if(!erased && !zero) return 5;
+  }
   //update previous state
   nvm_ref_previous_state = nvm_ref;
   //compute new state
@@ -478,10 +501,10 @@ void write_nvm_to_nvm_test_core(unsigned int dst_offset, void*test_storage, unsi
   if(test_storage_size>MAX_NVM_TO_NVM_TEST_SIZE_IN_WU*sizeof(lftl_wu_t)) throw_exception(INTERNAL_ERROR_CORRUPT);
   stateful_prng_fill(test_storage, test_storage_size);
   SANITY_CHECK();
-  raw_nvm_erase_func(&nvm.unmanaged_data0,1);
+  raw_erase(&nvm.unmanaged_data0,1);
   lftl_wu_t aligned_test_storage[4] = {0};//always write 4 WU because implementations may need a multiple of WU size
   memcpy(aligned_test_storage,test_storage,test_storage_size);
-  raw_nvm_write_func(&nvm.unmanaged_data0,aligned_test_storage ,sizeof(aligned_test_storage));
+  raw_write(&nvm.unmanaged_data0,aligned_test_storage ,sizeof(aligned_test_storage));
   SANITY_CHECK();
 
   lftl_wu_t*base_b = (lftl_wu_t*)&nvm.b_data;
@@ -800,8 +823,8 @@ void memread_newer_test(){
   //physical NVM address outside of any LFTL area: falls back to nvm_read
   uint8_t wbuf[16];
   stateful_prng_fill(wbuf,sizeof(wbuf));
-  raw_nvm_erase_func(&nvm.unmanaged_data0,1);
-  raw_nvm_write_func(&nvm.unmanaged_data0,wbuf,sizeof(wbuf));
+  raw_erase(&nvm.unmanaged_data0,1);
+  raw_write(&nvm.unmanaged_data0,wbuf,sizeof(wbuf));
   uint8_t rbuf[16];
   lftl_memread_newer(rbuf,&nvm.unmanaged_data0,sizeof(wbuf));
   if(memcmp(rbuf,wbuf,sizeof(wbuf))) throw_exception(ERROR_VERIFICATION_FAIL);
@@ -1166,55 +1189,65 @@ void ewlf_grid_test(){
   lftl_nvm_props_t props = nvm_props3;
   props.read = area_checked_nvm_read;
   props.next = LFTL_INVALID_POINTER;
+  const uint32_t write_size = props.write_size;
+  const uintptr_t magic_size = write_size > 8 ? write_size : 8;
+  const uintptr_t flag_size = write_size;
+  const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t header_size = magic_size + flag_size + LFTL_META_N_ITEMS*item_size;
+  //the data is 4 headers long, so a forged header fits in it whatever the write unit
+  const uintptr_t data_size = 4*header_size;
+  const uintptr_t record_size = LFTL_ROUND_UP(header_size + data_size,8);
   lftl_ctx_t ewlf = nvmd;
   ewlf.nvm_props = &props;
   ewlf.data = LFTL_INVALID_POINTER;
-  ewlf.data_size = 64;
+  ewlf.data_size = data_size;
   ewlf.transaction_tracker = LFTL_INVALID_POINTER;
   ewlf.next = LFTL_INVALID_POINTER;
   ewlf.area_type = LFTL_AREA_TYPE_EWLF;
   uint8_t*const area = (uint8_t*)ewlf.area;
   checked_area_lo = area;
   checked_area_hi = area + ewlf.area_size;
-  const uint32_t write_size = props.write_size;
-  const uintptr_t magic_size = write_size > 8 ? write_size : 8;
-  const uintptr_t flag_size = write_size;
-  const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
-  const uintptr_t header_size = magic_size + flag_size + LFTL_META_N_ITEMS*item_size;
-  const uintptr_t record_size = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(ewlf.data_size,write_size),8);
   const uint64_t magic = 0x2CF292E376D73985ull; //EWLF_MAGIC
 
   //LF-10: d2's write is cut before its header, and its data holds a whole
   //forged record at an 8-byte aligned offset that is not a record position.
   lftl_format(&ewlf);
-  uint8_t d1[64];
-  stateful_prng_fill(d1,sizeof(d1));
-  lftl_write(&ewlf,area,d1,sizeof(d1));
+  uint8_t d1[data_size];
+  stateful_prng_fill(d1,data_size);
+  lftl_write(&ewlf,area,d1,data_size);
   uint8_t*const current = ((uint8_t*)ewlf.data) - header_size;
   uint8_t*const torn = current - record_size;
   uint8_t*const torn_data = torn + header_size;
   uintptr_t forged_offset = 0;
   while(0 != ((uintptr_t)(torn_data + forged_offset - area) % 8)) forged_offset++;
-  uint8_t*const forged = torn_data + forged_offset;
-  uint8_t d2[64];
-  memset(d2,0xFF,sizeof(d2));
+  uint8_t d2[data_size];
+  memset(d2,0xFF,data_size);
   memcpy(d2+forged_offset,&magic,sizeof(magic));
   const uint32_t version = 1000;
-  memcpy(d2+forged_offset+magic_size+flag_size,&version,sizeof(version));
-  raw_nvm_write_func(torn_data,d2,sizeof(d2));
-  //its checksum covers the 64 bytes after its header, wherever they are
-  uint8_t forged_data[64];
-  lftl_memread(forged_data,forged+header_size,sizeof(forged_data));
-  const uint32_t sum = test_crc32c(0xFFFFFFFF,forged_data,sizeof(forged_data)) + version;
-  memcpy(d2+forged_offset+magic_size+flag_size+item_size,&sum,sizeof(sum));
-  memcpy(d2+forged_offset+magic_size+flag_size+2*item_size,&sum,sizeof(sum));
-  raw_nvm_write_func(torn_data,d2,sizeof(d2));
+  uint8_t*const forged_meta = d2+forged_offset+magic_size+flag_size;
+  memcpy(forged_meta,&version,sizeof(version));
+  //its checksum covers the data_size bytes after its header: the end of d2,
+  //then cells past d2 that are already programmed or erased
+  uint8_t forged_data[data_size];
+  for(uintptr_t i=0;i<data_size;i++){
+    const uintptr_t d2_index = forged_offset + header_size + i;
+    if(d2_index < data_size) forged_data[i] = d2[d2_index];
+    else lftl_memread(forged_data+i,torn_data+d2_index,1);
+  }
+  const uint32_t sum = test_crc32c(0xFFFFFFFF,forged_data,data_size) + version;
+  memcpy(forged_meta+item_size,&sum,sizeof(sum));
+  memcpy(forged_meta+2*item_size,&sum,sizeof(sum));
+  raw_write(torn_data,d2,data_size);
   ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d1,sizeof(d1));
+  read_and_check(&ewlf,area,d1,data_size);
 
-  //LF-12: an area without any valid record, holding a magic in its last 8 bytes
-  raw_nvm_erase_func(area,ewlf.area_size/props.erase_size);
-  raw_nvm_write_func(area+ewlf.area_size-sizeof(magic),&magic,sizeof(magic));
+  //LF-12: an area without any valid record, holding a magic in its last 8
+  //bytes, written as a whole write unit
+  raw_erase(area,ewlf.area_size/props.erase_size);
+  uint8_t last_unit[magic_size];
+  memset(last_unit,0xFF,magic_size);
+  memcpy(last_unit+magic_size-sizeof(magic),&magic,sizeof(magic));
+  raw_write(area+ewlf.area_size-magic_size,last_unit,magic_size);
   ewlf.data = LFTL_INVALID_POINTER; //reset
   out_of_area_read = 0;
   uint8_t buf[64];
@@ -1235,26 +1268,28 @@ static uint8_t failing_once_nvm_erase(void*base_address, unsigned int n_pages){
 //nvmd's pages: a copy of nvmd's context and NVM properties, not registered.
 //nvm_write refuses to program cells that are not erased, like STM32U5-class
 //flash, so a write landing on a partial or complete record raises an error.
-//1000-byte data makes 1024-byte records, 4 per erase unit.
+//About 1000 bytes of data, rounded to whole write units (ISSUES.md LFTL-005),
+//make records of about 1 KB: 4 per 4 KB erase unit, 7 per 8 KB one.
 void ewlf_tearing_test(){
   DEBUG_PRINTLN(__func__);
   lftl_nvm_props_t props = nvm_props3;
   props.erase = failing_once_nvm_erase;
   props.next = LFTL_INVALID_POINTER;
+  const uint32_t write_size = props.write_size;
+  const uintptr_t data_size = LFTL_ROUND_UP(1000,write_size);
   lftl_ctx_t ewlf = nvmd;
   ewlf.nvm_props = &props;
   ewlf.data = LFTL_INVALID_POINTER;
-  ewlf.data_size = 1000;
+  ewlf.data_size = data_size;
   ewlf.transaction_tracker = LFTL_INVALID_POINTER;
   ewlf.next = LFTL_INVALID_POINTER;
   ewlf.area_type = LFTL_AREA_TYPE_EWLF;
   uint8_t*const area = (uint8_t*)ewlf.area;
-  const uint32_t write_size = props.write_size;
   const uintptr_t magic_size = write_size > 8 ? write_size : 8;
   const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
   const uintptr_t header_size = magic_size + write_size + LFTL_META_N_ITEMS*item_size;
-  const uintptr_t record_size = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(ewlf.data_size,write_size),8);
-  uint8_t d[1000];
+  const uintptr_t record_size = LFTL_ROUND_UP(header_size + data_size,8);
+  uint8_t d[data_size];
 
   //a write cut while writing data leaves a partial record right below the
   //current one: the next write must not program over it
@@ -1262,9 +1297,9 @@ void ewlf_tearing_test(){
   stateful_prng_fill(d,sizeof(d));
   lftl_write(&ewlf,area,d,sizeof(d));
   uint8_t*const torn_data = ((uint8_t*)ewlf.data) - record_size;
-  uint8_t partial[100];
+  uint8_t partial[LFTL_ROUND_UP(100,write_size)];
   stateful_prng_fill(partial,sizeof(partial));
-  raw_nvm_write_func(torn_data,partial,sizeof(partial));
+  raw_write(torn_data,partial,sizeof(partial));
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d,sizeof(d));
   stateful_prng_fill(d,sizeof(d));
@@ -1329,10 +1364,15 @@ void version_collision_test(){
   //failing that check and never reach the collision comparison at all. A
   //full byte-for-byte copy makes both slots equally self-consistent for
   //the same version, which is what actually triggers the collision.
-  uint8_t full_slot_buf[slot_size];
-  lftl_memread(full_slot_buf, current_slot_base, slot_size);
-  raw_nvm_write_func(other_slot_base, full_slot_buf, slot_size);
-  SANITY_CHECK(); //the duplicated bytes are outside any area's logical data, so nvm_ref sync is unaffected
+  //The other slot is erased first, since real flash only programs erased
+  //cells, then the copy goes in chunks to keep the stack small on targets.
+  raw_erase(other_slot_base, n_pages_in_slot);
+  uint64_t chunk[32];//256 bytes, a whole number of write units
+  for(uintptr_t offset=0;offset<slot_size;offset+=sizeof(chunk)){
+    lftl_memread(chunk, current_slot_base+offset, sizeof(chunk));
+    raw_write(other_slot_base+offset, chunk, sizeof(chunk));
+  }
+  SANITY_CHECK(); //nvmd is not among the areas SANITY_CHECK compares
 
   //force a fresh slot search: two slots now share the same version number
   nvmd.data = LFTL_INVALID_POINTER;
@@ -1342,7 +1382,7 @@ void version_collision_test(){
   //LFTL_ERROR_NO_VALID_VERSION: erase nvmd's raw pages directly (bypassing
   //lftl_format's write_meta), so every slot reads as fully erased
   //(version == 0xFFFFFFFF) and none is valid.
-  raw_nvm_erase_func(nvmd.area, nvmd.area_size/erase_size);
+  raw_erase(nvmd.area, nvmd.area_size/erase_size);
   nvmd.data = LFTL_INVALID_POINTER;
   EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&nvmd,buf,nvm.data7,sizeof(buf)));
   //same when a transaction is the first access, and the failed start must
@@ -1384,9 +1424,9 @@ void torn_checksum2_test_core(bool partial){
   uint8_t meta_img[meta_phy_size];
   lftl_memread(data_img,slot,nvmd.data_size);
   lftl_memread(meta_img,meta,meta_phy_size);
-  raw_nvm_erase_func(slot,n_pages_in_slot);
-  raw_nvm_write_func(slot,data_img,nvmd.data_size);
-  raw_nvm_write_func(meta,meta_img,meta_phy_size - item_size); //version and checksum
+  raw_erase(slot,n_pages_in_slot);
+  raw_write(slot,data_img,nvmd.data_size);
+  raw_write(meta,meta_img,meta_phy_size - item_size); //version and checksum
   if(partial){
     //the last programmed byte of checksum2's value still reads erased
     uint8_t*const checksum2_img = meta_img + meta_phy_size - item_size;
@@ -1396,7 +1436,7 @@ void torn_checksum2_test_core(bool partial){
         break;
       }
     }
-    raw_nvm_write_func(checksum2,checksum2_img,item_size);
+    raw_write(checksum2,checksum2_img,item_size);
   }
 
   //force a fresh slot search: it finds the torn slot and recovers its data

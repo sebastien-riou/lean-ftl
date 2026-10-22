@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <setjmp.h>
 #include <string.h>
+#include <stdlib.h>
 #include "error.h"
 #include "util.h"
 
@@ -676,6 +677,7 @@ void ewlf_basic_test(){
 //own erase units (skips ctx->area's own page range computation duplicating
 //ftl_internal.h's private record layout: this only needs page granularity,
 //which is already public via ctx->area/ctx->area_size/LFTL_PAGE_SIZE).
+#ifdef HAS_TEARING_SIMULATION
 uint32_t ewlf_area_erase_cnt_sum(lftl_ctx_t*ctx){
   const unsigned int first_page = ((uintptr_t)ctx->area - (uintptr_t)&nvm) / LFTL_PAGE_SIZE;
   const unsigned int n_area_pages = ctx->area_size / LFTL_PAGE_SIZE;
@@ -685,6 +687,15 @@ uint32_t ewlf_area_erase_cnt_sum(lftl_ctx_t*ctx){
   }
   return sum;
 }
+#else
+//erase_cnt[] only exists in the tearing simulation: on a target there is
+//nothing to count, and the checks based on it are skipped
+uint32_t ewlf_area_erase_cnt_sum(lftl_ctx_t*ctx){
+  (void)ctx;
+  return 0;
+}
+static const bool erase_cnt_enabled = 0;
+#endif
 
 void ewlf_packing_test(){
   DEBUG_PRINTLN(__func__);
@@ -884,7 +895,7 @@ void memread_newer_test(){
     }\
     memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
     if(__err_code != (uint32_t)(expected_err_code)){\
-      PRINTF("ERROR: expected err_code 0x%08x but got 0x%08x\n",(unsigned)(expected_err_code),__err_code);\
+      PRINTF("ERROR: expected err_code 0x%08x but got 0x%08x\n",(unsigned)(expected_err_code),(unsigned)__err_code);\
       abort();\
     }\
   }while(0)
@@ -988,11 +999,13 @@ void transaction_misuse_test(){
   //tearing_sim_lftl_transaction_write) since lftl_write itself isn't wrapped
   //for the transactional case the way write_func/write_any_func are.
   transaction_start_func(&nvma,tracker);
+  #ifdef HAS_TEARING_SIMULATION
   {
     uintptr_t offset = (uintptr_t)nvm.data0 - (uintptr_t)&nvm;
     uint8_t*dst = (uint8_t*)&transaction_buf_ref;
     lftl_memread(dst+offset,buf,write_size);
   }
+  #endif
   lftl_write(&nvma,nvm.data0,buf,write_size);
   read_newer_and_check(&nvma,nvm.data0,buf,write_size);
   transaction_commit_func(&nvma);
@@ -1913,9 +1926,9 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       PRINTLN("All tests PASSED");
     }else{
       if(last_index > first_index + 1){
-        PRINTLN("Tests %lu to %lu PASSED",first_index,last_index);
+        PRINTLN("Tests %lu to %lu PASSED",(unsigned long)first_index,(unsigned long)last_index);
       }else{
-        PRINTLN("Test %lu PASSED",first_index);
+        PRINTLN("Test %lu PASSED",(unsigned long)first_index);
       }
     }
   #else

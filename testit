@@ -25,3 +25,6 @@ gcc -O0 -g3 -ggdb ../../examples/single_area/main.c ../../target/linux/linux.c -
 ./hello
 
 ./single_area
+
+#ASan harness of the threat model, also always built for linux
+../../test/asan/build-and-run

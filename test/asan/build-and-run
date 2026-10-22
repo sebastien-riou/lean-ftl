@@ -44,6 +44,8 @@ fi
 
 # several tests leave on purpose through longjmp with a tracker still allocated
 export ASAN_OPTIONS=detect_leaks=0
+# ASan refuses to start if another library is preloaded first (stdbuf does that)
+unset LD_PRELOAD
 
 FAILED=0
 for t in "${TESTS[@]}"; do

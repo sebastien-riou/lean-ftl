@@ -12,6 +12,10 @@ lftl_nvm_props_t nvm_props = {
     .size = sizeof(nvm),
     .write_size = LFTL_WU_SIZE,
     .erase_size = LFTL_PAGE_SIZE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
   };
 
 lftl_ctx_t nvma = {
@@ -20,10 +24,6 @@ lftl_ctx_t nvma = {
   .area_size = sizeof(nvm.a_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.a_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER,
   .next = LFTL_INVALID_POINTER
 };
@@ -34,13 +34,79 @@ lftl_ctx_t nvmb = {
   .area_size = sizeof(nvm.b_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.b_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER,
   .next = LFTL_INVALID_POINTER
 };
 
-int test_main();
+lftl_ctx_t ewlfa = {
+  .nvm_props = &nvm_props,
+  .area = &nvm.ewlfa_pages,
+  .area_size = sizeof(nvm.ewlfa_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.ewlfa_data),
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
+
+lftl_ctx_t ewlfb = {
+  .nvm_props = &nvm_props,
+  .area = &nvm.ewlfb_pages,
+  .area_size = sizeof(nvm.ewlfb_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.ewlfb_data),
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
+// A second, independently registered lftl_nvm_props_t, scoped to just the
+// "c" area, used by multi_nvm_test to exercise the multi-NVM linked list.
+lftl_nvm_props_t nvm_props2 = {
+    .base = &nvm.c_pages,
+    .size = sizeof(nvm.c_pages),
+    .write_size = LFTL_WU_SIZE,
+    .erase_size = LFTL_PAGE_SIZE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
+  };
+
+lftl_ctx_t nvmc = {
+  .nvm_props = &nvm_props2,
+  .area = &nvm.c_pages,
+  .area_size = sizeof(nvm.c_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.c_data),
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
+// A third, independently registered lftl_nvm_props_t, scoped to just the
+// "d" area, used by multi_nvm_test to exercise the multi-NVM linked list
+// with more than two registered NVMs.
+lftl_nvm_props_t nvm_props3 = {
+    .base = &nvm.d_pages,
+    .size = sizeof(nvm.d_pages),
+    .write_size = LFTL_WU_SIZE,
+    .erase_size = LFTL_PAGE_SIZE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
+  };
+
+lftl_ctx_t nvmd = {
+  .nvm_props = &nvm_props3,
+  .area = &nvm.d_pages,
+  .area_size = sizeof(nvm.d_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.d_data),
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
+
+
+//without a command line (firmware), call test_main(0,NULL,NULL)
+int test_main(int argc, const char*argv[], bool consumed[]);
 void test_callbacks();

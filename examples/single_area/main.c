@@ -45,6 +45,10 @@ lftl_nvm_props_t nvm_props = {
     .size = sizeof(nvm),
     .write_size = LFTL_WU_SIZE,
     .erase_size = LFTL_PAGE_SIZE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
   };
 lftl_ctx_t nvdata = {
   .nvm_props = &nvm_props,
@@ -52,10 +56,6 @@ lftl_ctx_t nvdata = {
   .area_size = sizeof(nvm.nvdata_pages),
   .data = LFTL_INVALID_POINTER,
   .data_size = sizeof(nvm.nvdata_data),
-  .erase = nvm_erase,
-  .write = nvm_write,
-  .read = nvm_read,
-  .error_handler = throw_exception,
   .transaction_tracker = LFTL_INVALID_POINTER
 };
 

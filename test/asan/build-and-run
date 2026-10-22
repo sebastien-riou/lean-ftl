@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Builds test/asan/asan_harness.c with lean-ftl under AddressSanitizer and
+# UndefinedBehaviorSanitizer, runs its tests and checks each outcome: no
+# sanitizer report, no callback access outside the area under test, and the
+# expected result (see the header of asan_harness.c).
+#
+# Usage: test/asan/build-and-run [test number]...   (default: all tests)
+
+set -e
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OUTDIR="$ROOT/build/asan"
+mkdir -p "$OUTDIR"
+
+gcc -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all \
+  -I"$ROOT/liblean-ftl/include" \
+  -DGIT_VERSION=asan -DVERSION_TIMESTAMP=0 -DBUILD_TYPE=asan \
+  "$ROOT/test/asan/asan_harness.c" "$ROOT/liblean-ftl/source/ftl.c" \
+  -o "$OUTDIR/asan_harness"
+
+# a line each test must print, indexed by test number
+EXPECTED=(
+  ""
+  "error_handler(0x3)"          # 1  LF-1: FIRST_NOT_IN_DATA
+  "error_handler(0x4)"          # 2  LF-2: LAST_NOT_IN_DATA
+  "error_handler(0x4)"          # 3  LF-3: LAST_NOT_IN_DATA
+  "no error raised"             # 4  LF-5
+  "transaction_tracker cleared" # 5  LF-4
+  "no error raised"             # 6  LF-8
+  "after d3    : 3c 3c 3c 3c"   # 7  LF-9, NOR flash
+  "after d3    : 3c 3c 3c 3c"   # 8  LF-9, STM32U5-like flash
+  "after reset : a5 a5 a5 a5"   # 9  LF-9, NOR flash
+  "after reset : a5 a5 a5 a5"   # 10 LF-9, STM32U5-like flash
+  "matches d1: yes"             # 11 LF-10
+  "error_handler(0xc)"          # 12 LF-11: BAD_CONFIG
+  "error_handler(0x2)"          # 13 LF-12: NO_VALID_VERSION
+)
+
+TESTS=("$@")
+if [ ${#TESTS[@]} -eq 0 ]; then
+  TESTS=($(seq 1 $((${#EXPECTED[@]} - 1))))
+fi
+
+# several tests leave on purpose through longjmp with a tracker still allocated
+export ASAN_OPTIONS=detect_leaks=0
+# ASan refuses to start if another library is preloaded first (stdbuf does that)
+unset LD_PRELOAD
+
+FAILED=0
+for t in "${TESTS[@]}"; do
+  rc=0
+  out=$("$OUTDIR/asan_harness" "$t" 2>&1) || rc=$?
+  if [ $rc -ne 0 ] \
+     || grep -q -e "outside the area" -e "Sanitizer" -e "runtime error" <<< "$out" \
+     || ! grep -q -F -- "${EXPECTED[$t]:-unknown test}" <<< "$out"; then
+    echo "test $t FAILED (exit code $rc):"
+    echo "$out"
+    FAILED=1
+  else
+    echo "test $t passed"
+  fi
+done
+
+if [ $FAILED -ne 0 ]; then
+  echo "ASan tests FAILED"
+  exit 1
+fi
+echo "ASan tests PASSED"

@@ -16,3 +16,6 @@ git_untracked.log
 act_artifacts/
 xpacks/
 lean-ftl.tar.gz
+.venv
+.claude
+git_ignore

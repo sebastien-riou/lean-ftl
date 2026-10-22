@@ -130,6 +130,5 @@ The projects listed here are like `lean-ftl`: open-source and independant of any
         - Commercial support available
         - Did not find documentation on how it works.
 - Key-Value storage systems (less flexibility than lean-ftl):
-    - [EasyFlash](https://github.com/armink/EasyFlash#1-introduction)
+    - [FlashDB](https://github.com/armink/FlashDB)
         - It provides anti-tearing and wear leveling.
-        - Doc in english is "coming soon"

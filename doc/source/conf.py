@@ -91,10 +91,16 @@ exclude_patterns = ['breathe/*']
 # The reST default role (used for this markup: `text`) to use for all
 # documents.
 breathe_domain_by_extension = {
-        "h" : "C",
+        "h" : "c",
         }
 #default_role = 'c:func'
 primary_domain = "cpp"
+
+# GNU attributes used in lean-ftl.h (e.g. __attribute__((aligned(...))))
+# are not part of standard C/C++ grammar; tell the domain parsers to treat
+# them as opaque attributes instead of failing to parse their arguments.
+c_paren_attributes = ['__attribute__']
+cpp_paren_attributes = ['__attribute__']
 
 # If true, '()' will be appended to :func: etc. cross-reference text.
 add_function_parentheses = True

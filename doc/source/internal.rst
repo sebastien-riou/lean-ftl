@@ -38,3 +38,4 @@ The area contains ``ns`` slots, each containing ``np`` pages.
 The data size supported by the area is ``np`` pages minus the size of the meta-data.
 
 .. image:: lean-ftl-area.drawio.svg
+

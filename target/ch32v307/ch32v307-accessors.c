@@ -106,6 +106,11 @@ uint8_t __attribute__ ((section (".flash_write_funcs"))) nvm_write(void*dst_nvm_
 
 uint8_t __attribute__ ((section (".flash_write_funcs"))) nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
   DEBUG_PRINTF("nvm_read ");
+  uintptr_t src = (uintptr_t)src_nvm_addr;
+  if(src < FLASH_BASE) {
+    src |= FLASH_BASE;//handle flash address aliasing
+  };
+  if((src + size) > (FLASH_BASE + FLASH_SIZE)) return 2;
   memcpy(dst,src_nvm_addr,size);
   DEBUG_DUMP_CORE((uintptr_t)dst,size,(uintptr_t)src_nvm_addr);
   return 0;

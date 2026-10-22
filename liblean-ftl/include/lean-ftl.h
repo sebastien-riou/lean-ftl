@@ -2,6 +2,7 @@
 
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 /// Value used for invalid pointers.
 #define LFTL_INVALID_POINTER ((void*)-1)
@@ -51,6 +52,10 @@
 #define LFTL_ERROR_TRANSACTION_OVERWRITE 0x09
 /// Error: the write unit size is too large, max is defined by LFTL_WU_MAX_SIZE
 #define LFTL_ERROR_WU_SIZE_TOO_LARGE 0x0A
+/// Error: a transaction API call is attempted on an EWLF area, which does not support transactions
+#define LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED 0x0B
+/// Error: an area or its NVM is badly configured, see ::lftl_register_area and ::lftl_register_area_ewlf
+#define LFTL_ERROR_BAD_CONFIG 0x0C
 /// Base value for errors reported by the erase function. Bits 0 to 7 may give more details.
 #define LFTL_ERROR_LOW_LEVEL_ERASE 0x0100
 /// Base value for error reported by the write function. Bits 0 to 7 may give more details.
@@ -60,17 +65,6 @@
 /// Most likely a bug in LFTL or a hardware level issue
 #define LFTL_INTERNAL_ERROR -1
 /// @}
-
-/** @struct lftl_nvm_props_struct
- *  Properties of the physical NVM
- *
- */
-typedef struct lftl_nvm_props_struct {
-  void*base;          /**< the base address of the entire NVM */
-  uintptr_t size;     /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
-  uint32_t write_size;/**< at least what the NVM is supporting, or a multiple of it */
-  uint32_t erase_size;/**< at least what the NVM is supporting, or a multiple of it */
-} lftl_nvm_props_t;
 
 /**
  * \brief Callback to erase physical NVM
@@ -134,9 +128,31 @@ typedef uint8_t (*nvm_read_t)(void* dst, const void*const src_nvm_addr, uintptr_
  */
 typedef void (*error_handler_t)(uint32_t err_code);
 
+/** @struct lftl_nvm_props_struct
+ *  Properties of the physical NVM
+ *
+ */
+typedef struct lftl_nvm_props_struct {
+  void*base;            /**< the base address of the entire NVM */
+  uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
+  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it */
+  uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it */
+  nvm_erase_t erase;    /**< Erase function for this area. */
+  nvm_write_t write;    /**< Write function for this area. */
+  nvm_read_t read;      /**< Read function for this area. */
+  error_handler_t error_handler;  /**< Error handler function for this area. */
+  void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
+} lftl_nvm_props_t;
+
+/// Type of area registered with ::lftl_register_area or ::lftl_register_area_ewlf.
+typedef enum {
+  LFTL_AREA_TYPE_STD = 0,
+  LFTL_AREA_TYPE_EWLF = 1,
+} lftl_area_type_t;
+
 /** @struct lftl_ctx_struct
  *  Structure defining the context for an LFTL area.
- * 
+ *
  *  User shall initialize each member before calling any LFTL function.
  */
 typedef struct lftl_ctx_struct {
@@ -145,12 +161,9 @@ typedef struct lftl_ctx_struct {
   uintptr_t area_size;            /**< Total size in bytes of the LFTL area. */
   void *data;                     /**< Initialize it to ::LFTL_INVALID_POINTER. */
   uintptr_t data_size;            /**< Size in bytes of the data in this LFTL area. */
-  nvm_erase_t erase;              /**< Erase function for this area. */
-  nvm_write_t write;              /**< Write function for this area. */
-  nvm_read_t read;                /**< Read function for this area. */
-  error_handler_t error_handler;  /**< Error handler function for this area. */
   void *transaction_tracker;      /**< Initialize it ::LFTL_INVALID_POINTER. */
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
+  lftl_area_type_t area_type;     /**< Set by ::lftl_register_area or ::lftl_register_area_ewlf. Do not set manually. */
 } lftl_ctx_t;
 
 /** @name Meta information API
@@ -217,16 +230,58 @@ void lftl_init_lib();
 ////////////////////////////////////////////////////////////
 /// \brief Register an LFTL area
 ///
-/// Register and LFTL area. This allows to 
+/// Register an LFTL area. This allows to 
 /// be able to copy data from the LFTL area into 
 /// another by using the write functions, i.e., without
 /// intermediate buffering.
 /// Call this for each area, after ::lftl_init_lib
 /// and before any other function (except the Meta information API group).
+///
+/// The configuration is checked first, and the area is not registered if
+/// the check fails: ::LFTL_ERROR_WU_SIZE_TOO_LARGE if the NVM's write unit
+/// is larger than ::LFTL_WU_MAX_SIZE, ::LFTL_ERROR_BAD_CONFIG if the write
+/// unit is not a power of 2 dividing the erase unit, if the area is not
+/// whole erase units within its NVM, if its data is not whole write units,
+/// or if it holds less than 2 slots.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////
 void lftl_register_area(lftl_ctx_t*ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief Register a physical NVM
+///
+/// Registers the properties of a physical NVM so that addresses within
+/// it can be recognized even outside of any LFTL area, e.g. by
+/// ::lftl_memread and ::lftl_memread_newer.
+/// This is called automatically by ::lftl_register_area and
+/// ::lftl_register_area_ewlf for their own NVM, so it only needs to be
+/// called directly to register a physical NVM that is not (yet) backing
+/// any LFTL area.
+/// Registering an NVM whose base address is already covered by a
+/// previously registered NVM is a no-op.
+/// \param ctx Properties of the physical NVM to register
+///
+////////////////////////////////////////////////////////////
+void lftl_register_nvm(lftl_nvm_props_t*ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief Register an LFTL EWLF area
+///
+/// Register an LFTL EWLF area. This allows to 
+/// be able to copy data from the LFTL area into 
+/// another by using the write functions, i.e., without
+/// intermediate buffering.
+/// Call this for each area, after ::lftl_init_lib
+/// and before any other function (except the Meta information API group).
+///
+/// The configuration is checked first, as for ::lftl_register_area, except
+/// that an EWLF area needs at least 2 erase units, and a record (its data
+/// plus a header, see ::LFTL_EWLF_RECORD_SIZE) must fit in one erase unit.
+/// \param ctx Context of the LFTL area to register
+///
+////////////////////////////////////////////////////////////
+void lftl_register_area_ewlf(lftl_ctx_t*ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Format an LFTL area
@@ -250,13 +305,49 @@ void lftl_format(lftl_ctx_t*ctx);//NOT covered by anti-tearing
  */
 
 ////////////////////////////////////////////////////////////
-/// \brief Retrieve the LFTL context correponding to an 
+/// \brief Retrieve the std LFTL context correponding to an
 /// address, if any.
+///
+/// Only searches areas registered with ::lftl_register_area.
+/// See ::lftl_get_ctx to search all area types at once.
+///
+/// \param addr Address to search
+/// \returns a valid LFTL context or LFTL_INVALID_POINTER
+////////////////////////////////////////////////////////////
+lftl_ctx_t*lftl_get_ctx_std(const void*const addr);
+
+////////////////////////////////////////////////////////////
+/// \brief Retrieve the EWLF LFTL context correponding to an
+/// address, if any.
+///
+/// Only searches areas registered with ::lftl_register_area_ewlf.
+/// See ::lftl_get_ctx to search all area types at once.
+///
+/// \param addr Address to search
+/// \returns a valid LFTL context or LFTL_INVALID_POINTER
+////////////////////////////////////////////////////////////
+lftl_ctx_t*lftl_get_ctx_ewlf(const void*const addr);
+
+////////////////////////////////////////////////////////////
+/// \brief Retrieve the LFTL context correponding to an
+/// address, if any.
+///
+/// Searches areas of every type: std (::lftl_register_area) then
+/// EWLF (::lftl_register_area_ewlf). See ::lftl_get_ctx_std and
+/// ::lftl_get_ctx_ewlf to search only one area type.
 ///
 /// \param addr Address to search
 /// \returns a valid LFTL context or LFTL_INVALID_POINTER
 ////////////////////////////////////////////////////////////
 lftl_ctx_t*lftl_get_ctx(const void*const addr);
+
+////////////////////////////////////////////////////////////
+/// \brief Indicates if the LFTL context is an EWLF area.
+///
+/// \param ctx A valid LFTL context
+/// \returns 0 or 1
+////////////////////////////////////////////////////////////
+bool lftl_is_ewlf(const lftl_ctx_t*const ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Erase all the data of an LFTL area
@@ -278,10 +369,10 @@ void lftl_erase_all(lftl_ctx_t*ctx);
 ///
 /// Performance considerations: this function erase one slot.
 ///
-/// \param ctx Context of the target LFTL area
+/// \param dst_ctx Context of the target LFTL area
 /// \param transaction_tracker Volatile buffer, see ::LFTL_TRANSACTION_TRACKER_SIZE
 ////////////////////////////////////////////////////////////
-void lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker);
+void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker);
 
 ////////////////////////////////////////////////////////////
 /// \brief Commit a transaction
@@ -291,29 +382,29 @@ void lftl_transaction_start(lftl_ctx_t*ctx, void *const transaction_tracker);
 /// Performance considerations: this function writes at most
 /// one slot + meta data.
 ///
-/// \param ctx Context of the target LFTL area
+/// \param dst_ctx Context of the target LFTL area
 ////////////////////////////////////////////////////////////
-void lftl_transaction_commit(lftl_ctx_t*ctx);
+void lftl_transaction_commit(lftl_ctx_t*dst_ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Abort a transaction
 ///
 /// After this call, the transaction_tracker buffer can be discarded.
-/// \param ctx Context of the target LFTL area
+/// \param dst_ctx Context of the target LFTL area
 ////////////////////////////////////////////////////////////
-void lftl_transaction_abort(lftl_ctx_t*ctx);
+void lftl_transaction_abort(lftl_ctx_t*dst_ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Write aligned data to NVM
 ///
 /// This function detects if the write is part of a transaction 
 /// or not.
-/// \param ctx          Context of the target LFTL area
+/// \param dst_ctx          Context of the target LFTL area
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (LFTL_WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes, MUST be multiple of write unit size (LFTL_WU_SIZE)
 ////////////////////////////////////////////////////////////
-void lftl_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_write(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Read data from LFTL area
@@ -347,7 +438,7 @@ void lftl_read_newer(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, ui
 /// When a transaction is on-going, read the current data,
 /// i.e., the data as it was before the start of the transaction.
 /// \param dst          Destination address, it shall be in a volatile memory
-/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param src          Source address
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_memread(void*dst, const void*const src, uintptr_t size);
@@ -360,7 +451,7 @@ void lftl_memread(void*dst, const void*const src, uintptr_t size);
 /// that the transaction may be aborded, so the data read by that
 /// function may not be available anymore.
 /// \param dst          Destination address, it shall be in a volatile memory
-/// \param src_nvm_addr Source address, it shall be within the target LFTL area
+/// \param src          Source address
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
 void lftl_memread_newer(void*dst, const void*const src, uintptr_t size);
@@ -386,13 +477,13 @@ void lftl_memread_newer(void*dst, const void*const src, uintptr_t size);
 /// Each call performs a full erase and write of one slot and meta-data.
 /// The only exception is if size is 0, then it just returns without touching the NVM at all.
 ///
-/// \param ctx          LFTL area context
+/// \param dst_ctx      LFTL area context
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ///
 ////////////////////////////////////////////////////////////
-void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_basic_write(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Write aligned data to NVM in an LFTL area
@@ -403,13 +494,13 @@ void lftl_basic_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, u
 /// Performance considerations: 
 /// Each call writes the specified number of bytes to NVM.
 ///
-/// \param ctx          LFTL area context
+/// \param dst_ctx      LFTL area context
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area, MUST be aligned on a write unit (LFTL_WU_SIZE)
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes, MUST be multiple of write unit size (LFTL_WU_SIZE)
 ///
 ////////////////////////////////////////////////////////////
-void lftl_transaction_write(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_transaction_write(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Read data from NVM
@@ -447,12 +538,12 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 ///
 /// This function detects if the write is part of a transaction 
 /// or not.
-/// \param ctx          Context of the target LFTL area
+/// \param dst_ctx      Context of the target LFTL area
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ////////////////////////////////////////////////////////////
-void lftl_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_write_any(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Write aligned or unaligned data to NVM in an LFTL area
@@ -463,13 +554,13 @@ void lftl_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uin
 /// Performance considerations: 
 /// Each call writes the specified number of bytes to NVM.
 ///
-/// \param ctx          LFTL area context
+/// \param dst_ctx      LFTL area context
 /// \param dst_nvm_addr Destination address, it MUST be within the target LFTL area
 /// \param src          Source address, if it is in NVM, it MUST be in the same LFTL area as ctx or outside of any LFTL area
 /// \param size         Size in bytes
 ///
 ////////////////////////////////////////////////////////////
-void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
+void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const void*const src, uintptr_t size);
 
 /** @} */
 
@@ -488,6 +579,8 @@ void lftl_transaction_write_any(lftl_ctx_t*ctx, void*dst_nvm_addr, const void*co
 /// Division with rounding to ceiling.
 #define LFTL_DIV_CEIL(d,q) (((d)+(q)-1)/(q))
 
+
+#define LFTL_MAX(a,b) ( (a) > (b) ? (a) : (b) )
 
 #ifdef LFTL_DEFINE_HELPERS
 //helpers to declare LFTL areas
@@ -566,12 +659,39 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 
 #define LFTL_PAGES(size) (LFTL_DIV_CEIL(size,LFTL_PAGE_SIZE))
 
+/// Size in bytes of one meta-data item (version, checksum, checksum2), as laid
+/// out at run time: one write unit, but at least sizeof(uint32_t).
+#define LFTL_META_ITEM_SIZE ((LFTL_WU_SIZE) > 4 ? (LFTL_WU_SIZE) : 4)
+
 /// Declare an LFTL area
 /// \param name Name of the LFTL area.
 /// \param area_content Members of the LFTL area.
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA(name, area_content, wear_leveling_factor) union {\
-  flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_WU_SIZE)*(wear_leveling_factor)];\
+  flash_sw_page_t name##_pages[LFTL_PAGES(sizeof(struct {area_content})+LFTL_META_N_ITEMS*LFTL_META_ITEM_SIZE)*(wear_leveling_factor)];\
+  struct {area_content} name##_data;\
+  struct {area_content};\
+  struct {area_content} _##name##_data;\
+  };
+
+/// Effective write-unit size used for EWLF meta-data sizing, same as ::LFTL_META_ITEM_SIZE.
+#define LFTL_EWLF_WU_SIZE LFTL_META_ITEM_SIZE
+
+#define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
+/// Size in bytes of one EWLF record of `area_content`, as laid out at run time:
+/// the magic, the `prev_erased` flag and each meta-data item take at least one
+/// write unit, the data is rounded up to whole write units, the record to 8 bytes.
+#define LFTL_EWLF_RECORD_SIZE(area_content) LFTL_ROUND_UP(\
+  LFTL_MAX(LFTL_WU_SIZE,8) + LFTL_MAX(LFTL_WU_SIZE,1) + LFTL_META_N_ITEMS*LFTL_EWLF_WU_SIZE \
+  + LFTL_ROUND_UP(sizeof(struct {area_content}),LFTL_WU_SIZE), 8)
+
+/// Declare an LFTL area with Extreme Wear Leveling Factor
+/// \param name Name of the LFTL area.
+/// \param area_content Members of the LFTL area.
+/// \param wear_leveling_factor Only integers are supported, minimum is 2.
+#define LFTL_AREA_EWLF(name, area_content, wear_leveling_factor) union {\
+  _Static_assert(LFTL_EWLF_RECORD_SIZE(area_content) <= LFTL_PAGE_SIZE, "EWLF area " #name ": a record must fit in a page");\
+  flash_sw_page_t name##_pages[LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
   struct {area_content} name##_data;\
   struct {area_content};\
   struct {area_content} _##name##_data;\

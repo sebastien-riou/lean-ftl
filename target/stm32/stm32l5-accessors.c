@@ -48,6 +48,8 @@
 #define WRITE_BIT(reg,bit,val) do{if(val) SET_BIT(reg,bit); else CLEAR_BIT(reg,bit);}while(0)
 
 uint8_t __attribute__((weak)) nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
+  if((uintptr_t)src_nvm_addr < FLASH_BASE_NS) return 1;
+  if(((uintptr_t)src_nvm_addr + size) > (FLASH_BASE_NS + FLASH_SIZE)) return 2;
   memcpy(dst,src_nvm_addr,size);
   return 0;
 }

@@ -79,6 +79,9 @@ uint32_t get_alignement_requirement(uint32_t original_req){
 }
 void dump_core(uintptr_t addr, uintptr_t size, uintptr_t display_addr);
 
+void erase_cnt_update(void*base_address, unsigned int n_pages);
+void __attribute__((weak)) erase_cnt_update(void*base_address, unsigned int n_pages){}
+
 uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   const uintptr_t size = n_pages * nvm_erase_size;
   if(trace_accessors){
@@ -88,13 +91,22 @@ uint8_t nvm_erase(void*base_address, unsigned int n_pages){
   if(((uintptr_t)base_address + size) > ((uintptr_t)nvm_base + nvm_size)) return 2;
   //Linux makes it hard to get nvm aligned to large units like 4k or 8k, so we check against the minimum between the original constraint and the alignement of nvm
   if(0 != ((uintptr_t)base_address % get_alignement_requirement(nvm_erase_size))) return 3;
-  
+  //count only erases that happen: an out of range base_address would index erase_cnt out of bounds
+  erase_cnt_update(base_address, n_pages);
+
   memset(base_address, 0xFF, size);
   bool tearing = tearing_sim(base_address,size);
   if(save_nvm_file_name){
     write_file(save_nvm_file_name,nvm_base,nvm_size);
   }
   return tearing ? SIMULATED_TEARING:0;
+}
+
+static bool is_all(const uint8_t*buf, uint8_t val, uintptr_t size){
+  for(uintptr_t i=0;i<size;i++){
+    if(buf[i] != val) return 0;
+  }
+  return 1;
 }
 
 uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
@@ -106,6 +118,13 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   if(((uintptr_t)dst_nvm_addr + size) > ((uintptr_t)nvm_base + nvm_size)) return 2;
   if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
   if(0 != (size % nvm_write_size)) return 4;
+  //like STM32U5-class flash: a write unit can be programmed only while it is
+  //erased, unless the data to write is all 0
+  for(uintptr_t i=0;i<size;i+=nvm_write_size){
+    const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr + i;
+    const uint8_t*const src8 = (const uint8_t*)src + i;
+    if(!is_all(dst8,0xFF,nvm_write_size) && !is_all(src8,0x00,nvm_write_size)) return 5;
+  }
   memcpy(dst_nvm_addr,src,size);
   bool tearing = tearing_sim(dst_nvm_addr,size);
   if(save_nvm_file_name){
@@ -120,5 +139,10 @@ uint8_t nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
     printf("nvm_read ");
     dump_core((uintptr_t)dst,size,(uintptr_t)src_nvm_addr);
   }
-  return 0;
+  //corrupting dst (a transient, caller-owned buffer) rather than src_nvm_addr:
+  //a real NVM read glitch does not alter the stored data, and the caller
+  //discards dst entirely on a nonzero return, so this has no lasting effect
+  //on NVM state or the test harness's reference model.
+  bool tearing = tearing_sim(dst,size);
+  return tearing ? SIMULATED_TEARING:0;
 }

@@ -157,12 +157,20 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
     $<$<CONFIG:Release>:-O3 -g0>
 )
 
+if(LFTL_COVERAGE)
+  target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE --coverage)
+endif()
+
 # Linker options
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     ${linker_script_arg}
     ${cpu_PARAMS}
     ${linker_OPTS}
 )
+
+if(LFTL_COVERAGE)
+  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE --coverage)
+endif()
 
 # Execute post-build to print size, generate hex and bin
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD

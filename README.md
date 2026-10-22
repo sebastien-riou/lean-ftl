@@ -9,7 +9,9 @@ Main features:
 - Anti-tearing is exhaustively tested via a dedicated emulator
 - Avoid fragmentation
 - Support transactions
+- Support high number of updates (see [Extrem Wear Leveling Factors](EWLF.md))
 - Easily portable to new MCUs / new flash chips
+- [Documentation](https://lean-ftl.rtfd.io) and [threat model](THREAT_MODEL.md) available
 - Support flash with erased state different from 'FF' (even undefined value if supported) in regular areas; EWLF areas need erased bytes to read 'FF'
 
 The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions, and an error handler:

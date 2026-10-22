@@ -766,8 +766,11 @@ static void move_to_next_slot(lftl_ctx_t*ctx, uint32_t version){
  * \brief Locate the slot holding the current data and update `ctx->data`.
  *
  * Scans every slot for the highest version number whose integrity check
- * passes, raising ::LFTL_ERROR_VERSION_COLLISION or
- * ::LFTL_ERROR_NO_VALID_VERSION if the area is corrupted beyond recovery.
+ * passes, raising ::LFTL_ERROR_VERSION_COLLISION if two slots that pass it
+ * share that version, or ::LFTL_ERROR_NO_VALID_VERSION if none passes.
+ * A slot that fails its integrity check is skipped whatever its version
+ * word: a tearing during its erase leaves the previous content with random
+ * bits set, which can read as any version, the current one included.
  * If the winning slot's checksum2 doesn't match checksum (a tearing
  * happened while writing the meta-data itself), moves its data to the next
  * slot with fresh meta-data, see ::move_to_next_slot.
@@ -782,15 +785,14 @@ static void find_current_slot(lftl_ctx_t*ctx){
   for(unsigned int i=0;i<ns;i++){
     const uint32_t version = get_slot_version(ctx,i);
     if(version == 0xFFFFFFFF) continue;
-    if(version == max_version) {
+    const bool found_one = invalid_index != max_version_index;
+    if(found_one && (version < max_version)) continue;
+    if(!slot_integrity_check_ok(ctx,i)) continue;
+    if(found_one && (version == max_version)) {
       raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
     }
-    if(version > max_version) {
-      if(slot_integrity_check_ok(ctx,i)){
-        max_version_index = i;
-        max_version = version;
-      }
-    }
+    max_version_index = i;
+    max_version = version;
   }
   if(invalid_index == max_version_index) {
     raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);

@@ -32,7 +32,7 @@
 
 /// Success. 
 #define LFTL_SUCCESS 0x00
-/// Internal error / corruption: area contains two or more slots with the same version
+/// Internal error / corruption: area contains two or more valid slots with the same version
 #define LFTL_ERROR_VERSION_COLLISION 0x01
 /// Internal error / corruption: area does not contains any valid slot
 #define LFTL_ERROR_NO_VALID_VERSION 0x02

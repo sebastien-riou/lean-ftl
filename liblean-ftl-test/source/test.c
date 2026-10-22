@@ -1553,6 +1553,74 @@ void torn_checksum2_test(){
   torn_checksum2_test_core(1); //checksum2 partially programmed
 }
 
+//A power cut during the erase of the next slot leaves it partly erased: its
+//content is still the previous data and meta-data, with random bits set. Its
+//version word can then read as the current version (LFTL-007): with 2 slots,
+//slot 0 holds the odd versions and slot 1 the even ones, so erasing bit 0 of
+//the next slot's version gives the current one whenever it is odd. The scan
+//must skip such a slot, whether it comes before or after the valid one.
+void torn_erase_version_test_core(bool garbage_after_valid){
+  //nvmd's physical slot/meta layout, same formulas as version_collision_test
+  const uint32_t write_size = nvmd.nvm_props->write_size;
+  const uint32_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t meta_phy_size = LFTL_META_N_ITEMS * item_size;
+  const uintptr_t erase_size = nvmd.nvm_props->erase_size;
+  const uintptr_t n_pages_in_slot = LFTL_DIV_CEIL(nvmd.data_size + meta_phy_size, erase_size);
+  const uintptr_t slot_size = n_pages_in_slot * erase_size;
+  const unsigned int n_slots = nvmd.area_size / slot_size;
+  if(n_slots < 2) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+
+  //the slot the garbage goes to is the next one: write until it is scanned
+  //after the current slot (current slot 0), or before it (current slot n-1)
+  uint8_t buf[sizeof(nvm.data7)];
+  const unsigned int wanted_index = garbage_after_valid ? 0 : n_slots-1;
+  unsigned int current_index = n_slots;
+  for(unsigned int i=0;i<=n_slots;i++){
+    if(LFTL_INVALID_POINTER == nvmd.data) lftl_read(&nvmd,buf,nvm.data7,sizeof(buf)); //locate the slot
+    current_index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
+    if(current_index == wanted_index) break;
+    stateful_prng_fill(buf,sizeof(buf));
+    test_write(&nvmd,nvm.data7,buf,sizeof(buf));
+  }
+  if(current_index != wanted_index) throw_exception(INTERNAL_ERROR_CORRUPT);
+  lftl_read(&nvmd,buf,nvm.data7,sizeof(buf)); //the current data, whatever wrote it
+  const unsigned int next_index = (current_index + 1) % n_slots;
+  uint8_t*const slot = (uint8_t*)nvmd.area + current_index*slot_size;
+  uint8_t*const meta = slot + slot_size - meta_phy_size;
+  uint8_t*const next = (uint8_t*)nvmd.area + next_index*slot_size;
+  uint8_t*const next_meta = next + slot_size - meta_phy_size;
+
+  //The torn erase leaves the next slot with a version word reading the
+  //current version, and a checksum that is not the one of its data and that
+  //version. Built with an erase and programming of erased cells only, so this
+  //works on real flash too.
+  uint8_t data_img[nvmd.data_size];
+  uint8_t meta_img[meta_phy_size];
+  lftl_memread(data_img,slot,nvmd.data_size);
+  lftl_memread(meta_img,meta,meta_phy_size);
+  meta_img[item_size] ^= 1; //checksum, wrong for this data and version
+  memcpy(meta_img + 2*item_size,meta_img + item_size,item_size); //checksum2 == checksum
+  raw_erase(next,n_pages_in_slot);
+  raw_write(next,data_img,nvmd.data_size);
+  raw_write(next_meta,meta_img,meta_phy_size);
+
+  //force a fresh slot search: it must settle on the valid slot
+  nvmd.data = LFTL_INVALID_POINTER;
+  read_and_check(&nvmd,nvm.data7,buf,sizeof(buf));
+  if(current_index != ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size) throw_exception(ERROR_VERIFICATION_FAIL);
+  //it survives another reboot, and the area still takes updates
+  nvmd.data = LFTL_INVALID_POINTER;
+  read_and_check(&nvmd,nvm.data7,buf,sizeof(buf));
+  randomized_test_write(&nvmd,nvm.data7,sizeof(buf));
+  SANITY_CHECK();
+}
+
+void torn_erase_version_test(){
+  DEBUG_PRINTLN(__func__);
+  torn_erase_version_test_core(1); //the garbage slot is scanned after the valid one
+  torn_erase_version_test_core(0); //and before it
+}
+
 //After a reset, ctx->data is LFTL_INVALID_POINTER until something locates
 //the current slot: a transaction started before any read must locate it too.
 void transaction_after_reset_test(){
@@ -1877,7 +1945,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 31
+  #define N_TESTS 32
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -1982,6 +2050,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_tearing_test,0);break;
       case 30:TEAR_COV(100);test_and_simulate_tearing(ewlf_unaligned_size_test,tear_cov_log[i]);break;
       case 31:TEAR_COV(100);test_and_simulate_tearing(memset_whole_area_test,tear_cov_log[i]);break;
+      case 32:TEAR_COV(100);test_and_simulate_tearing(torn_erase_version_test,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

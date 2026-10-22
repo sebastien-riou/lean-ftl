@@ -6,8 +6,8 @@ Header to include
 
 The ``lean-ftl.h`` header includes all the symbols. 
 This file is the same no matter the build type that you use.
-It is therefore safe to use ``dist/debug/lean-ftl.h`` even
-if you link against the ``minSizeRel`` library.
+It is therefore safe to use ``liblean-ftl/include/lean-ftl.h`` from
+``liblean-ftl-debug.tar.gz`` even if you link against the ``minSizeRel`` library.
 
 Enabling helper macros
 ---------------------------------------
@@ -60,10 +60,13 @@ the macro :c:macro:`LFTL_AREA`.
   } __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
   data_flash_t nvm;
 
-.. note:: In the example above, ``data0`` is accessible via ``nvm.a.data0``.
+.. note:: In the example above, ``data0`` is accessible via ``nvm.data0``,
+  or ``nvm.a_data.data0``.
 
-.. note:: Members declared inside an LFTL area can be of any type however 
-  they should be padded to occupy a multiple of the ``LFTL_WU_SIZE``.
+.. note:: Members declared inside an LFTL area can be of any type however,
+  in an area declared with :c:macro:`LFTL_AREA`, together they must occupy a
+  multiple of ``LFTL_WU_SIZE``: pad them if needed, :func:`lftl_register_area`
+  raises :c:macro:`LFTL_ERROR_BAD_CONFIG` otherwise.
 
 Choosing the wear leveling factor
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -114,8 +117,11 @@ same way as :c:macro:`LFTL_AREA`, just replace the macro name:
 
 An area declared with :c:macro:`LFTL_AREA_EWLF` must be registered with
 :func:`lftl_register_area_ewlf` instead of :func:`lftl_register_area`.
-Everything else (formatting, reading, writing, transactions) works the same
-way as for a regular area. Use :func:`lftl_is_ewlf` if you need to tell,
+Formatting, reading and writing work the same way as for a regular area,
+but EWLF areas do not support transactions: :func:`lftl_transaction_start`
+raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. A record, the area
+content plus a header, must fit in one page, and the NVM's erased bytes must
+read ``0xFF``. Use :func:`lftl_is_ewlf` if you need to tell,
 given a context, whether it refers to an EWLF area or a regular one.
 
 Single LFTL area vs many
@@ -182,7 +188,9 @@ on your target platform:
 - :type:`error_handler_t`
 
 You can find an implementation of those callbacks for STM32U5 and STM32L5 in 
-https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32
+https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, for CH32V307 in
+https://github.com/sebastien-riou/lean-ftl/tree/main/target/ch32v307, and a RAM based
+one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
 
 Declaring LFTL areas 
 ----------------------
@@ -215,7 +223,7 @@ Each LFTL area has its volatile context maintained in a
 
 Library initialization
 ------------------------
-After a power up, the library must be initialized using :func:`lftl_lib_init`.
+After a power up, the library must be initialized using :func:`lftl_init_lib`.
 Each area must be registered using :func:`lftl_register_area`.
 
 .. code-block:: C
@@ -253,7 +261,7 @@ Updating a single variable atomically
   :caption: Example: single variable atomic update
   :name: Example: single variable atomic update
 
-  lftl_write(&nvma,nvm.a.data0,new_data0,sizeof(new_data0));
+  lftl_write(&nvma,nvm.data0,new_data0,sizeof(new_data0));
 
 Updating several variables atomically
 --------------------------------------
@@ -265,6 +273,6 @@ Updating several variables atomically
 
   uint8_t transaction_tracker[LFTL_TRANSACTION_TRACKER_SIZE(&nvma)];
   lftl_transaction_start(&nvma, transaction_tracker);
-  lftl_write(&nvma,nvm.a.data0,new_data0,sizeof(new_data0));
-  lftl_write(&nvma,nvm.a.data1,new_data1,sizeof(new_data1));
+  lftl_write(&nvma,nvm.data0,new_data0,sizeof(new_data0));
+  lftl_write(&nvma,nvm.data1,new_data1,sizeof(new_data1));
   lftl_transaction_commit(&nvma);

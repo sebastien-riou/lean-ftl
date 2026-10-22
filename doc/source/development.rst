@@ -50,7 +50,7 @@ Portability
 *lean-ftl* aim at being usable on any MCU.
 
 That said, *lean-ftl* has been tested so far only on little-endian devices.
-It has been tested on STM32 MCUs only but it is designed to be portable to 
+It has been tested on STM32 and CH32V307 MCUs only but it is designed to be portable to 
 other MCUs and even handle external NVMs such as QSPI flash, SDcards...
 
 Stable API
@@ -113,7 +113,7 @@ Debug preprocessor macros
 
   make -C build/linux/ test/source/main.i
 
-This generate the file ``build/linux/CMakeFiles/lean-ftl-test.dir/test/source/main.c.i``
+This generate the file ``build/linux/CMakeFiles/lean-ftl-test-fw.dir/test/source/main.c.i``
 
 Type the following to see the full list of available targets:
 

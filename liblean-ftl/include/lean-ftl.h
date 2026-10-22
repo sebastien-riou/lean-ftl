@@ -44,7 +44,7 @@
 #define LFTL_ERROR_BASE_MISALIGNED 0x05
 /// Error: size is not aligned
 #define LFTL_ERROR_SIZE_MISALIGNED 0x06
-/// Error: a basic write is attempted during a transaction
+/// Error: a basic write, ::lftl_erase_all or ::lftl_transaction_start is attempted during a transaction
 #define LFTL_ERROR_TRANSACTION_ONGOING 0x07
 /// Error: a transaction API call is attempted outside of a transaction
 #define LFTL_ERROR_NO_TRANSACTION 0x08
@@ -90,9 +90,9 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
  * The source may be within the NVM but is guaranteed to not overlap 
  * with the destination range.
  * 
- * \param dst_nvm_addr The start address of the destination. It is always aligned on LFTL_WU_SIZE.
+ * \param dst_nvm_addr The start address of the destination. It is always aligned on the NVM's `write_size`.
  * \param src The start address of the source. It may be misaligned if top level API are called with misaligned source address.
- * \param size The size in bytes of the data to write. It is always a multiple of LFTL_WU_SIZE.
+ * \param size The size in bytes of the data to write. It is always a multiple of the NVM's `write_size`.
  * 
  * \returns 0 or an error code
  */
@@ -111,8 +111,8 @@ typedef uint8_t (*nvm_write_t)(void*dst_nvm_addr, const void*const src, uintptr_
  * 
  * \param dst The start address of the destination
  * \param src_nvm_addr The start address of the source
- * \param size The size in bytes of the data to write
- * 
+ * \param size The size in bytes of the data to read
+ *
  * \returns 0 or an error code
  */
 typedef uint8_t (*nvm_read_t)(void* dst, const void*const src_nvm_addr, uintptr_t size);
@@ -121,7 +121,12 @@ typedef uint8_t (*nvm_read_t)(void* dst, const void*const src_nvm_addr, uintptr_
  * \brief Callback for error handling
  *
  * It is called to handle fatal errors, it shall not return.
- * 
+ * If it returns, the library loops forever.
+ *
+ * Before it is called, the transaction of the area the error happened on,
+ * if any, is aborted: a recovery path must start a new transaction.
+ * Transactions on other areas are left as they are.
+ *
  * A typical implementation will longjump.
  * 
  * \param err_code The error code
@@ -176,9 +181,12 @@ typedef struct lftl_ctx_struct {
 ///
 /// lean-ftl follows https://semver.org/
 ///
-/// Release versions have the format `vX.Y.Z`
-/// where `X` is `MAJOR`, `Y` is `MINOR` and `Z` is `PATCH`
-/// 
+/// Release versions have the format `X.Y.Z` (the git tag is `vX.Y.Z`)
+/// where `X` is `MAJOR`, `Y` is `MINOR` and `Z` is `PATCH`.
+/// Other builds append `git describe`'s `-N-gHASH`, `-dirty` when the
+/// working tree has uncommitted changes, and `-untracked` when it has
+/// untracked files.
+///
 /// \returns the version as a null terminated string
 ///
 ////////////////////////////////////////////////////////////
@@ -190,7 +198,7 @@ const char*lftl_version();
 /// lean-ftl version timestamp is the [Unix epoch](https://en.wikipedia.org/wiki/Unix_time) of the 
 /// commit in git repository.
 ///
-/// When a build is "dirty" or with "untracked" files
+/// When a build is "dirty" (uncommitted changes)
 /// the version timestamp is the [Unix epoch](https://en.wikipedia.org/wiki/Unix_time) of the build
 /// 
 /// \returns the version timestamp
@@ -202,11 +210,11 @@ uint64_t lftl_version_timestamp();
 /// \brief Return lean-ftl library build type
 ///
 /// lean-ftl can be built for different goals.
-/// Currently the following build types are supported:
+/// It returns the CMake build type; release packages contain:
 ///
-///   - debug
-///   - minSizeRel 
-/// 
+///   - Debug
+///   - MinSizeRel
+///
 /// \returns the build type as a null terminated string
 ///
 ////////////////////////////////////////////////////////////
@@ -517,15 +525,13 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
 /** @} */
 
 /** @name Foot-guns API
- * Functions in this group are useful but can break transaction mechanism
- * if used incorrectly. They remove restrictions on data alignement and size
- * of ::lftl_write and ::lftl_transaction_write. They work well as long as you do not target the 
- * same write unit twice during a transaction. If it happens, the behavior 
- * depends on the target platform. It can be:
- * - hardware fault raised during the second write
- * - hardware fault raise when reading back
- * - no hardware fault but incorrect read value
- * 
+ * Functions in this group are useful but can surprise during a transaction.
+ * They remove restrictions on data alignement and size
+ * of ::lftl_write and ::lftl_transaction_write. During a transaction, each
+ * write unit can still be written only once: two writes that share a write
+ * unit, even at different bytes, raise ::LFTL_ERROR_TRANSACTION_OVERWRITE,
+ * which aborts the transaction.
+ *
  * All functions in this group are covered by anti-tearing.
  * They shall be called with a valid context on a properly formated LFTL area.
  * See ::lftl_format for the initial formating of an LFTL area.
@@ -591,7 +597,7 @@ void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*dst_nvm_addr, const voi
 //    uint64_t my_nvm_array_var[SIZE64(1024)];
 //    LFTL_DATA(my_nvm_uint64_var,8);
 //    //...more variables...
-//    ,1*2)//ceiling(size of the area / LFTL_PAGE_SIZE) * 2 
+//    ,2)//wear leveling factor: the macro reserves that many slots
 //  //more LFTL_AREA can be declared here
 //} __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
 //data_flash_t nvm __attribute__ ((section (".data_flash")));

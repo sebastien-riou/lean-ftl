@@ -6,16 +6,17 @@
 Minimal flash translation layer meant for embedded systems (wear leveling + anti tearing).
 
 Main features:
-- Anti-tearing is exhautively tested via a dedicated emulator
+- Anti-tearing is exhaustively tested via a dedicated emulator
 - Avoid fragmentation
 - Support transactions
 - Easily portable to new MCUs / new flash chips
-- Support flash with erased state different from 'FF' (even undefined value if supported)
+- Support flash with erased state different from 'FF' (even undefined value if supported) in regular areas; EWLF areas need erased bytes to read 'FF'
 
-The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions:
+The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions, and an error handler:
 - nvm_erase
 - nvm_write
 - nvm_read
+- error_handler, called on fatal errors; it shall not return
 
 NOTE: tests are provided to verify the correct implementation of the accessors.
 
@@ -36,11 +37,13 @@ Release package contains binaries for the following platforms:
         - STM32L5xx (includes accessors)
         - STM32U5xx (includes accessors)
     - M35P
+    - M52
     - M55
     - M85
 - RISC-V:
     - RV32IMC
         - CH32V307 (includes accessors)
+- Linux (includes RAM based accessors, for test and development purposes)
 
 ## Documentation
 
@@ -62,7 +65,7 @@ Release package contains binaries for the following platforms:
 
 ### Data access process
 The first time one `lftl_ctx_t` is used since reset, a search take place to identify the valid slot within the NVM area.
-The valid slot is the one which hash the highest `version` and which pass the integrity check.
+The valid slot is the one which has the highest `version` and which pass the integrity check.
 
 ## Transaction API
 The concept outlined above assumes the application rewrite the entire `data` everytime.
@@ -70,13 +73,13 @@ In practice, most application need to update some locations within `data`.
 The transaction API allows just that. It use a buffer in RAM to represent the write units which have been updated.
 1. The application call `lftl_transaction_start`, the buffer in RAM is initialized and the next slot is erased.
 2. The application call `lftl_transaction_write` one or more times: this write the new data directly in the next slot.
-3. The application call `lftl_transcation_commit`, then the other part of `data` are copied to the new slot and the `meta_data` is written.
+3. The application call `lftl_transaction_commit`, then the other part of `data` are copied to the new slot and the `meta_data` is written.
 
 NOTES:
 - During a transaction, `lftl_basic_write` is not allowed.
 - During a transaction, `lftl_read` reads the current data. The new data is not read until it is commited.
 
-## Developper info
+## Developer info
 
 ### Local build
 You need CMake and arm-none-eabi or riscv-none-elf toolchain in your path.

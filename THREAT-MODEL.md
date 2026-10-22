@@ -7,13 +7,13 @@ lean-ftl is assessed against two objectives, one for each way it can be deployed
 1. **On-chip or otherwise trusted NVM (Case 1).** The attacker can only send messages to the application and cut its power. lean-ftl must keep committed data atomic and fresh, must not let logical actions brick the device, and must never give access to unrelated RAM or flash, or code execution (objectives O1 to O4).
 2. **External NVM (Case 2).** The attacker can also read and write the NVM at any time, and control its bus. lean-ftl does not protect the data then, but no NVM content or bus response may give access to the internal address space, or code execution (objective O5).
 
-At commit 400ee5d, lean-ftl meets both objectives for regular and EWLF areas, within the assumptions below. NVM content only picks among fixed slot or record positions inside an area, API arguments are range-checked without overflow, an error aborts the transaction it interrupts, bad configurations are refused at registration, and EWLF writes only program erased cells. What remains is by design or up to the integrator: `lftl_memread()` and write sources accept any pointer (T1.7), messages can drive wear-out (T1.5), `lftl_format()` is not anti-tearing (T1.6), and external NVM needs a careful driver and careful parsing (T2.3 to T2.8).
+At commit a3a4382, lean-ftl meets both objectives for regular and EWLF areas, within the assumptions below. NVM content only picks among fixed slot or record positions inside an area, API arguments are range-checked without overflow, an error aborts the transaction it interrupts, bad configurations are refused at registration, and EWLF writes only program erased cells. What remains is by design or up to the integrator: `lftl_memread()` and write sources accept any pointer (T1.7), messages can drive wear-out (T1.5), `lftl_format()` is not anti-tearing (T1.6), and external NVM needs a careful driver and careful parsing (T2.3 to T2.8).
 
 No finding is open. As in ISSUES.md, findings are removed from this document once fixed; git history keeps them, including LF-1 to LF-12, which some test comments still name. Open work items are tracked in ISSUES.md.
 
 ## Scope and system overview
 
-This model covers the core library, `liblean-ftl/source/ftl.c`, `liblean-ftl/source/ftl_internal.h` and `liblean-ftl/include/lean-ftl.h`, at [commit 400ee5d](https://github.com/sebastien-riou/lean-ftl/tree/400ee5d) (2026-10-22, branch `dev/ewlf`), as integrated on a bare-metal MCU. Example code, the reference callbacks under `target/` and the test harnesses are out of scope, except where the integrator contract depends on them.
+This model covers the core library, `liblean-ftl/source/ftl.c`, `liblean-ftl/source/ftl_internal.h` and `liblean-ftl/include/lean-ftl.h`, at [commit a3a4382](https://github.com/sebastien-riou/lean-ftl/tree/a3a4382) (2026-10-22, branch `dev/ewlf`), as integrated on a bare-metal MCU. Example code, the reference callbacks under `target/` and the test harnesses are out of scope, except where the integrator contract depends on them.
 
 How lean-ftl works, as far as security is concerned:
 
@@ -22,7 +22,7 @@ How lean-ftl works, as far as security is concerned:
 - On first access, `find_current_slot()` scans all slots, skips erased versions (`0xFFFFFFFF`) and slots failing the checksum, and picks the highest version. `ctx->data` is set from the **loop index**, not from NVM content. If that slot's `checksum2` is torn, its data is copied into the next slot with fresh metadata.
 - An **EWLF area** (`lftl_register_area_ewlf()`) packs many **records** into each erase unit. A record is a magic, a `prev_erased` flag, the same three metadata items, then the data. Writes go downward from the top of the highest erase unit, each to the first record position whose cells all read erased. When a unit is full, the next record goes to the top of the unit below, wrapping from the lowest unit back to the highest; then the vacated unit is erased and the new record's `prev_erased` flag is set. EWLF areas have no transactions.
 - On first access to an EWLF area, `find_current_record()` checks only the positions where records can start (the top of each erase unit minus a multiple of the record size), by increasing address. It takes the first valid record, or the top record of the next unit in write order if that one is newer (a wrap interrupted before the lowest unit was erased). `ctx->data` is set from that position: NVM content picks among fixed positions inside the area, but never sets where a record starts.
-- The application addresses data through **logical addresses** inside the `nvm` struct (`nvm.a.data0`). `translate_addr()` maps them to the current slot or record after an overflow-safe range check, and the transaction functions run the same check first.
+- The application addresses data through **logical addresses** inside the `nvm` struct (`nvm.data0`). `translate_addr()` maps them to the current slot or record after an overflow-safe range check, and the transaction functions run the same check first.
 - Transactions (regular areas only) use a caller-owned RAM bitmap (`transaction_tracker`, one bit per write unit) to detect double writes and to know which units to copy at commit.
 - `lftl_register_area()` and `lftl_register_area_ewlf()` check the configuration (write unit size, area bounds and alignment, slot count, EWLF record size) and raise `LFTL_ERROR_BAD_CONFIG` before linking a bad area. `LFTL_AREA` and `LFTL_AREA_EWLF` reserve the pages the run-time layout needs, and `LFTL_AREA_EWLF` refuses at compile time a record that does not fit in a page.
 - NVM access goes through integrator callbacks (`erase`, `write`, `read`), set once per NVM in `lftl_nvm_props_t`. The exception is `mem_read()`, which copies any address outside every registered NVM with `memcpy`; that is how RAM `src` buffers are read. Errors go to the NVM's `error_handler`, after the transaction of the area the failing operation was for is aborted. The handler must not return; if it does, the library loops forever.
@@ -179,7 +179,7 @@ Also worth doing: a bounded model check (CBMC or Frama-C) of `check_in_data()`, 
 
 ## Sources
 
-- [lean-ftl source](https://github.com/sebastien-riou/lean-ftl), `liblean-ftl/` at commit 400ee5d (2026-10-22, branch `dev/ewlf`), Apache-2.0
+- [lean-ftl source](https://github.com/sebastien-riou/lean-ftl), `liblean-ftl/` at commit a3a4382 (2026-10-22, branch `dev/ewlf`), Apache-2.0
 - `EWLF.md` and `ISSUES.md` in the same repository, at the same commit
 - [lean-ftl API reference](https://lean-ftl.readthedocs.io/en/latest/api.html)
 - [lean-ftl user guide](https://lean-ftl.readthedocs.io/en/latest/using.html)

@@ -18,7 +18,8 @@ Tabs are spaces, and they are 2 characters wide.
 Error reporting
 ---------------
 All user functions directly call the error call back when they detect an error, this ensures 
-all errors are treated.
+all errors are treated. Before the call, the transaction of the area the error happened on, if any,
+is aborted.
 This does not force the user to use ``set_jump``: 
 the error handler can also just wait for reset or trigger an internal reset.
 

@@ -15,6 +15,7 @@ The release package is designed to support cross platform, multi configuration, 
   - ARM Cortex-M23
   - ARM Cortex-M33
   - ARM Cortex-M35P
+  - ARM Cortex-M52
   - ARM Cortex-M55
   - ARM Cortex-M85
   - RISC-V RV32IMC
@@ -64,22 +65,23 @@ You can verify support for your platform by compiling main.c from the example/he
 
   int main(int argc, char * argv[])
   {
-    printf("Hello from lean-ftl %lu\n", lftl_version_timestamp());
+    printf("Hello from lean-ftl %s\n", lftl_version());
   }
 
 
 .. code-block:: bash
 
-  7z x  ~/Downloads/lean-ftl-v0.0.4.7z
-  gcc examples/hello/main.c -o hello -Idist/debug/liblean-ftl/include \
-    -Ldist/debug/liblean-ftl/build/linux/liblean-ftl -llean-ftl 
+  tar xf ~/Downloads/lean-ftl-v0.1.0.tar.gz
+  tar xf dist/liblean-ftl-debug.tar.gz
+  gcc examples/hello/main.c -o hello -Iliblean-ftl/include \
+    -Lliblean-ftl/build/linux/liblean-ftl -llean-ftl
   ./hello
 
 You should get something like:
 
 .. code-block:: bash
 
-  Hello from lean-ftl 0.0.4
+  Hello from lean-ftl 0.1.0
 
 
 Troubleshooting

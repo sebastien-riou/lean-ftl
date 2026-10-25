@@ -577,22 +577,21 @@ static uintptr_t meta_offset(lftl_ctx_t*ctx){
 }
 
 /**
- * \brief Read the meta-data of a slot into `dst`.
+ * \brief Read one meta-data item's whole write unit.
+ *
+ * The items are read one at a time, so that a word left weakly programmed
+ * by a tearing is read only when needed: on flash with ECC each read of it
+ * can raise an NMI (THREAT-MODEL.md T1.13).
  *
  * \param ctx Context of the LFTL area
- * \param dst Destination, in volatile memory
- * \param slot_index Index of the slot to read the meta-data of
+ * \param slot_index Index of the slot
+ * \param item Index of the item: 0 version, 1 checksum, 2 checksum2
+ * \param unit Destination, `max(write_size, sizeof(uint32_t))` bytes, in volatile memory
  */
-static void get_slot_meta(lftl_ctx_t*ctx, lftl_meta_t* dst, unsigned int slot_index){
-  const uint32_t write_size = ctx->nvm_props->write_size;
-  const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
-  const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
-  uint32_t*phy_meta = (uint32_t*)(slot_base(ctx, slot_index) + meta_offset(ctx));
-  uint32_t buf[LFTL_DIV_CEIL(meta_size,sizeof(uint32_t))];
-  nvm_read(ctx,ctx->nvm_props,buf,phy_meta,meta_size);
-  for(unsigned int i = 0; i < LFTL_META_N_ITEMS; i++){
-    dst->items[i] = buf[i*item_size/sizeof(uint32_t)];
-  }
+static void get_slot_item(lftl_ctx_t*ctx, unsigned int slot_index, unsigned int item, uint32_t*unit){
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  const uint8_t*const phy = slot_base(ctx, slot_index) + meta_offset(ctx) + item*item_size;
+  nvm_read(ctx,ctx->nvm_props,unit,phy,item_size);
 }
 
 /**
@@ -603,9 +602,10 @@ static void get_slot_meta(lftl_ctx_t*ctx, lftl_meta_t* dst, unsigned int slot_in
  * \returns The slot's stored version number
  */
 static uint32_t get_slot_version(lftl_ctx_t*ctx, unsigned int slot_index){
-  lftl_meta_t meta;
-  get_slot_meta(ctx, &meta, slot_index);
-  return meta.version;
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  uint32_t unit[LFTL_DIV_CEIL(item_size,sizeof(uint32_t))];
+  get_slot_item(ctx,slot_index,0,unit);
+  return unit[0];
 }
 
 /**
@@ -616,34 +616,50 @@ static uint32_t get_slot_version(lftl_ctx_t*ctx, unsigned int slot_index){
  * \returns The slot's stored checksum (as last written, not recomputed)
  */
 static uint32_t get_slot_checksum(lftl_ctx_t*ctx, unsigned int slot_index){
-  lftl_meta_t meta;
-  get_slot_meta(ctx, &meta, slot_index);
-  return meta.checksum;
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  uint32_t unit[LFTL_DIV_CEIL(item_size,sizeof(uint32_t))];
+  get_slot_item(ctx,slot_index,1,unit);
+  return unit[0];
 }
 
 /**
- * \brief Recompute the checksum a slot's data and version should have.
+ * \brief Read the checksum2 field of a slot's meta-data, and whether its
+ * whole write unit reads erased.
+ *
+ * The bytes next to the value are programmed to zero with it, so the whole
+ * unit tells a checksum2 that was never programmed from one whose program
+ * was torn, see ::find_current_slot.
  *
  * \param ctx Context of the LFTL area
  * \param slot_index Index of the slot
- * \returns The checksum of the slot's current data, combined with its stored version
+ * \param all_erased Output: true if every byte of the write unit reads 0xFF
+ * \returns The slot's stored checksum2
  */
-static uint32_t compute_slot_checksum(lftl_ctx_t*ctx, unsigned int slot_index){
-  lftl_meta_t meta;
-  get_slot_meta(ctx,&meta,slot_index);
-  const uint32_t sum = checksum(ctx,slot_base(ctx, slot_index),ctx->data_size) + meta.version;
-  return sum;
+static uint32_t get_slot_checksum2(lftl_ctx_t*ctx, unsigned int slot_index, bool*all_erased){
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  uint32_t unit[LFTL_DIV_CEIL(item_size,sizeof(uint32_t))];
+  get_slot_item(ctx,slot_index,2,unit);
+  const uint8_t*const unit8 = (const uint8_t*)unit;
+  *all_erased = true;
+  for(unsigned int i=0;i<item_size;i++){
+    if(0xFF != unit8[i]){
+      *all_erased = false;
+      break;
+    }
+  }
+  return unit[0];
 }
 
 /**
- * \brief Check whether a slot's stored checksum matches its actual content.
+ * \brief Check whether a slot's stored checksum matches its data and a version.
  *
  * \param ctx Context of the LFTL area
  * \param slot_index Index of the slot
- * \returns true if the slot's data and version are internally consistent
+ * \param version The slot's version, as already read by the caller
+ * \returns true if the stored checksum is the checksum of the data plus `version`
  */
-static bool slot_integrity_check_ok(lftl_ctx_t*ctx, unsigned int slot_index){
-  return get_slot_checksum(ctx,slot_index) == compute_slot_checksum(ctx,slot_index);
+static bool slot_checksum_valid(lftl_ctx_t*ctx, unsigned int slot_index, uint32_t version){
+  return get_slot_checksum(ctx,slot_index) == checksum(ctx,slot_base(ctx, slot_index),ctx->data_size) + version;
 }
 
 /**
@@ -739,76 +755,89 @@ static void erase_slot(lftl_ctx_t*ctx, unsigned int slot_index){
 }
 
 /**
- * \brief Copy the current slot's data to the next slot, with fresh meta-data.
+ * \brief Whether a slot other than `except` is valid.
  *
- * Used by ::find_current_slot to recover from a tearing while the current
- * slot's meta-data was written. That meta-data cannot be repaired in place:
- * it would mean programming write units that are already (maybe partially)
- * programmed, which some flash refuses (e.g. STM32U5). This takes the normal
- * update path instead: erase the next slot, copy the data, write the
- * meta-data with the next version. A tearing during this call is recovered
- * like during any other write.
+ * Used by ::find_current_slot before it erases a torn slot, so that the
+ * area is never left without a valid slot by its own doing. One checksum
+ * per other slot, in that rare case only.
  *
- * \param ctx Context of the LFTL area, with `ctx->data` set to the current slot
- * \param version Version number of the current slot
+ * \param ctx Context of the LFTL area
+ * \param except Index of the slot to leave out
+ * \returns true if another slot's checksum matches its data and version
  */
-static void move_to_next_slot(lftl_ctx_t*ctx, uint32_t version){
-  const unsigned int index = next_slot(ctx);
-  uint8_t*const base = slot_base(ctx, index);
-  if(base == ctx->data) raise_error(ctx,LFTL_INTERNAL_ERROR);
-  erase_slot(ctx,index);
-  nvm_write(ctx,ctx->nvm_props,base,ctx->data,ctx->data_size);
-  write_meta(ctx, index, version+1);
-  ctx->data = base;
+static bool other_valid_slot(lftl_ctx_t*ctx, unsigned int except){
+  const unsigned int ns = n_slots(ctx);
+  for(unsigned int i=0;i<ns;i++){
+    if(i == except) continue;
+    const uint32_t version = get_slot_version(ctx,i);
+    if(version == 0xFFFFFFFF) continue;
+    if(slot_checksum_valid(ctx,i,version)) return true;
+  }
+  return false;
 }
 
 /**
  * \brief Locate the slot holding the current data and update `ctx->data`.
  *
- * Scans every slot for the highest version number whose integrity check
- * passes, raising ::LFTL_ERROR_VERSION_COLLISION if two slots that pass it
- * share that version, or ::LFTL_ERROR_NO_VALID_VERSION if none passes.
- * A slot that fails its integrity check is skipped whatever its version
- * word: a tearing during its erase leaves the previous content with random
- * bits set, which can read as any version, the current one included.
- * If the winning slot's checksum2 doesn't match checksum (a tearing
- * happened while writing the meta-data itself), moves its data to the next
- * slot with fresh meta-data, see ::move_to_next_slot.
+ * Scans every slot for the highest version number whose checksum matches
+ * its data and version, raising ::LFTL_ERROR_VERSION_COLLISION if two such
+ * slots share that version, or ::LFTL_ERROR_NO_VALID_VERSION if none
+ * passes. A slot whose checksum does not match is skipped whatever its
+ * version word: a tearing during its erase leaves the previous content with
+ * random bits set, which can read as any version, the current one included.
+ *
+ * A write programs the data, then version and checksum, then checksum2, so
+ * when the winning slot's checksum2 does not match, a tearing left it either
+ * erased (the cut came during the checksum word at the latest: that word may
+ * be weakly programmed, and read differently at a later boot) or partially
+ * programmed (its own program had started, so the checksum is complete).
+ * Only the whole write unit tells the two apart (::get_slot_checksum2).
+ * In the first case the slot is erased and the scan runs again: the previous
+ * version is current, its meta-data complete, and no boot ever returned the
+ * torn slot, whose checksum2 never matched. In the second case the slot is
+ * kept as it is. The torn slot is never copied, so the previous version is
+ * never erased on the strength of a word that may read differently later
+ * (ISSUES.md LFTL-009). A torn slot that is the only valid one is kept too:
+ * nothing in normal operation produces that state, and keeping it beats
+ * having nothing.
  *
  * \param ctx Context of the LFTL area
  */
 static void find_current_slot(lftl_ctx_t*ctx){
   const unsigned int ns = n_slots(ctx);
   const uint32_t invalid_index = 0xFFFFFFFF;
-  uint32_t max_version_index = invalid_index;
-  uint32_t max_version = 0;
-  for(unsigned int i=0;i<ns;i++){
-    const uint32_t version = get_slot_version(ctx,i);
-    if(version == 0xFFFFFFFF) continue;
-    const bool found_one = invalid_index != max_version_index;
-    if(found_one && (version < max_version)) continue;
-    if(!slot_integrity_check_ok(ctx,i)) continue;
-    if(found_one && (version == max_version)) {
-      raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
+  //a second pass at most: the slot erased by the first one is then invalid
+  for(unsigned int pass = 0; pass < 2; pass++){
+    uint32_t max_version_index = invalid_index;
+    uint32_t max_version = 0;
+    for(unsigned int i=0;i<ns;i++){
+      const uint32_t version = get_slot_version(ctx,i);
+      if(version == 0xFFFFFFFF) continue;
+      const bool found_one = invalid_index != max_version_index;
+      if(found_one && (version < max_version)) continue;
+      if(!slot_checksum_valid(ctx,i,version)) continue;
+      if(found_one && (version == max_version)) {
+        raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
+      }
+      max_version_index = i;
+      max_version = version;
     }
-    max_version_index = i;
-    max_version = version;
+    if(invalid_index == max_version_index) {
+      raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
+    }
+    bool checksum2_erased;
+    const uint32_t checksum2 = get_slot_checksum2(ctx, max_version_index, &checksum2_erased);
+    const bool complete = checksum2 == get_slot_checksum(ctx, max_version_index);
+    if(complete || !checksum2_erased || !other_valid_slot(ctx, max_version_index)){
+      ctx->data = slot_base(ctx, max_version_index);
+      return;
+    }
+    //torn during the checksum word at the latest: erase it, the previous
+    //version is current. ctx->data stays unset until then, so an error here
+    //leaves nothing to trust
+    erase_slot(ctx, max_version_index);
   }
-  if(invalid_index == max_version_index) {
-    raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
-  }
-  ctx->data = slot_base(ctx, max_version_index);
-  //check integrity of checksum2
-  lftl_meta_t meta;
-  get_slot_meta(ctx, &meta, max_version_index);
-  if(meta.checksum2 != meta.checksum){
-    //A tearing happened during programming of checksum or checksum2:
-    //checksum may be weakly programmed and checksum2 erased or partially
-    //programmed. We do not reprogram them in place since some flash refuses
-    //to program a write unit which is not erased, we copy the data to the
-    //next slot with fresh meta data instead.
-    move_to_next_slot(ctx, meta.version);
-  }
+  raise_error(ctx,LFTL_INTERNAL_ERROR);
 }
 
 /**
@@ -999,7 +1028,7 @@ static void ewlf_write_record_prev_erased(lftl_ctx_t*ctx, uint8_t*record_addr){
  *
  * checksum2 is not part of the check: as for a slot (see ::find_current_slot),
  * a record whose data and checksum are valid is taken whatever its checksum2,
- * and the caller copies it forward when checksum2 does not match. A tearing
+ * and the caller copies it forward when checksum2 reads erased. A tearing
  * while writing the record's meta-data leaves checksum2 erased or partially
  * programmed, and the checksum possibly weakly programmed; rejecting such a
  * record would make the outcome depend on how a weakly programmed word reads
@@ -1057,6 +1086,24 @@ static bool ewlf_newest_in_unit(lftl_ctx_t*ctx, unsigned int unit_index, const u
 static void copy_forward_ewlf(lftl_ctx_t*ctx);
 
 /**
+ * \brief Whether an EWLF record's checksum2 write unit reads all erased.
+ *
+ * Tells a record torn during its checksum word (checksum2 untouched, the
+ * checksum possibly weakly programmed) from one torn during checksum2
+ * itself (some of its bits programmed, the checksum complete), as
+ * ::get_slot_checksum2 does for a slot.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ * \returns true if every byte of the checksum2 write unit reads 0xFF
+ */
+static bool ewlf_record_checksum2_erased(lftl_ctx_t*ctx, const uint8_t*record_addr){
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  const uint8_t*const addr = record_addr + ewlf_magic_phy_size(ctx) + ewlf_prev_erased_phy_size(ctx) + 2*item_size;
+  return is_erased(ctx,addr,item_size);
+}
+
+/**
  * \brief Locate the current EWLF record and update `ctx->data`.
  *
  * Records only ever start at the top of an erase unit minus a multiple of
@@ -1075,10 +1122,13 @@ static void copy_forward_ewlf(lftl_ctx_t*ctx);
  * collide with.
  *
  * If the record's checksum2 does not match its checksum, a tearing happened
- * while its meta-data was written and its checksum may be weakly
+ * while its meta-data was written. When checksum2 reads all erased, the cut
+ * came during the checksum word at the latest, which may be weakly
  * programmed: the record is copied forward first, with complete meta-data,
  * so that nothing depends on how that word reads later (see
- * ::copy_forward_ewlf). Nothing is erased before that copy is complete.
+ * ::copy_forward_ewlf). Nothing is erased before that copy is complete. When
+ * checksum2 is partially programmed, its own program had started, so the
+ * checksum is complete and the record is kept as it is.
  *
  * The top record of the unit holding the current record started that unit
  * with a rollover: if its `prev_erased` flag is not confirmed, the previous
@@ -1107,7 +1157,7 @@ static void find_current_record(lftl_ctx_t*ctx){
       meta = next_meta;
     }
     ctx->data = (void*)(record_addr + ewlf_header_phy_size(ctx));
-    if(meta.checksum2 != meta.checksum){
+    if((meta.checksum2 != meta.checksum) && ewlf_record_checksum2_erased(ctx,record_addr)){
       copy_forward_ewlf(ctx);
       record_unit = ((uintptr_t)((uint8_t*)ctx->data - ewlf_header_phy_size(ctx) - (uint8_t*)ctx->area)) / page_size(ctx);
     }
@@ -1560,14 +1610,15 @@ static void write_ewlf(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
 /**
  * \brief Copy the current EWLF record forward, with complete meta-data.
  *
- * Used by ::find_current_record when the current record's checksum2 does
- * not match its checksum: a tearing happened while that record's meta-data
- * was written, so its checksum may be weakly programmed and read
- * differently later. Like ::move_to_next_slot for a regular area, this
+ * Used by ::find_current_record when the current record's checksum2 reads
+ * erased: a tearing happened while that record's meta-data was written, so
+ * its checksum may be weakly programmed and read differently later. This
  * takes the normal write path: the same data, read from the record itself,
  * at the next free position, with the next version. With at least 2
  * records per erase unit (see ::check_config), a copy of a unit's top
  * record stays in that unit, so nothing is erased before it is complete.
+ * A regular area cannot do the same, since a copy there needs another slot
+ * erased first: it erases the torn slot instead (see ::find_current_slot).
  *
  * \param ctx Context of the EWLF area, with `ctx->data` set to the record to copy
  */

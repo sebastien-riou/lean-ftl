@@ -28,9 +28,12 @@ The writes are done from the highest possible address towards lower address. Thi
 Records can only start at the top of an erase unit minus a multiple of the record size. The read process checks
 these positions by increasing address, starting from the base address of the EWLF area, and returns the first
 record whose header magic and data integrity (same approach as with regular areas) are valid. If its checksum2
-does not match its checksum, a tearing happened while its meta data was written and its checksum may be weakly
-programmed: the record is copied forward first, as a new record with complete meta data, like a torn slot of a
-regular area, so that nothing depends on how that word reads at a later boot.
+does not match its checksum, a tearing happened while its meta data was written. When checksum2 reads all erased,
+the cut came during the checksum word at the latest, which may be weakly programmed: the record is copied forward
+first, as a new record with complete meta data, so that nothing depends on how that word reads at a later boot.
+When checksum2 is partially programmed, its own program had started, so the checksum is complete and the record
+is kept as it is. (A regular area cannot copy a torn slot without erasing another slot first: it erases the torn
+slot instead, and the previous version is current.)
 
 NOTE: checking only these positions means that data can never be mistaken for a header, even if it contains a
 copy of one, and that every record checked fits in its erase unit.

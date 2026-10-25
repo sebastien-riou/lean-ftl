@@ -114,6 +114,22 @@ static void raw_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
 static void raw_erase(void*base_address, unsigned int n_pages){
   if(raw_nvm_erase_func(base_address,n_pages)) throw_exception(INTERNAL_ERROR_NVM_WRITE);
 }
+//Whether every byte of a physical range reads erased. Read through the raw
+//callback: lftl_memread would take an address inside an area's logical range
+//for a logical one, bounded by its data size. A failure is raised as the
+//library raises it, so that a simulated tearing is handled as one
+static bool raw_reads_erased(const uint8_t*addr, uintptr_t size){
+  uint8_t buf[64];
+  while(size){
+    const uintptr_t chunk = size < sizeof(buf) ? size : sizeof(buf);
+    const uint8_t status = nvm_read(buf,addr,chunk);
+    if(status) throw_exception(LFTL_ERROR_LOW_LEVEL_READ | status);
+    for(uintptr_t i=0;i<chunk;i++) if(0xFF != buf[i]) return false;
+    addr += chunk;
+    size -= chunk;
+  }
+  return true;
+}
 void (*erase_all_func)(lftl_ctx_t*ctx);
 write_func_t write_func;
 write_func_t write_any_func;
@@ -1490,15 +1506,26 @@ void version_collision_test(){
   format_func(&nvmd); //leave nvmd clean for anything after this test
 }
 
-//Rebuild nvmd's newest slot as a tearing between the writes of checksum and
-//checksum2 leaves it: data, version and checksum programmed, checksum2 erased
-//or partially programmed. The next slot search must recover the newest data
-//without programming any write unit that is not erased, which the linux
-//simulator's nvm_write refuses like STM32U5-class flash does.
-void torn_checksum2_test_core(bool partial){
+//Rebuild nvmd's newest slot as a tearing during the writes of its meta-data
+//leaves it: data, version and checksum programmed, checksum2 erased or with
+//the last programmed byte of its value still erased (ISSUES.md LFTL-009).
+//checksum2 erased: the cut came during the checksum word at the latest, that
+//word may be weakly programmed, and the scan erases the slot: the previous
+//version is current. checksum2 partially programmed: its program had started,
+//the checksum is complete, and the slot is kept as it is. The torn slot is
+//never copied, so the previous version is never erased on the strength of a
+//word that may read differently later. checksum2 erased with no other valid
+//slot: the slot is kept.
+typedef enum {
+  TORN_CHECKSUM2_ERASED,
+  TORN_CHECKSUM2_PARTIAL,
+  TORN_CHECKSUM2_ERASED_ONLY_SLOT,
+} torn_checksum2_mode_t;
+void torn_checksum2_test_core(torn_checksum2_mode_t mode){
+  uint8_t previous[sizeof(nvm.data7)];
   uint8_t buf[sizeof(nvm.data7)];
-  stateful_prng_fill(buf,sizeof(buf));
-  test_write(&nvmd,nvm.data7,buf,sizeof(buf));
+  stateful_prng_fill(previous,sizeof(previous));
+  test_write(&nvmd,nvm.data7,previous,sizeof(previous));
   stateful_prng_fill(buf,sizeof(buf));
   test_write(&nvmd,nvm.data7,buf,sizeof(buf));
 
@@ -1509,7 +1536,9 @@ void torn_checksum2_test_core(bool partial){
   const uintptr_t erase_size = nvmd.nvm_props->erase_size;
   const uintptr_t n_pages_in_slot = LFTL_DIV_CEIL(nvmd.data_size + meta_phy_size, erase_size);
   const uintptr_t slot_size = n_pages_in_slot * erase_size;
+  const unsigned int n_slots = nvmd.area_size / slot_size;
   const unsigned int current_index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
+  const unsigned int previous_index = (current_index + n_slots - 1) % n_slots;
   uint8_t*const slot = (uint8_t*)nvmd.area + current_index*slot_size;
   uint8_t*const meta = slot + slot_size - meta_phy_size;
   uint8_t*const checksum2 = meta + meta_phy_size - item_size;
@@ -1524,9 +1553,9 @@ void torn_checksum2_test_core(bool partial){
   raw_erase(slot,n_pages_in_slot);
   raw_write(slot,data_img,nvmd.data_size);
   raw_write(meta,meta_img,meta_phy_size - item_size); //version and checksum
-  if(partial){
+  uint8_t*const checksum2_img = meta_img + meta_phy_size - item_size;
+  if(TORN_CHECKSUM2_PARTIAL == mode){
     //the last programmed byte of checksum2's value still reads erased
-    uint8_t*const checksum2_img = meta_img + meta_phy_size - item_size;
     for(unsigned int i=sizeof(uint32_t);i>0;i--){
       if(0xFF != checksum2_img[i-1]){
         checksum2_img[i-1] = 0xFF;
@@ -1535,27 +1564,42 @@ void torn_checksum2_test_core(bool partial){
     }
     raw_write(checksum2,checksum2_img,item_size);
   }
+  if(TORN_CHECKSUM2_ERASED_ONLY_SLOT == mode){
+    raw_erase((uint8_t*)nvmd.area + previous_index*slot_size,n_pages_in_slot);
+  }
 
-  //force a fresh slot search: it finds the torn slot and recovers its data
+  //force a fresh slot search
+  const uint8_t*const expected = (TORN_CHECKSUM2_ERASED == mode) ? previous : buf;
   nvmd.data = LFTL_INVALID_POINTER;
-  read_and_check(&nvmd,nvm.data7,buf,sizeof(buf));
-  //the slot it settled on has complete meta-data: checksum2 == checksum
+  read_and_check(&nvmd,nvm.data7,expected,sizeof(buf));
   const unsigned int index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
-  uint8_t*const new_meta = (uint8_t*)nvmd.area + index*slot_size + slot_size - meta_phy_size;
-  uint8_t new_meta_img[meta_phy_size];
-  lftl_memread(new_meta_img,new_meta,meta_phy_size);
-  if(memcmp(new_meta_img + item_size,new_meta_img + 2*item_size,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(TORN_CHECKSUM2_ERASED == mode){
+    //the torn slot was erased, the previous version is current
+    if(index != previous_index) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(!raw_reads_erased(slot,slot_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  } else {
+    //the torn slot is current, as it is
+    if(index != current_index) throw_exception(ERROR_VERIFICATION_FAIL);
+    uint8_t checksum2_now[item_size];
+    lftl_memread(checksum2_now,checksum2,item_size);
+    if(TORN_CHECKSUM2_PARTIAL == mode){
+      if(memcmp(checksum2_now,checksum2_img,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    } else {
+      for(unsigned int i=0;i<item_size;i++) if(0xFF != checksum2_now[i]) throw_exception(ERROR_VERIFICATION_FAIL);
+    }
+  }
   //it survives another reboot, and the area still takes updates
   nvmd.data = LFTL_INVALID_POINTER;
-  read_and_check(&nvmd,nvm.data7,buf,sizeof(buf));
+  read_and_check(&nvmd,nvm.data7,expected,sizeof(buf));
   randomized_test_write(&nvmd,nvm.data7,sizeof(buf));
   SANITY_CHECK();
 }
 
 void torn_checksum2_test(){
   DEBUG_PRINTLN(__func__);
-  torn_checksum2_test_core(0); //checksum2 erased
-  torn_checksum2_test_core(1); //checksum2 partially programmed
+  torn_checksum2_test_core(TORN_CHECKSUM2_ERASED);
+  torn_checksum2_test_core(TORN_CHECKSUM2_PARTIAL);
+  torn_checksum2_test_core(TORN_CHECKSUM2_ERASED_ONLY_SLOT);
 }
 
 //A power cut during the erase of the next slot leaves it partly erased: its
@@ -1684,22 +1728,28 @@ static uint32_t ewlf_raw_item(const lftl_ctx_t*ctx, const uint8_t*record, unsign
   return item;
 }
 
-static bool ewlf_raw_erased(const uint8_t*addr, uintptr_t size){
-  uint8_t buf[64];
-  while(size){
-    const uintptr_t chunk = size < sizeof(buf) ? size : sizeof(buf);
-    lftl_memread(buf,addr,chunk);
-    for(uintptr_t i=0;i<chunk;i++) if(0xFF != buf[i]) return false;
-    addr += chunk;
-    size -= chunk;
+//After the scan: a record whose checksum2 read erased was copied forward, the
+//copy right below it; one whose checksum2 is partially programmed is stable
+//and kept as it is
+static void check_torn_record(lftl_ctx_t*ewlf, uint8_t*R, uint32_t version, bool partial){
+  const ewlf_layout_t l = ewlf_layout(ewlf);
+  uint8_t*const current = (uint8_t*)ewlf->data - l.header_size;
+  if(partial){
+    if(current != R) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(ewlf_raw_item(ewlf,R,2) == ewlf_raw_item(ewlf,R,1)) throw_exception(ERROR_VERIFICATION_FAIL); //not repaired
+  } else {
+    if(current != R - l.record_size) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(ewlf_raw_item(ewlf,current,0) != version+2) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(ewlf_raw_item(ewlf,current,1) != ewlf_raw_item(ewlf,current,2)) throw_exception(ERROR_VERIFICATION_FAIL);
   }
-  return true;
 }
 
-//A record torn during its checksum2 (LFTL-008), on an EWLF area over nvmd's
-//pages: the scan takes it when its data and checksum are valid, and copies it
-//forward with complete meta-data, as find_current_slot does for a slot, so
-//that nothing depends on how the weakly programmed word reads later. Within a
+//A record torn during its meta-data (LFTL-008), on an EWLF area over nvmd's
+//pages: the scan takes it when its data and checksum are valid. checksum2
+//erased: the checksum may be weakly programmed, the record is copied forward
+//with complete meta-data, so that nothing depends on how that word reads later.
+//checksum2 partially programmed: its program had started, the checksum is
+//complete, the record is kept as it is (the rule of LFTL-009). Within a
 //unit, then as the rollover record at the top of a unit, where the previous
 //unit is erased only once the copy is complete. On Linux, where the NVM is
 //RAM, the torn record's checksum is then made to read erased: the copy must
@@ -1730,18 +1780,16 @@ void torn_ewlf_checksum2_test_core(bool partial){
   ewlf_raw_torn_record(&ewlf,R,d2,version+1,partial);
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d2,sizeof(d2));
-  //the current record is a complete copy of R, right below it
-  uint8_t*copy = (uint8_t*)ewlf.data - l.header_size;
-  if(copy != R - l.record_size) throw_exception(ERROR_VERIFICATION_FAIL);
-  if(ewlf_raw_item(&ewlf,copy,0) != version+2) throw_exception(ERROR_VERIFICATION_FAIL);
-  if(ewlf_raw_item(&ewlf,copy,1) != ewlf_raw_item(&ewlf,copy,2)) throw_exception(ERROR_VERIFICATION_FAIL);
+  check_torn_record(&ewlf,R,version,partial);
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d2,sizeof(d2));
   #ifdef HAS_TEARING_SIMULATION
-  //the weakly programmed checksum of R now reads erased: the copy is found
-  memset(R + l.magic_size + l.flag_size + l.item_size,0xFF,sizeof(uint32_t));
-  ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d2,sizeof(d2));
+  if(!partial){
+    //the weakly programmed checksum of R now reads erased: the copy is found
+    memset(R + l.magic_size + l.flag_size + l.item_size,0xFF,sizeof(uint32_t));
+    ewlf.data = LFTL_INVALID_POINTER; //reset
+    read_and_check(&ewlf,area,d2,sizeof(d2));
+  }
   #endif
   stateful_prng_fill(d3,sizeof(d3));
   lftl_write(&ewlf,area,d3,sizeof(d3));
@@ -1762,21 +1810,20 @@ void torn_ewlf_checksum2_test_core(bool partial){
   ewlf_raw_torn_record(&ewlf,R,d2,version+1,partial);
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d2,sizeof(d2));
-  copy = (uint8_t*)ewlf.data - l.header_size;
-  if(copy != R - l.record_size) throw_exception(ERROR_VERIFICATION_FAIL);
-  if(ewlf_raw_item(&ewlf,copy,0) != version+2) throw_exception(ERROR_VERIFICATION_FAIL);
-  if(ewlf_raw_item(&ewlf,copy,1) != ewlf_raw_item(&ewlf,copy,2)) throw_exception(ERROR_VERIFICATION_FAIL);
+  check_torn_record(&ewlf,R,version,partial);
   //the previous unit is erased and R's prev_erased flag confirmed
-  if(!ewlf_raw_erased(area + (n_units-1)*erase_size,erase_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(!raw_reads_erased(area + (n_units-1)*erase_size,erase_size)) throw_exception(ERROR_VERIFICATION_FAIL);
   uint8_t flag;
   lftl_memread(&flag,R + l.magic_size,sizeof(flag));
   if(0 != flag) throw_exception(ERROR_VERIFICATION_FAIL);
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d2,sizeof(d2));
   #ifdef HAS_TEARING_SIMULATION
-  memset(R + l.magic_size + l.flag_size + l.item_size,0xFF,sizeof(uint32_t));
-  ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d2,sizeof(d2));
+  if(!partial){
+    memset(R + l.magic_size + l.flag_size + l.item_size,0xFF,sizeof(uint32_t));
+    ewlf.data = LFTL_INVALID_POINTER; //reset
+    read_and_check(&ewlf,area,d2,sizeof(d2));
+  }
   #endif
   stateful_prng_fill(d3,sizeof(d3));
   lftl_write(&ewlf,area,d3,sizeof(d3));
@@ -1791,6 +1838,84 @@ void torn_ewlf_checksum2_test(){
   DEBUG_PRINTLN(__func__);
   torn_ewlf_checksum2_test_core(0); //checksum2 erased
   torn_ewlf_checksum2_test_core(1); //checksum2 partially programmed
+}
+
+//LFTL-009: a power cut right after the first erase of the scan's repair of a
+//slot whose checksum2 is erased. The repair used to copy the torn slot into
+//the next one, erasing it first; with 2 slots that is the previous version,
+//and the torn slot's possibly weak checksum was then the only validator in the
+//area. The scan now erases the torn slot instead: the previous version is
+//untouched. On an unregistered copy of nvmd (2 slots) with NVM properties
+//whose erase callback erases, then reports the cut once.
+static int erases_before_cut = -1;
+static uint8_t erase_then_cut(void*base_address, unsigned int n_pages){
+  const uint8_t status = nvm_erase(base_address,n_pages);
+  if(status) return status;
+  if(0 == erases_before_cut--) return 0x7F;
+  return 0;
+}
+void torn_checksum2_cut_repair_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props = nvm_props3;
+  props.erase = erase_then_cut;
+  props.next = LFTL_INVALID_POINTER;
+  lftl_ctx_t ctx = nvmd;
+  ctx.nvm_props = &props;
+  ctx.data = LFTL_INVALID_POINTER;
+  ctx.transaction_tracker = LFTL_INVALID_POINTER;
+  ctx.next = LFTL_INVALID_POINTER;
+  ctx.area_type = LFTL_AREA_TYPE_STD; //not registered, so set here
+  const uint32_t write_size = props.write_size;
+  const uint32_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t meta_phy_size = LFTL_META_N_ITEMS * item_size;
+  const uintptr_t erase_size = props.erase_size;
+  const uintptr_t n_pages_in_slot = LFTL_DIV_CEIL(ctx.data_size + meta_phy_size, erase_size);
+  const uintptr_t slot_size = n_pages_in_slot * erase_size;
+  const unsigned int n_slots = ctx.area_size / slot_size;
+  if(n_slots != 2) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+  uint8_t previous[sizeof(nvm.data7)];
+  uint8_t buf[sizeof(nvm.data7)];
+  uint8_t rbuf[sizeof(nvm.data7)];
+  lftl_format(&ctx);
+  stateful_prng_fill(previous,sizeof(previous));
+  lftl_write(&ctx,nvm.data7,previous,sizeof(previous));
+  stateful_prng_fill(buf,sizeof(buf));
+  lftl_write(&ctx,nvm.data7,buf,sizeof(buf));
+  const unsigned int torn_index = ((uintptr_t)ctx.data - (uintptr_t)ctx.area) / slot_size;
+  const unsigned int previous_index = 1 - torn_index;
+  uint8_t*const torn = (uint8_t*)ctx.area + torn_index*slot_size;
+  uint8_t*const torn_meta = torn + slot_size - meta_phy_size;
+  uint8_t*const previous_meta = (uint8_t*)ctx.area + previous_index*slot_size + slot_size - meta_phy_size;
+  //the torn slot, as test 24 builds it: checksum2 erased
+  uint8_t data_img[ctx.data_size];
+  uint8_t meta_img[meta_phy_size];
+  lftl_memread(data_img,torn,ctx.data_size);
+  lftl_memread(meta_img,torn_meta,meta_phy_size);
+  raw_erase(torn,n_pages_in_slot);
+  raw_write(torn,data_img,ctx.data_size);
+  raw_write(torn_meta,meta_img,meta_phy_size - item_size); //version and checksum
+  uint32_t previous_version;
+  lftl_memread(&previous_version,previous_meta,sizeof(previous_version));
+  //the first access after a reset repairs: the power cut comes right after
+  //the repair's first erase
+  erases_before_cut = 0;
+  ctx.data = LFTL_INVALID_POINTER; //reset
+  EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_ERASE | 0x7F, lftl_read(&ctx,rbuf,nvm.data7,sizeof(rbuf)));
+  erases_before_cut = -1;
+  //the previous version is untouched: the erase hit the torn slot
+  uint32_t version_now;
+  lftl_memread(&version_now,previous_meta,sizeof(version_now));
+  if(version_now != previous_version) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(!raw_reads_erased(torn,slot_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  //the previous version is read, and the area still takes updates
+  ctx.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ctx,nvm.data7,previous,sizeof(previous));
+  stateful_prng_fill(buf,sizeof(buf));
+  lftl_write(&ctx,nvm.data7,buf,sizeof(buf));
+  ctx.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ctx,nvm.data7,buf,sizeof(buf));
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
 }
 
 //After a reset, ctx->data is LFTL_INVALID_POINTER until something locates
@@ -2117,7 +2242,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 33
+  #define N_TESTS 34
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -2224,6 +2349,10 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 31:TEAR_COV(100);test_and_simulate_tearing(memset_whole_area_test,tear_cov_log[i]);break;
       case 32:TEAR_COV(100);test_and_simulate_tearing(torn_erase_version_test,tear_cov_log[i]);break;
       case 33:TEAR_COV(100);test_and_simulate_tearing(torn_ewlf_checksum2_test,tear_cov_log[i]);break;
+      case 34:
+        //Hardcoded 0, ignoring --tear-cov: the test injects its own erase
+        //failure, and a tear injected around it would change the expected error.
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(torn_checksum2_cut_repair_test,0);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

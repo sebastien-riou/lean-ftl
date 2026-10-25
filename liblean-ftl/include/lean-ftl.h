@@ -140,7 +140,7 @@ typedef void (*error_handler_t)(uint32_t err_code);
 typedef struct lftl_nvm_props_struct {
   void*base;            /**< the base address of the entire NVM */
   uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
-  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it */
+  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it. On flash with ECC, at least the ECC codeword, so that each meta-data item is its own codeword */
   uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it */
   nvm_erase_t erase;    /**< Erase function for this area. */
   nvm_write_t write;    /**< Write function for this area. */

@@ -59,7 +59,7 @@ bool tearing_sim(void*base_address, uint32_t size){
     //a tearing that would keep old data because in some case
     //a tearing could go undetected (old data may match new data)
     const uint32_t offset = size - tsize;
-    for(uint32_t i = offset;i<tsize;i++){
+    for(uint32_t i = offset;i<size;i++){
       uint8_t*dst = (uint8_t*)base_address+i;
       *dst ^= 0x55; 
     }

@@ -1971,6 +1971,44 @@ void large_write_unit_test(){
   SANITY_CHECK();
 }
 
+#ifdef HAS_TEARING_SIMULATION
+//The simulator must corrupt every byte past the cut and none before it, for a
+//cut anywhere in a multi-unit write or erase: its corruption loop once stopped
+//at tsize instead of size, so a cut in the second half left the write complete
+//while reporting a tear, and the sweep passed positions it never exercised.
+static void check_cut(const uint8_t*nvm_bytes, const uint8_t*intact, uintptr_t cut, uintptr_t size){
+  for(uintptr_t i=0;i<size;i++){
+    const bool same = nvm_bytes[i] == intact[i];
+    if(same != (i < cut)) throw_exception(ERROR_VERIFICATION_FAIL);
+  }
+}
+void tearing_sim_self_test(){
+  DEBUG_PRINTLN(__func__);
+  const unsigned int n_units = 4;
+  const uintptr_t size = n_units * nvm_write_size;
+  uint8_t*const page = (uint8_t*)nvmd.area;
+  uint8_t src[size];
+  uint8_t erased[nvm_erase_size];
+  memset(erased,0xFF,nvm_erase_size);
+  for(unsigned int k=0;k<=n_units;k++){
+    //a write of n_units units cut after unit k; k == n_units: no cut
+    stateful_prng_fill(src,size);
+    raw_erase(page,1);
+    tearing_sim_set_target(k);
+    const uint8_t status = nvm_write(page,src,size);
+    if(status != (k < n_units ? SIMULATED_TEARING : 0)) throw_exception(ERROR_VERIFICATION_FAIL);
+    check_cut(page,src,k*nvm_write_size,size);
+    //an erase of the page cut after unit k
+    tearing_sim_set_target(k);
+    if(SIMULATED_TEARING != nvm_erase(page,1)) throw_exception(ERROR_VERIFICATION_FAIL);
+    check_cut(page,erased,k*nvm_write_size,nvm_erase_size);
+  }
+  tearing_sim_init();
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+#endif
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -2242,7 +2280,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 34
+  #define N_TESTS 35
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -2353,6 +2391,14 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         //Hardcoded 0, ignoring --tear-cov: the test injects its own erase
         //failure, and a tear injected around it would change the expected error.
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(torn_checksum2_cut_repair_test,0);break;
+      case 35:
+        //Hardcoded 0, ignoring --tear-cov: the test sets the simulator's cut
+        //itself. It tests the simulator, so it only exists where there is one.
+        tear_cov_log[i]=TEAR_COV_NA;
+        #ifdef HAS_TEARING_SIMULATION
+        test_and_simulate_tearing(tearing_sim_self_test,0);
+        #endif
+        break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

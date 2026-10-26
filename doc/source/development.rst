@@ -52,6 +52,8 @@ Portability
 That said, *lean-ftl* has been tested so far only on little-endian devices.
 It has been tested on STM32 and CH32V307 MCUs only but it is designed to be portable to 
 other MCUs and even handle external NVMs such as QSPI flash, SDcards...
+The flash side of portability, what an NVM must provide and what *lean-ftl* does not rely on,
+is the :ref:`flash` page.
 
 Stable API
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

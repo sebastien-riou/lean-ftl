@@ -8,7 +8,10 @@
 #define LFTL_INVALID_POINTER ((void*)-1)
 
 #ifndef LFTL_WU_MAX_SIZE
-  #define LFTL_WU_MAX_SIZE 128 
+  /// Largest write unit supported, in bytes: ::lftl_register_area raises
+  /// ::LFTL_ERROR_WU_SIZE_TOO_LARGE above it (R2 of the "Flash requirements and
+  /// assumptions" page). Define it before including this header if the NVM needs more.
+  #define LFTL_WU_MAX_SIZE 128
 #endif
 
 /// Compute the size required for ``transaction_tracker``. 
@@ -69,8 +72,11 @@
 /**
  * \brief Callback to erase physical NVM
  *
- * It erases one or more pages. 
+ * It erases one or more pages.
  * If `n_pages` = 0 it shall immediately return 0.
+ *
+ * The erased value it leaves is only constrained for EWLF areas, where erased
+ * bytes must read 0xFF (R6 and N1 of the "Flash requirements and assumptions" page).
  * \param base_address The start address of the range to erase
  * \param n_pages The number of physical pages to erase
  * 
@@ -81,10 +87,14 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
 /**
  * \brief Callback to write physical NVM
  *
- * It writes one or more bytes. 
- * 
+ * It writes one or more bytes.
+ *
  * If `size` = 0 it shall immediately return 0.
- * 
+ *
+ * It is only ever asked to program erased write units, each at most once
+ * between two erases, so it never needs to overwrite programmed cells
+ * (R3 and N3 of the "Flash requirements and assumptions" page).
+ *
  * The destination range may cross multiple physical page boundaries.
  * 
  * The source may be within the NVM but is guaranteed to not overlap 
@@ -136,12 +146,15 @@ typedef void (*error_handler_t)(uint32_t err_code);
 /** @struct lftl_nvm_props_struct
  *  Properties of the physical NVM
  *
+ *  \rst
+ *  What the NVM must provide, and what lean-ftl does not rely on: :ref:`flash`.
+ *  \endrst
  */
 typedef struct lftl_nvm_props_struct {
   void*base;            /**< the base address of the entire NVM */
   uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
-  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it. On flash with ECC, at least the ECC codeword, so that each meta-data item is its own codeword */
-  uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it */
+  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it: a power of two dividing `erase_size`, at most ::LFTL_WU_MAX_SIZE. On flash with ECC, at least the ECC codeword, so that each meta-data item is its own codeword (R2 of the "Flash requirements and assumptions" page) */
+  uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it; an area is whole erase units (R1 of the "Flash requirements and assumptions" page) */
   nvm_erase_t erase;    /**< Erase function for this area. */
   nvm_write_t write;    /**< Write function for this area. */
   nvm_read_t read;      /**< Read function for this area. */
@@ -286,7 +299,8 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx);
 /// The configuration is checked first, as for ::lftl_register_area, except
 /// that an EWLF area needs at least 2 erase units, and at least 2 records
 /// (the data plus a header each, see ::LFTL_EWLF_RECORD_SIZE) must fit in
-/// one erase unit.
+/// one erase unit. The NVM's erased bytes must read 0xFF (R6 of the "Flash
+/// requirements and assumptions" page).
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////

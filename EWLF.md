@@ -10,7 +10,7 @@ If we can store 100 times the data within an erase unit, then the wear leveling 
 The main assumptions are:
 - the data is small compared to the erase unit
 - the write unit is equal to or smaller than the data
-- erased bytes read `0xFF`: free record positions and the `prev_erased` flag are recognized by that value
+- erased bytes read `0xFF`: free record positions and the `prev_erased` flag are recognized by that value (R6 of the documentation's [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html#flash-required) page)
 
 The memory layout of a record is the following:
 - header

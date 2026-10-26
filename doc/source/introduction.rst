@@ -28,12 +28,14 @@ Write unit
 That's the minimum size of the write operation supported by the target NVM.
 Common values are 4 bytes, 8 bytes and 16 bytes.
 This is often called "programming size" or "write width" in datasheets.
+What *lean-ftl* requires of it is R2 of the :ref:`flash` page.
 
 Erase unit 
 ^^^^^^^^^^^^
 That's the minimum size of the erase operation supported by the target NVM.
 Common values are 2048 bytes, 4096 bytes and 8192 bytes.
 This is often called "page" or "sector" in datasheets.
+What *lean-ftl* requires of it is R1 of the :ref:`flash` page.
 
 Meta data
 ^^^^^^^^^^

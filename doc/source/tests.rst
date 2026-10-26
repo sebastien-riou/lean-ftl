@@ -58,7 +58,8 @@ For example, to run test number 9 with 50% tearing coverage:
   **Rational** All test cases starts from the same state, there is more diversity at the end.
 
 Use `--lib-info` to print the library version and build type, and `--test-callbacks` to check the
-NVM callbacks (erase, write and read back the whole test NVM) before the tests.
+NVM callbacks (erase, write and read back the whole test NVM) before the tests, a first check of
+R1 to R5 of :ref:`flash-required`.
 
 Code coverage
 --------------

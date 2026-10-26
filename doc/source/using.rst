@@ -20,6 +20,9 @@ To use those helper macros, you must define 3 macros before including
 - LFTL_WU_SIZE: Defines the size for "write unit". Value shall be the minimum write size in the NVM or a multiple of it.
 - LFTL_PAGE_SIZE: Defines the size for "LFTL page". Value shall be the minimum erase size in the NVM or a multiple of it and LFTL_WU_SIZE.
 
+The constraints on both values (power of two, divisibility, maximum) are R1 and R2 of
+:ref:`flash-required`.
+
 .. code-block:: c
   :linenos:
   :caption: Example: Enabling helper macros for STM32U5
@@ -121,7 +124,7 @@ Formatting, reading and writing work the same way as for a regular area,
 but EWLF areas do not support transactions: :c:func:`lftl_transaction_start`
 raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. A record, the area
 content plus a header, must fit in one page, and the NVM's erased bytes must
-read ``0xFF``. Use :c:func:`lftl_is_ewlf` if you need to tell,
+read ``0xFF`` (R6 of :ref:`flash-required`). Use :c:func:`lftl_is_ewlf` if you need to tell,
 given a context, whether it refers to an EWLF area or a regular one.
 
 Single LFTL area vs many
@@ -177,6 +180,9 @@ The integrator shall declare one :c:type:`lftl_nvm_props_t` for each targeted NV
 
 .. note:: ``base`` and ``size`` can be a subset of the physical NVM.
 
+What ``write_size`` and ``erase_size`` may be, and what the NVM behind them must provide, is on
+the :ref:`flash` page (R1, R2).
+
 Implementing the callbacks
 -----------------------------
 In order to use LFTL, the following callbacks needs to be implemented
@@ -192,12 +198,17 @@ https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, for CH32V307 
 https://github.com/sebastien-riou/lean-ftl/tree/main/target/ch32v307, and a RAM based
 one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
 
+What the callbacks must guarantee is R3 to R5 of :ref:`flash-required`, and what they need not
+provide is in :ref:`flash-not-relied-on`: *lean-ftl* programs each write unit at most once between
+two erases, whole units only, and never overwrites.
+
 .. note:: On flash with ECC that raises an NMI on a double-bit error (STM32L5, STM32U5),
   a program or erase interrupted by a power cut can leave a word that faults when read,
   and *lean-ftl* must read such words before it can skip them. The NMI handler must clear
   the ECC error flag and return, so that the read completes; the STM32 callbacks above do
   nothing about it, and a handler that loops or resets hangs the device at every boot.
-  See the integrator section of ``THREAT-MODEL.md`` in the repository.
+  See the integrator section of ``THREAT-MODEL.md`` in the repository, and R7 and T5 of
+  the :ref:`flash` page.
 
 Declaring LFTL areas 
 ----------------------

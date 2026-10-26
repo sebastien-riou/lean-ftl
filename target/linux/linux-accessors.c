@@ -119,7 +119,8 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
   if(0 != (size % nvm_write_size)) return 4;
   //like STM32U5-class flash: a write unit can be programmed only while it is
-  //erased, unless the data to write is all 0
+  //erased, unless the data to write is all 0 (R3 and N3 of doc/source/flash.rst:
+  //the library itself never needs the all-zero exception)
   for(uintptr_t i=0;i<size;i+=nvm_write_size){
     const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr + i;
     const uint8_t*const src8 = (const uint8_t*)src + i;

@@ -11,8 +11,8 @@ Main features:
 - Support transactions
 - Support high number of updates (see [Extrem Wear Leveling Factors](EWLF.md))
 - Easily portable to new MCUs / new flash chips
-- [Documentation](https://lean-ftl.rtfd.io) and [threat model](THREAT_MODEL.md) available
-- Support flash with erased state different from 'FF' (even undefined value if supported) in regular areas; EWLF areas need erased bytes to read 'FF'
+- [Documentation](https://lean-ftl.rtfd.io) and [threat model](THREAT-MODEL.md) available
+- Few requirements on the flash, stated in one page: [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html); regular areas do not depend on the erased value, EWLF areas need erased bytes to read 'FF'
 
 The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions, and an error handler:
 - nvm_erase
@@ -20,7 +20,7 @@ The library is independent of any NVM controller, porting it to a new MCU means 
 - nvm_read
 - error_handler, called on fatal errors; it shall not return
 
-NOTE: tests are provided to verify the correct implementation of the accessors.
+NOTE: tests are provided to verify the correct implementation of the accessors; what they must guarantee, and what they need not, is on the [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html) page.
 
 This repository provides accessors for the following targets:
 - CH32V307 (testbench is [here](https://github.com/sebastien-riou/lean-ftl-ch32v307))

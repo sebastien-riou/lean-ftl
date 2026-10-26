@@ -15,6 +15,7 @@ Contents
    introduction
    getting_started
    using
+   flash
    api
    tests
    internal

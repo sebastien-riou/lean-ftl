@@ -157,31 +157,48 @@ Per target
      - Erase unit
      - ECC
      - Programming a non-erased unit
+     - Detecting a weak word
    * - STM32U5 (``target/stm32``)
      - 16 bytes
      - 8 KB
      - 9 bits per 128, NMI on double error
      - Refused, except all zeros
+     - No margin read; ECC correction flag, one-sided
    * - STM32L5 (``target/stm32``)
      - 8 bytes
      - 2 KB (dual-bank mode)
      - 8 bits per 64, NMI on double error
      - Refused, except all zeros
+     - No margin read; ECC correction flag, one-sided
    * - CH32V307 (``target/ch32v307``)
      - 2 bytes
      - 4 KB
      - none documented here
+     - not documented here
      - not documented here
    * - M5531 (no callbacks yet)
      - 4 bytes (32-bit program)
      - 8 KB
      - none mentioned
      - not specified
+     - None documented
    * - Pico 2, W25Q32RV (no callbacks yet)
      - 1 to 256 bytes
      - 4 KB
      - none
      - outside the specification
+     - None: no ECC, no failure status
+
+No target documented here offers a margin read, that is a read against a tighter threshold, so
+none can prove that a programmed word is not weak: T2 and T3 remain assumptions on all of them.
+On the STM32L5 and STM32U5 a read that needed a single-bit ECC correction sets the ``ECCC`` flag
+of ``FLASH_ECCR`` and records the address. A hit means a cell of that word has already crossed
+the threshold; no hit proves nothing. Only the first error is recorded until the flags are
+cleared, and the read must reach the flash array, not the instruction cache or the flash
+interface's read buffer. The STM32U5's ``FLASH_OPSR``, which names a program or erase interrupted
+by a reset, is cleared by a brownout reset, so it records nothing across a power cut. The M5531's
+"all one verification" checks that a range reads blank after an erase. The W25Q32RV reports only
+that an operation has ended (``BUSY``), not whether it succeeded.
 
 The evidence, with the sections of each document, is in
 `FLASH.md <https://github.com/sebastien-riou/lean-ftl/blob/main/FLASH.md>`_.

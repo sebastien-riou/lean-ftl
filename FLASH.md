@@ -45,6 +45,7 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
 | Double-bit error | NMI (ECCD) | NMI (ECCD, ECCD2) | n/a | n/a |
 | Erased line and ECC | 2-bit detection not supported on an erased line | same | n/a | n/a |
 | Hardware "is erased" | no | no | yes: Flash all one verification (ISP 0x28, 0x08) | no |
+| Margin read, or another check that a programmed word is not weak | no margin read (RM0456 §7); ECC correction flag ECCC with ADDR_ECC (§7.9.11), one-sided: a hit means a cell has crossed, no hit proves nothing; FLASH_OPSR is cleared by a brownout reset (§11.3.1), so useless after a power cut | no margin read (RM0438 §6); ECC correction flag ECCC with ADDR_ECC (§6.3.2), one-sided | none documented; the all one verification only checks that a range reads blank after an erase (§6.8.4.18) | none: no ECC, no failure status bit, BUSY only says the operation ended |
 | Interrupted operation | reset: content "not guaranteed", torn location "may no longer be writable", page erase mandatory; FLASH_OPSR records the operation across a system reset, not a power-on | reset: content "not guaranteed" | ISPFF on "Erase or Program command at brown-out detected" | reset or power-off while suspended: "data corruption may happen" |
 | Write inhibit at power-up | — | — | — | below VWI (1.0 to 2.0 V) and for tPUW (5 ms) after power-up |
 | Suspend/resume | n/a | n/a | n/a | yes (75h, 7Ah), tSUS 20 µs |

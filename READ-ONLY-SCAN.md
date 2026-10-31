@@ -97,9 +97,11 @@ boot, one word program per boot and per area; an option, not the default here.
 The scan already takes the highest version among valid slots, and reads the whole `checksum2` unit
 since 426fcb1. Today's layout allows both pins, so this part needs no format change:
 
-- `checksum2` partially programmed: pin the whole item to zeros. Its value becomes 0, a stable
-  mismatch that the existing rule reads as "keep"; it can never read all erased again, and a unit
-  that reads all zeros is a pinned one, kept without another program. (Today the slot is kept
+- `checksum2` partially programmed: pin the whole item to zeros. Its value becomes 0, which the
+  rule takes whether it equals the checksum (a checksum can legitimately be 0) or not; it can never
+  read all erased again, and a unit that reads all zeros, pinned or a legitimate 0 written in full,
+  is kept without another program. The tombstone below uses the version item, never legitimately 0
+  (format writes 1), so no value of the checksum can be mistaken for one. (Today the slot is kept
   without the pin: LFTL-011.)
 - `checksum2` all erased, another valid slot exists: tombstone T by pinning its version item,
   instead of `erase_slot()`. T becomes invalid for good; the next write erases it anyway, as every

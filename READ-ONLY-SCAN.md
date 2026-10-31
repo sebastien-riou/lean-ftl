@@ -212,6 +212,14 @@ its newest record without visiting every unit or every position.
 - **Memory layout.** Nothing changes for regular areas. EWLF records keep their size, but the
   `prev_erased` field becomes the start marker and `checksum2` an all-zero end marker: existing
   EWLF areas would need a format.
+- **Timing.** Today every operation has a worst case that follows from the configuration, and a
+  regular-area write costs the same whatever the NVM holds (THREAT-MODEL.md O5); the design must
+  keep both. It does, and improves one point: with lazy erase a rollover is exactly one erase in
+  every state, where today a torn rollover left behind costs the next one two. What stays is the
+  step over torn positions in the free-position search and, in the pinning variant, the pin of each
+  skipped start marker, zero to `records_per_unit` word programs in one write; the variant without
+  pinning adds no program to the write path. The scan's own time stays bounded and state-dependent:
+  the searches of section 6 or their linear fallback, and at most one word program.
 
 What stays exposed, with and without pinning, is in section 8.
 
@@ -416,6 +424,7 @@ of section 2, the end marker of the write a power cut interrupted; nothing else 
 | Weak word on ECC flash (T1.13) | NMI on read; a handler that does not return hangs the device (O3) | One NMI at the first boot after the torn write, then the pin or tombstone programs a valid codeword; the handler must return, as today | No such target; it would be one NMI per boot until the word's unit is erased |
 | Hostile NVM content (Case 2) | A wrong record chosen (integrity is not a Case 2 goal), the collision error (availability), memory safety | Positions stay inside the area (the check of 6b, the linear fallback); crafted content can make the scan program one word of zeros, once per crafted word | Same, and nothing is programmed |
 | Stale data (T1.8) | Old records readable physically until their unit is reused | Longer than today, where the vacated unit is erased at the rollover | Same |
+| Write time that depends on the NVM state (O5, a real-time budget) | A write takes longer than usual; bounded | A rollover is exactly one erase in every state; a write steps over torn positions and pins their start markers, at most `records_per_unit` of each | Same without the pins |
 | The model itself | T2, T3 and T4 are physics assumptions no vendor documents; N3 is documented on the STM32L5 and STM32U5 only | Rests on T2, T4, N3, and T3 for the second row | Rests on T2, T4, and T3 for the second row |
 
 Unchanged from today in both variants: wear driven by the application's writes (T1.5), a torn

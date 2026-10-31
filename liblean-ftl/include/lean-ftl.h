@@ -701,7 +701,7 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 
 #define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
 /// Size in bytes of one EWLF record of `area_content`, as laid out at run time:
-/// the magic, the `prev_erased` flag and each meta-data item take at least one
+/// the magic, the start marker and each meta-data item take at least one
 /// write unit, the data is rounded up to whole write units, the record to 8 bytes.
 #define LFTL_EWLF_RECORD_SIZE(area_content) LFTL_ROUND_UP(\
   LFTL_MAX(LFTL_WU_SIZE,8) + LFTL_MAX(LFTL_WU_SIZE,1) + LFTL_META_N_ITEMS*LFTL_EWLF_WU_SIZE \

@@ -744,7 +744,7 @@ void ewlf_rollover_test(){
 
   //enough writes to force at least one rollover to a fresh erase unit,
   //given only 2-3 records fit per unit for this area's sizing; also
-  //exercises a rollover's erase+prev_erased confirmation (and, under the
+  //exercises a rollover's erase of the unit it enters (and, under the
   //tearing-simulation sweep, its recovery) repeatedly. As above, the
   //erase_cnt[]-based check is only meaningful during the untorn reference
   //run (erase_cnt_enabled is off during the sweep itself), so only
@@ -1271,7 +1271,10 @@ void ewlf_grid_test(){
   }
   const uint32_t sum = test_crc32c(0xFFFFFFFF,forged_data,data_size) + version;
   memcpy(forged_meta+item_size,&sum,sizeof(sum));
-  memcpy(forged_meta+2*item_size,&sum,sizeof(sum));
+  memset(forged_meta+2*item_size,0,item_size); //end marker
+  uint8_t zeros[flag_size];
+  memset(zeros,0,flag_size);
+  raw_write(torn+magic_size,zeros,flag_size); //the torn write's start marker came first
   raw_write(torn_data,d2,data_size);
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d1,data_size);
@@ -1299,16 +1302,26 @@ static uint8_t failing_once_nvm_erase(void*base_address, unsigned int n_pages){
   return nvm_erase(base_address,n_pages);
 }
 
-//Power cuts in EWLF writes (LF-9, ISSUES.md LFTL-002), on an EWLF area over
-//nvmd's pages: a copy of nvmd's context and NVM properties, not registered.
-//nvm_write refuses to program cells that are not erased, like STM32U5-class
-//flash, so a write landing on a partial or complete record raises an error.
-//1000 bytes of data make records of about 1 KB: 4 per 4 KB erase unit, 7 per
-//8 KB one.
+static int write_calls_before_failure = -1;
+static uint8_t failing_once_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  if(0 == write_calls_before_failure--) return 1;
+  return nvm_write(dst_nvm_addr,src,size);
+}
+
+//Power cuts in EWLF writes (LF-9, ISSUES.md LFTL-002, LFTL-013), on an EWLF
+//area over nvmd's pages: a copy of nvmd's context and NVM properties, not
+//registered. nvm_write refuses to program cells that are not erased, like
+//STM32U5-class flash, so a write landing on a partial or complete record
+//raises an error. A rollover erases the unit it enters before anything is
+//programmed in it, and a power cut during that erase or during the record
+//leaves the previous record current and the next write erasing again. 1000
+//bytes of data make records of about 1 KB: 4 per 4 KB erase unit, 7 per 8 KB
+//one.
 void ewlf_tearing_test(){
   DEBUG_PRINTLN(__func__);
   lftl_nvm_props_t props = nvm_props3;
   props.erase = failing_once_nvm_erase;
+  props.write = failing_once_nvm_write;
   props.next = LFTL_INVALID_POINTER;
   const uint32_t write_size = props.write_size;
   const uintptr_t data_size = 1000;
@@ -1327,11 +1340,15 @@ void ewlf_tearing_test(){
   uint8_t d[data_size];
 
   //a write cut while writing data leaves a partial record right below the
-  //current one: the next write must not program over it
+  //current one, its start marker programmed: the next write must not program
+  //over it
   lftl_format(&ewlf);
   stateful_prng_fill(d,sizeof(d));
   lftl_write(&ewlf,area,d,sizeof(d));
   uint8_t*const torn_data = ((uint8_t*)ewlf.data) - record_size;
+  uint8_t zeros[write_size];
+  memset(zeros,0,write_size);
+  raw_write(torn_data - header_size + magic_size,zeros,write_size); //start marker
   uint8_t partial[LFTL_ROUND_UP(100,write_size)];
   stateful_prng_fill(partial,sizeof(partial));
   raw_write(torn_data,partial,sizeof(partial));
@@ -1343,22 +1360,36 @@ void ewlf_tearing_test(){
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d,sizeof(d));
 
-  //a wrap from the lowest unit back to the highest one, cut after the new
-  //record is complete but before the lowest unit is erased: the reset must
-  //find that newest record, and the next write must not program over it
+  //a wrap from the lowest unit back to the highest one, cut during the erase
+  //of the highest unit, then during the new record after that erase: the
+  //reset finds the previous record, and the next write erases the unit again
+  //before programming it
   lftl_format(&ewlf);
   const unsigned int records_per_unit = props.erase_size / record_size;
   const unsigned int n_units = ewlf.area_size / props.erase_size;
+  uint8_t d_prev[data_size];
   for(unsigned int i = 1; i < n_units*records_per_unit; i++){ //format wrote the first record
     stateful_prng_fill(d,sizeof(d));
     lftl_write(&ewlf,area,d,sizeof(d));
   }
+  memcpy(d_prev,d,sizeof(d));
   stateful_prng_fill(d,sizeof(d));
   erase_calls_before_failure = 0;
   EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_ERASE | 1, lftl_write(&ewlf,area,d,sizeof(d)));
   erase_calls_before_failure = -1;
   ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d_prev,sizeof(d));
+  //the unit erased, the start marker and the data of the new record written,
+  //the power cut before its magic
+  write_calls_before_failure = 2;
+  EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_WRITE | 1, lftl_write(&ewlf,area,d,sizeof(d)));
+  write_calls_before_failure = -1;
+  ewlf.data = LFTL_INVALID_POINTER; //reset
+  read_and_check(&ewlf,area,d_prev,sizeof(d));
+  lftl_write(&ewlf,area,d,sizeof(d));
+  ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d,sizeof(d));
+  if(!raw_reads_erased(area + (n_units-1)*props.erase_size + props.erase_size - 2*record_size,record_size)) throw_exception(ERROR_VERIFICATION_FAIL); //only the top record of the wrapped-to unit holds anything
   stateful_prng_fill(d,sizeof(d));
   lftl_write(&ewlf,area,d,sizeof(d));
   ewlf.data = LFTL_INVALID_POINTER; //reset
@@ -1698,7 +1729,9 @@ void torn_erase_version_test(){
   torn_erase_version_test_core(0); //and before it
 }
 
-//Layout of an EWLF record, same formulas as ftl_internal.h
+//Layout of an EWLF record, same formulas as ftl_internal.h: magic, start
+//marker (flag_size, the former prev_erased flag), version, checksum, end
+//marker (an all-zero item), data
 typedef struct {
   uintptr_t magic_size;
   uintptr_t flag_size;
@@ -1717,12 +1750,15 @@ static ewlf_layout_t ewlf_layout(const lftl_ctx_t*ctx){
   return l;
 }
 
-//Write a record as a write torn during checksum2 leaves it: data, magic,
-//version and checksum programmed, checksum2 erased or, if `partial`, with the
-//last programmed byte of its value still erased. The prev_erased flag stays
-//erased. Only erased cells are programmed, so this works on real flash too.
+//Write a record as a write torn during its end marker leaves it: start
+//marker, data, magic, version and checksum programmed, the end marker erased
+//or, if `partial`, programmed but for its last byte. Only erased cells are
+//programmed, so this works on real flash too.
 static void ewlf_raw_torn_record(const lftl_ctx_t*ctx, uint8_t*record, const uint8_t*d, uint32_t version, bool partial){
   const ewlf_layout_t l = ewlf_layout(ctx);
+  uint8_t start_marker[l.flag_size];
+  memset(start_marker,0,l.flag_size);
+  raw_write(record + l.magic_size, start_marker, l.flag_size);
   raw_write(record + l.header_size, d, LFTL_ROUND_UP(ctx->data_size,ctx->nvm_props->write_size));
   uint8_t magic[l.magic_size];
   memset(magic,0,l.magic_size);
@@ -1737,15 +1773,10 @@ static void ewlf_raw_torn_record(const lftl_ctx_t*ctx, uint8_t*record, const uin
   uint8_t*const meta_addr = record + l.magic_size + l.flag_size;
   raw_write(meta_addr,meta,2*l.item_size); //version and checksum
   if(partial){
-    uint8_t*const checksum2 = meta + 2*l.item_size;
-    memcpy(checksum2,&checksum,sizeof(checksum));
-    for(unsigned int i=sizeof(uint32_t);i>0;i--){
-      if(0xFF != checksum2[i-1]){
-        checksum2[i-1] = 0xFF;
-        break;
-      }
-    }
-    raw_write(meta_addr + 2*l.item_size,checksum2,l.item_size);
+    uint8_t*const end_marker = meta + 2*l.item_size;
+    memset(end_marker,0,l.item_size);
+    end_marker[l.item_size-1] = 0xFF;
+    raw_write(meta_addr + 2*l.item_size,end_marker,l.item_size);
   }
 }
 
@@ -1756,33 +1787,50 @@ static uint32_t ewlf_raw_item(const lftl_ctx_t*ctx, const uint8_t*record, unsign
   return item;
 }
 
-//After the scan: a record whose checksum2 read erased was copied forward, the
-//copy right below it; one whose checksum2 is partially programmed is stable
-//and kept as it is
-static void check_torn_record(lftl_ctx_t*ewlf, uint8_t*R, uint32_t version, bool partial){
+static bool ewlf_raw_item_is(const lftl_ctx_t*ctx, const uint8_t*record, unsigned int i, uint8_t value){
+  const ewlf_layout_t l = ewlf_layout(ctx);
+  uint8_t item[l.item_size];
+  lftl_memread(item,record + l.magic_size + l.flag_size + i*l.item_size,l.item_size);
+  for(unsigned int j=0;j<l.item_size;j++) if(value != item[j]) return false;
+  return true;
+}
+
+//After the scan, nothing erased and no record copied. End marker partially
+//programmed: R is stable and current; with zero overwrite its end marker is
+//pinned to zeros. End marker erased: B, the record current before the torn
+//write, is current; with zero overwrite R is tombstoned, its version item
+//pinned to zeros, otherwise R is left as it is.
+static void check_torn_record(lftl_ctx_t*ewlf, uint8_t*R, uint8_t*B, uint32_t version, bool partial){
+  const bool pinning = ewlf->nvm_props->zero_overwrite;
   const ewlf_layout_t l = ewlf_layout(ewlf);
   uint8_t*const current = (uint8_t*)ewlf->data - l.header_size;
   if(partial){
     if(current != R) throw_exception(ERROR_VERIFICATION_FAIL);
-    if(ewlf_raw_item(ewlf,R,2) == ewlf_raw_item(ewlf,R,1)) throw_exception(ERROR_VERIFICATION_FAIL); //not repaired
+    if(pinning != ewlf_raw_item_is(ewlf,R,2,0)) throw_exception(ERROR_VERIFICATION_FAIL);
   } else {
-    if(current != R - l.record_size) throw_exception(ERROR_VERIFICATION_FAIL);
-    if(ewlf_raw_item(ewlf,current,0) != version+2) throw_exception(ERROR_VERIFICATION_FAIL);
-    if(ewlf_raw_item(ewlf,current,1) != ewlf_raw_item(ewlf,current,2)) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(current != B) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(!ewlf_raw_item_is(ewlf,R,2,0xFF)) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(pinning){
+      if(!ewlf_raw_item_is(ewlf,R,0,0)) throw_exception(ERROR_VERIFICATION_FAIL);
+    } else {
+      if(ewlf_raw_item(ewlf,R,0) != version+1) throw_exception(ERROR_VERIFICATION_FAIL);
+    }
   }
 }
 
-//A record torn during its meta-data (LFTL-008), on an EWLF area over nvmd's
-//pages: the scan takes it when its data and checksum are valid. checksum2
-//erased: the checksum may be weakly programmed, the record is copied forward
-//with complete meta-data, so that nothing depends on how that word reads later.
-//checksum2 partially programmed: its program had started, the checksum is
-//complete, the record is kept as it is (the rule of LFTL-009). Within a
-//unit, then as the rollover record at the top of a unit, where the previous
-//unit is erased only once the copy is complete. On Linux, where the NVM is
-//RAM, the torn record's checksum is then made to read erased: the copy must
-//still be found.
+//A record torn during its meta-data (LFTL-008, LFTL-010, LFTL-011), on an
+//EWLF area over nvmd's pages. End marker erased: the checksum may be weakly
+//programmed, the record is not taken and nothing is copied or erased; with
+//zero overwrite it is tombstoned. End marker partially programmed: its program
+//had started, the checksum is complete, the record is taken; with zero
+//overwrite its marker is pinned. Within a unit, then as the rollover record at
+//the top of a unit, where the unit the write order left is not erased. On
+//Linux, where the NVM is RAM, the torn record's checksum is then made to read
+//erased (nothing changes), and without zero overwrite a partially programmed
+//marker is made to read erased: the previous version comes back, the residual
+//of READ-ONLY-SCAN.md section 7.
 void torn_ewlf_checksum2_test_core(bool partial){
+  const bool pinning = nvmd.nvm_props->zero_overwrite;
   lftl_ctx_t ewlf = nvmd;
   ewlf.data = LFTL_INVALID_POINTER;
   ewlf.data_size = 64;
@@ -1806,23 +1854,39 @@ void torn_ewlf_checksum2_test_core(bool partial){
   uint8_t*R = current - l.record_size;
   stateful_prng_fill(d2,sizeof(d2));
   ewlf_raw_torn_record(&ewlf,R,d2,version+1,partial);
+  const uint8_t*expected = partial ? d2 : d1;
   ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d2,sizeof(d2));
-  check_torn_record(&ewlf,R,version,partial);
+  read_and_check(&ewlf,area,expected,sizeof(d2));
+  check_torn_record(&ewlf,R,current,version,partial);
   ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d2,sizeof(d2));
+  read_and_check(&ewlf,area,expected,sizeof(d2));
   #ifdef HAS_TEARING_SIMULATION
   if(!partial){
-    //the weakly programmed checksum of R now reads erased: the copy is found
+    //the weakly programmed checksum of R now reads erased: nothing changes
     memset(R + l.magic_size + l.flag_size + l.item_size,0xFF,sizeof(uint32_t));
     ewlf.data = LFTL_INVALID_POINTER; //reset
-    read_and_check(&ewlf,area,d2,sizeof(d2));
+    read_and_check(&ewlf,area,d1,sizeof(d2));
+  } else if(!pinning){
+    //the weak end marker of R drifts to all erased: the previous version comes back
+    memset(R + l.magic_size + l.flag_size + 2*l.item_size,0xFF,l.item_size);
+    ewlf.data = LFTL_INVALID_POINTER; //reset
+    read_and_check(&ewlf,area,d1,sizeof(d2));
+    expected = d1;
   }
   #endif
   stateful_prng_fill(d3,sizeof(d3));
   lftl_write(&ewlf,area,d3,sizeof(d3));
   ewlf.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ewlf,area,d3,sizeof(d3));
+  //the new record is numbered above R whenever R's checksum is still valid,
+  //taken (partial, pinned or not) or not (unmarked), so that the two can never
+  //share a version whatever R's marker reads later; a tombstoned R, or one
+  //whose checksum the simulation wiped above, no longer counts
+  bool r_counts = partial;
+  #ifndef HAS_TEARING_SIMULATION
+  if(!pinning) r_counts = true; //R left as it is, its checksum valid
+  #endif
+  if(ewlf_raw_item(&ewlf,(uint8_t*)ewlf.data - l.header_size,0) != version + (r_counts ? 2 : 1)) throw_exception(ERROR_VERIFICATION_FAIL);
 
   //as the rollover record: fill the highest unit, R at the top of the unit below
   lftl_format(&ewlf);
@@ -1836,21 +1900,19 @@ void torn_ewlf_checksum2_test_core(bool partial){
   R = area + (n_units-2)*erase_size + erase_size - l.record_size;
   stateful_prng_fill(d2,sizeof(d2));
   ewlf_raw_torn_record(&ewlf,R,d2,version+1,partial);
+  expected = partial ? d2 : d1;
   ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d2,sizeof(d2));
-  check_torn_record(&ewlf,R,version,partial);
-  //the previous unit is erased and R's prev_erased flag confirmed
-  if(!raw_reads_erased(area + (n_units-1)*erase_size,erase_size)) throw_exception(ERROR_VERIFICATION_FAIL);
-  uint8_t flag;
-  lftl_memread(&flag,R + l.magic_size,sizeof(flag));
-  if(0 != flag) throw_exception(ERROR_VERIFICATION_FAIL);
+  read_and_check(&ewlf,area,expected,sizeof(d2));
+  check_torn_record(&ewlf,R,current,version,partial);
+  //the unit the rollover left is not erased
+  if(raw_reads_erased(area + (n_units-1)*erase_size,erase_size)) throw_exception(ERROR_VERIFICATION_FAIL);
   ewlf.data = LFTL_INVALID_POINTER; //reset
-  read_and_check(&ewlf,area,d2,sizeof(d2));
+  read_and_check(&ewlf,area,expected,sizeof(d2));
   #ifdef HAS_TEARING_SIMULATION
   if(!partial){
     memset(R + l.magic_size + l.flag_size + l.item_size,0xFF,sizeof(uint32_t));
     ewlf.data = LFTL_INVALID_POINTER; //reset
-    read_and_check(&ewlf,area,d2,sizeof(d2));
+    read_and_check(&ewlf,area,d1,sizeof(d2));
   }
   #endif
   stateful_prng_fill(d3,sizeof(d3));

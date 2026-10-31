@@ -101,14 +101,16 @@ static void dump(const char *name, const uint8_t *b, unsigned n) {
 }
 
 /* EWLF tests 7 to 11 use 8-byte write units and 64-byte data in 2 pages: a
-   record is 8 (magic) + 8 (prev_erased) + 3*8 (meta) + 64 = 104 bytes, 2 per
+   record is 8 (magic) + 8 (start marker) + 3*8 (meta) + 64 = 104 bytes, 2 per
    page. format puts v1 at area+408, the next write v2 at area+304, and the one
-   after wraps to the top of page 0, area+152. */
+   after wraps to the top of page 0, area+152. A write programs the start
+   marker, the data, the magic, the meta-data, then the end marker; a wrap
+   erases the unit it enters first. */
 static void ewlf_two_writes_then_torn(const uint8_t *d1, const uint8_t *d2) {
   memset(flash, 0xFF, sizeof(flash));
   lftl_format(&ctx);
   lftl_write(&ctx, flash, d1, 64);
-  n_ops = 0; cut_at = 1; /* op #0 writes the data, #1 the magic */
+  n_ops = 0; cut_at = 1; /* op #0 writes the start marker, #1 the data, #2 the magic */
   if (!setjmp(pc)) lftl_write(&ctx, flash, d2, 64);
   cut_at = -1;
   ctx.data = LFTL_INVALID_POINTER; /* reset */
@@ -209,13 +211,13 @@ int main(int argc, char **argv) {
       lftl_write(&ctx, flash, d, 64);
       break;
     }
-    printf("T%d/LF-9: EWLF on %s flash: v2..v4, power cut in v5 before page 0 is erased, reset, write v6\n",
+    printf("T%d/LF-9: EWLF on %s flash: v2..v4, power cut in v5 before its end marker, reset, write v6\n",
            t, t == 9 ? "NOR (program = AND)" : "STM32U5-like (no reprogramming)");
     memset(flash, 0xFF, sizeof(flash));
     lftl_format(&ctx);                                     /* v1 at area+408 */
     for (int v = 2; v <= 4; v++) { memset(d, 0x11 * v, 64); lftl_write(&ctx, flash, d, 64); } /* +304, +152, +48 */
     memset(d, 0x5A, 64);
-    n_ops = 0; cut_at = 4; /* v5 wraps to area+408: data, magic, meta, checksum2, then erase page 0 */
+    n_ops = 0; cut_at = 5; /* v5 wraps to area+408: erase page 1, start marker, data, magic, meta, then the end marker */
     if (!setjmp(pc)) lftl_write(&ctx, flash, d, 64);
     cut_at = -1;
     ctx.data = LFTL_INVALID_POINTER; /* reset */
@@ -242,7 +244,7 @@ int main(int argc, char **argv) {
     const uint64_t magic = EWLF_MAGIC;
     memset(d2, 0, 64);
     memcpy(d2, &magic, 8);
-    memset(d2 + 8, 0xFF, 8);                         /* prev_erased */
+    memset(d2 + 8, 0xFF, 8);                         /* start marker */
     memcpy(d2 + 16, &version, 4);                    /* meta items are 8 bytes each */
     memcpy(d2 + 24, &sum, 4);
     memcpy(d2 + 32, &sum, 4);

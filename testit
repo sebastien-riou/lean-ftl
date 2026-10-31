@@ -22,6 +22,9 @@ gcc -O0 -g3 -ggdb ../../examples/single_area/main.c ../../target/linux/linux.c -
 
 ./lean-ftl-test-fw
 
+#the same on a flash without the all-zero exception (N3 of the flash page): the scan then never programs
+./lean-ftl-test-fw --no-pinning
+
 ./hello
 
 ./single_area

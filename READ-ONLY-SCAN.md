@@ -1,9 +1,10 @@
 # A read-only scan
 
-**Status:** proposal; nothing below is implemented. It describes how an FTL designed from scratch
-would close ISSUES.md LFTL-010 (boot-time repairs give an attacker with a power switch an erase per
-boot) and LFTL-011 (a weak `checksum2` read twice), and what it would take to get lean-ftl there.
-It assumes the reader knows EWLF.md and THREAT-MODEL.md.
+**Status:** implemented on branch `read-only-scan` (2026-10-31). Sections 1 to 8 describe the
+design as built, section 9 what changed in the code. It closes ISSUES.md LFTL-010 (boot-time repairs
+give an attacker with a power switch an erase per boot), LFTL-011 (a weak `checksum2` read twice) and
+LFTL-013 (a write over a torn record that drifted to all erased). It assumes the reader knows
+EWLF.md and THREAT-MODEL.md.
 
 ## Notation
 
@@ -277,16 +278,16 @@ reached U2:
 ```
        U7         U6         U5         U4         U3         U2         U1         U0
       +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+
-  p0  | 65     | | 73     | | 81     | | 89     | | 97     | | 105    | | 57     | | 49     |
-  p1  | 66     | | 74     | | 82     | | 90     | | 98     | | 106    | | 58     | | 50     |
+  p0  | 65     | | 73     | | 81     | | 89     | | 97     | | 105    | | 49     | | 57     |
+  p1  | 66     | | 74     | | 82     | | 90     | | 98     | | 106    | | 50     | | 58     |
   ..  | ..     | | ..     | | ..     | | ..     | | ..     | | erased | | ..     | | ..     |
-  p7  | 72     | | 80     | | 88     | | 96     | | 104    | | erased | | 64     | | 56     |
+  p7  | 72     | | 80     | | 88     | | 96     | | 104    | | erased | | 56     | | 64     |
       +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+
-  key   65         73         81         89         97         105        57         49
+  key   65         73         81         89         97         105        49         57
 
   range U0..U7:  read U7, key 65
   probe U3:      key 97 > 65   the jump is in U0..U3
-  probe U1:      key 57 > 97?  no, it is in U2..U3
+  probe U1:      key 49 > 97?  no, it is in U2..U3
   probe U2:      key 105 > 97  it is in U2..U2: U2 is the current unit, after 4 reads
 ```
 
@@ -432,29 +433,32 @@ of section 2, the end marker of the write a power cut interrupted; nothing else 
 Unchanged from today in both variants: wear driven by the application's writes (T1.5), a torn
 `lftl_format()` (T1.6), and everything in THREAT-MODEL.md that is not about the scan.
 
-## 9. Distance from today's lean-ftl
+## 9. What changed in the code
 
-Less than the list above suggests: the regular-area scan is already max-version, the whole-unit
-reading of `checksum2` exists since 426fcb1, and `write_ewlf_core()` already finds the next free
-position by reading the cells. The changes would be:
+Less than the sections above suggest, as predicted: the regular-area scan was already
+max-version, the whole-unit reading of `checksum2` existed, and `write_ewlf_core()` already found
+the next free position by reading the cells. The changes, in three commits on branch
+`read-only-scan`:
 
-- `lftl_nvm_props_t`: a declaration of the pinning capability (N3), which selects the pins of
-  sections 2 to 4 or the variant of section 7; the layout is the same either way.
-
-- `find_current_slot()`: pin `checksum2` when it is partially programmed, tombstone the version
-  item instead of `erase_slot()` when it is all erased; `other_valid_slot()` stays as the guard for
-  the only-slot case. No layout change: this part can be done on its own (LFTL-011).
-- `find_current_record()`: the two searches of section 6, with the linear pass of section 4c as the
-  fallback, and the pin or tombstone of the record found; `ewlf_record_prev_erased_confirmed()`,
-  `ewlf_write_record_prev_erased()` and `copy_forward_ewlf()` go, and with them the `copy_current`
-  parameter of `write_ewlf_core()`.
-- `write_ewlf_core()`: program the start marker first, the end marker as zeros last; choose the
-  position by start markers and pin the skipped ones; at a rollover, erase the target unit
-  unconditionally and do not erase the vacated one; number the record above the highest version
-  the scan saw on a valid checksum, taken or not (today: the current record's version plus one).
-  `format_ewlf()` writes a start marker and a zero end marker and no flag.
-- Tests 24, 33 and 34 rewritten around pinning and tombstoning; test 29's wrap case and tests 22
-  and 23's erase counts re-derived for lazy erasing; the raw-state builders of tests 28 and 29
-  given a start marker.
-- EWLF.md's write and read process, THREAT-MODEL.md's overview, O1, O2, T1.10, T1.13, the
-  `checksum2` and `prev_erased` rows of the Case 2 table, and LFTL-010 and LFTL-011 closed.
+- `lftl_nvm_props_t` gained `zero_overwrite`, the pinning capability of N3, false by default and
+  for the CH32V307; the Linux simulator honours it, and `--no-pinning` runs the test suite as on a
+  flash without it.
+- `find_current_slot()` pins a partially programmed `checksum2` and tombstones a torn slot (its
+  version item) instead of erasing it, on a flash with `zero_overwrite`, and only sets the torn
+  slot aside otherwise; a unit reading all zeros is a pinned one, never re-pinned. Nothing is erased
+  at boot.
+- EWLF records got the start marker (the former `prev_erased` field, programmed to zeros first) and
+  the all-zero end marker (the former `checksum2` item, programmed last). `write_ewlf_core()`
+  chooses the position by start markers, pins the skipped ones with `zero_overwrite`, numbers the
+  record above every valid checksum it stepped over, erases the unit it enters unconditionally and
+  never the one it leaves. `format_ewlf()` writes a start marker and an end marker and no flag.
+  `ewlf_record_prev_erased_confirmed()`, `ewlf_write_record_prev_erased()`,
+  `ewlf_newest_in_unit()` and `copy_forward_ewlf()` are gone.
+- `find_current_record()` chooses before it programs: the fast search of section 6 (keys, then
+  start markers with `zero_overwrite`, then the check against the neighbouring units), the linear
+  pass of 4c as the fallback, and with `LFTL_SCAN_CROSS_CHECK` (the Linux and ASan builds) both at
+  every scan, any disagreement raising `LFTL_INTERNAL_ERROR`. Then the pin or the tombstone.
+- Tests 24, 29, 33 and 34 rewritten around pinning, tombstoning and lazy erase, in both variants;
+  test 36 added: three cycles of writes over 17 units with cuts at every stage, every scan
+  cross-checked. `testit` runs the suite with and without pinning. EWLF.md, THREAT-MODEL.md, the
+  flash page and FLASH.md follow; LFTL-010, LFTL-011 and LFTL-013 are closed.

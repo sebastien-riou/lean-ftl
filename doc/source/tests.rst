@@ -61,6 +61,13 @@ Use `--lib-info` to print the library version and build type, and `--test-callba
 NVM callbacks (erase, write and read back the whole test NVM) before the tests, a first check of
 R1 to R5 of :ref:`flash-required`.
 
+``--no-pinning`` runs the suite as on a flash without the all-zero overwrite (N3 of
+:ref:`flash-not-relied-on`): the simulator refuses it and every test NVM is declared without
+``zero_overwrite``, so the scan never programs; ``testit`` runs the suite both ways. The Linux
+build also defines ``LFTL_SCAN_CROSS_CHECK``: every scan of an EWLF area runs both the fast search
+and the linear pass of READ-ONLY-SCAN.md section 6, and raises ``LFTL_INTERNAL_ERROR`` if they
+disagree.
+
 Code coverage
 --------------
 

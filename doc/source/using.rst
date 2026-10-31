@@ -172,6 +172,7 @@ The integrator shall declare one :c:type:`lftl_nvm_props_t` for each targeted NV
     .size = sizeof(nvm),
     .write_size = nvm_write_size,
     .erase_size = nvm_erase_size,
+    .zero_overwrite = 1, //the STM32L5 and STM32U5 document it
     .erase = nvm_erase,
     .write = nvm_write,
     .read = nvm_read,
@@ -181,7 +182,11 @@ The integrator shall declare one :c:type:`lftl_nvm_props_t` for each targeted NV
 .. note:: ``base`` and ``size`` can be a subset of the physical NVM.
 
 What ``write_size`` and ``erase_size`` may be, and what the NVM behind them must provide, is on
-the :ref:`flash` page (R1, R2).
+the :ref:`flash` page (R1, R2). ``zero_overwrite`` says whether the flash accepts programming a
+write unit to all zeros whatever it currently holds (N3 there; the STM32L5 and STM32U5 document
+it): *lean-ftl* then pins the words a power cut left weak at the first access after a reset, one
+word program, instead of deciding about them again at every boot. Leave it false when the manual
+does not say.
 
 Implementing the callbacks
 -----------------------------

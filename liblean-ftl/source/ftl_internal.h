@@ -1171,6 +1171,204 @@ static ewlf_record_state_t ewlf_record_state(lftl_ctx_t*ctx, const uint8_t*recor
   return (UNIT_ERASED == *end_marker) ? EWLF_RECORD_UNMARKED : EWLF_RECORD_CANDIDATE;
 }
 
+/// What a scan of an EWLF area chose, before anything is programmed.
+typedef struct {
+  const uint8_t*best;           /**< the newest candidate, NULL if none */
+  uint32_t best_version;        /**< its version */
+  unit_state_t best_end_marker; /**< how its end marker read */
+  const uint8_t*torn;           /**< the newest unmarked record, NULL if none */
+  uint32_t torn_version;        /**< its version */
+} ewlf_choice_t;
+
+static void ewlf_choice_init(ewlf_choice_t*c){
+  c->best = NULL;
+  c->best_version = 0;
+  c->best_end_marker = UNIT_ZERO;
+  c->torn = NULL;
+  c->torn_version = 0;
+}
+
+/**
+ * \brief Offer a record position to a choice.
+ *
+ * An unmarked record is remembered when it is the newest one seen; a
+ * candidate replaces the best one when its version is higher, and two
+ * candidates sharing a version are ::LFTL_ERROR_VERSION_COLLISION (hostile
+ * content, or a bug).
+ *
+ * \returns true if the position holds a candidate
+ */
+static bool ewlf_choice_offer(lftl_ctx_t*ctx, ewlf_choice_t*c, const uint8_t*addr, ewlf_record_state_t state, const lftl_meta_t*meta, unit_state_t end_marker){
+  if(EWLF_RECORD_NONE == state) return false;
+  if(EWLF_RECORD_UNMARKED == state){
+    if((NULL == c->torn) || (meta->version > c->torn_version)){
+      c->torn = addr;
+      c->torn_version = meta->version;
+    }
+    return false;
+  }
+  if((NULL != c->best) && (meta->version == c->best_version)) raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
+  if((NULL == c->best) || (meta->version > c->best_version)){
+    c->best = addr;
+    c->best_version = meta->version;
+    c->best_end_marker = end_marker;
+  }
+  return true;
+}
+
+/**
+ * \brief Offer a unit's positions to a choice, from the lowest up to the
+ * first candidate: records are written from the top down, so that candidate
+ * is the newest of the unit.
+ *
+ * \param ctx Context of the EWLF area
+ * \param unit_index Index of the erase unit
+ * \param from Index of the position to start from, 0 being the top one
+ * \param c The choice
+ */
+static void ewlf_offer_unit_from(lftl_ctx_t*ctx, unsigned int unit_index, unsigned int from, ewlf_choice_t*c){
+  const uintptr_t record_size = ewlf_record_phy_size(ctx);
+  const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
+  for(unsigned int i = from + 1; i > 0; i--){
+    const uint8_t*const addr = top - (i-1)*record_size;
+    lftl_meta_t meta;
+    unit_state_t end_marker;
+    const ewlf_record_state_t state = ewlf_record_state(ctx,addr,&meta,&end_marker);
+    if(ewlf_choice_offer(ctx,c,addr,state,&meta,end_marker)) return;
+  }
+}
+
+/**
+ * \brief The baseline scan: every unit, from its bottom up to its first
+ * candidate. Bounded by the unit and record counts, and right whatever the
+ * area holds.
+ */
+static void ewlf_choose_linear(lftl_ctx_t*ctx, ewlf_choice_t*c){
+  const unsigned int n_units = n_pages(ctx);
+  const unsigned int records_per_unit = page_size(ctx) / ewlf_record_phy_size(ctx);
+  for(unsigned int unit_index = 0; unit_index < n_units; unit_index++){
+    ewlf_offer_unit_from(ctx,unit_index,records_per_unit-1,c);
+  }
+}
+
+/**
+ * \brief A unit's key: the version of its top record when that record is a
+ * candidate in full, checksum included, 0 otherwise.
+ *
+ * A unit is erased right before its first record is programmed and that
+ * record is its top one, so every record of a newer unit has a higher
+ * version than every record of an older one: keys order the units by age,
+ * and a unit without a key (erased, left partly erased by a torn erase,
+ * holding a torn or tombstoned top record) is older than any keyed one. The
+ * magic and the marker alone would not do: a torn erase only sets bits to 1,
+ * and can leave a top record with a valid magic and a version word that
+ * reads larger; the checksum rejects it.
+ *
+ * \param ctx Context of the EWLF area
+ * \param unit_index Index of the erase unit
+ * \param state Output: the top record's state
+ * \param meta Output: its meta-data, valid unless the state is ::EWLF_RECORD_NONE
+ */
+static uint32_t ewlf_unit_key(lftl_ctx_t*ctx, unsigned int unit_index, ewlf_record_state_t*state, lftl_meta_t*meta){
+  unit_state_t end_marker;
+  *state = ewlf_record_state(ctx,ewlf_unit_top_record(ctx,unit_index),meta,&end_marker);
+  return (EWLF_RECORD_CANDIDATE == *state) ? meta->version : 0;
+}
+
+/**
+ * \brief The scan with a number of reads logarithmic in the unit and record
+ * counts (READ-ONLY-SCAN.md section 6).
+ *
+ * Read in address order, the keys decrease from the current unit's, which is
+ * the highest, except for one jump up, at the current unit itself: the units
+ * above it in address are the ones written before it in this cycle, older
+ * and older, the units below it are the previous cycle's, older still, and
+ * the oldest ones have no key. Keeping a range of units that contains the
+ * jump and comparing a probe in its middle with the range's last key tells
+ * which half holds it, so the current unit costs one key per halving plus one.
+ * Inside it, on a flash with `zero_overwrite`, the started positions form a
+ * run from the top, since the write path pins the start marker of every
+ * started position it skips: the last started one is found by halving on
+ * start markers, one write unit per probe, and the newest candidate is there
+ * or at the first candidate above it. Without `zero_overwrite` a skipped
+ * start marker can be weak and later read erased, a hole in the run, so the
+ * unit is read from its bottom up instead.
+ *
+ * The result is checked before it is trusted: the current unit must be a
+ * local maximum in write order, both its neighbours holding a lower key or
+ * none, and the record found must have a higher version than both. Only
+ * hostile content or a bug can fail that check, and the caller then falls
+ * back to ::ewlf_choose_linear. The two neighbours are read anyway: the
+ * next unit in write order is where a torn rollover leaves its record,
+ * which is offered to the choice so that it can be tombstoned.
+ *
+ * \returns true if the result passed the check
+ */
+static bool ewlf_choose_fast(lftl_ctx_t*ctx, ewlf_choice_t*c){
+  const unsigned int n_units = n_pages(ctx);
+  const uintptr_t record_size = ewlf_record_phy_size(ctx);
+  const unsigned int records_per_unit = page_size(ctx) / record_size;
+  ewlf_record_state_t state;
+  lftl_meta_t meta;
+  //the current unit: the jump up in the cyclic sequence of keys
+  unsigned int lo = 0;
+  unsigned int hi = n_units - 1;
+  uint32_t last_key = ewlf_unit_key(ctx,hi,&state,&meta);
+  while(lo < hi){
+    const unsigned int mid = (lo + hi) / 2;
+    const uint32_t key = ewlf_unit_key(ctx,mid,&state,&meta);
+    if(key > last_key){
+      hi = mid;
+      last_key = key;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const unsigned int current_unit = lo;
+  if(0 == last_key) return false; //no keyed unit at all
+  //its neighbours in write order: the unit written before it, above, and the
+  //one it will roll over to, below
+  const unsigned int prev_unit = (current_unit + 1) % n_units;
+  const unsigned int next_unit = (current_unit + n_units - 1) % n_units;
+  lftl_meta_t prev_meta;
+  ewlf_record_state_t prev_state;
+  const uint32_t prev_key = ewlf_unit_key(ctx,prev_unit,&prev_state,&prev_meta);
+  lftl_meta_t next_meta;
+  ewlf_record_state_t next_state;
+  const uint32_t next_key = (next_unit == prev_unit) ? prev_key : ewlf_unit_key(ctx,next_unit,&next_state,&next_meta);
+  if(next_unit == prev_unit){
+    next_state = prev_state;
+    next_meta = prev_meta;
+  }
+  if((prev_key >= last_key) || (next_key >= last_key)) return false;
+  //the newest record of the current unit
+  const uint8_t*const top = ewlf_unit_top_record(ctx,current_unit);
+  unsigned int from = records_per_unit - 1;
+  if(ctx->nvm_props->zero_overwrite){
+    //the last started position; the top one is started: it holds the key
+    unsigned int slo = 0;
+    unsigned int shi = records_per_unit - 1;
+    while(slo < shi){
+      const unsigned int mid = (slo + shi + 1) / 2;
+      if(UNIT_ERASED != ewlf_start_marker_state(ctx,top - mid*record_size)){
+        slo = mid;
+      } else {
+        shi = mid - 1;
+      }
+    }
+    from = slo;
+  }
+  ewlf_offer_unit_from(ctx,current_unit,from,c);
+  if(NULL == c->best) return false;
+  if((c->best_version <= prev_key) || (c->best_version <= next_key)) return false;
+  //a torn rollover record at the top of the next unit
+  if(EWLF_RECORD_UNMARKED == next_state){
+    unit_state_t end_marker;
+    ewlf_choice_offer(ctx,c,ewlf_unit_top_record(ctx,next_unit),next_state,&next_meta,end_marker = UNIT_ERASED);
+  }
+  return true;
+}
+
 /**
  * \brief Locate the current EWLF record and update `ctx->data`.
  *
@@ -1179,11 +1377,8 @@ static ewlf_record_state_t ewlf_record_state(lftl_ctx_t*ctx, const uint8_t*recor
  * mistaken for a header, and every candidate fits in its erase unit. Units
  * are erased right before their first record is programmed and never when
  * the write order leaves them, so stale units are the normal state and the
- * newest record is the candidate with the highest version over all units,
- * two candidates sharing a version being ::LFTL_ERROR_VERSION_COLLISION
- * (hostile content, or a bug). Inside a unit, records are written from the
- * top down, so each unit is read from its lowest position up to its first
- * candidate, the newest of that unit.
+ * newest record is the candidate with the highest version over all units
+ * (::ewlf_choose_fast, ::ewlf_choose_linear).
  *
  * The scan reads and chooses; it never erases, so that a power cut at every
  * boot costs no erase (ISSUES.md LFTL-010). What it decides about the one
@@ -1200,47 +1395,34 @@ static ewlf_record_state_t ewlf_record_state(lftl_ctx_t*ctx, const uint8_t*recor
  * word as it reads then, and the next write settles them: it numbers its
  * record above every valid checksum it steps over (::write_ewlf_core).
  *
+ * With LFTL_SCAN_CROSS_CHECK defined (the Linux and ASan test builds), both
+ * scans run and any disagreement is ::LFTL_INTERNAL_ERROR.
+ *
  * \param ctx Context of the EWLF area
  */
 static void find_current_record(lftl_ctx_t*ctx){
-  const unsigned int n_units = n_pages(ctx);
-  const uintptr_t record_size = ewlf_record_phy_size(ctx);
-  const unsigned int records_per_unit = page_size(ctx) / record_size;
-  const uint8_t*best = NULL;
-  uint32_t best_version = 0;
-  unit_state_t best_end_marker = UNIT_ZERO;
-  const uint8_t*torn = NULL;
-  uint32_t torn_version = 0;
-  for(unsigned int unit_index = 0; unit_index < n_units; unit_index++){
-    const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
-    for(unsigned int i = records_per_unit; i > 0; i--){
-      const uint8_t*const addr = top - (i-1)*record_size;
-      lftl_meta_t meta;
-      unit_state_t end_marker;
-      const ewlf_record_state_t state = ewlf_record_state(ctx,addr,&meta,&end_marker);
-      if(EWLF_RECORD_NONE == state) continue;
-      if(EWLF_RECORD_UNMARKED == state){
-        if((NULL == torn) || (meta.version > torn_version)){
-          torn = addr;
-          torn_version = meta.version;
-        }
-        continue;
-      }
-      if((NULL != best) && (meta.version == best_version)) raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
-      if((NULL == best) || (meta.version > best_version)){
-        best = addr;
-        best_version = meta.version;
-        best_end_marker = end_marker;
-      }
-      break; //the first candidate from the bottom is the newest of its unit
-    }
+  ewlf_choice_t c;
+  ewlf_choice_init(&c);
+  if(!ewlf_choose_fast(ctx,&c)){
+    ewlf_choice_init(&c);
+    ewlf_choose_linear(ctx,&c);
   }
-  if(NULL == best) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
+  #ifdef LFTL_SCAN_CROSS_CHECK
+  {
+    ewlf_choice_t l;
+    ewlf_choice_init(&l);
+    ewlf_choose_linear(ctx,&l);
+    const bool c_torn = (NULL != c.torn) && (c.torn_version > c.best_version);
+    const bool l_torn = (NULL != l.torn) && (l.torn_version > l.best_version);
+    if((c.best != l.best) || (c_torn != l_torn) || (c_torn && (c.torn != l.torn))) raise_error(ctx,LFTL_INTERNAL_ERROR);
+  }
+  #endif
+  if(NULL == c.best) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
   if(ctx->nvm_props->zero_overwrite){
-    if(UNIT_MIXED == best_end_marker) ewlf_pin_item(ctx,(uint8_t*)best,2);
-    if((NULL != torn) && (torn_version > best_version)) ewlf_pin_item(ctx,(uint8_t*)torn,0);
+    if(UNIT_MIXED == c.best_end_marker) ewlf_pin_item(ctx,(uint8_t*)c.best,2);
+    if((NULL != c.torn) && (c.torn_version > c.best_version)) ewlf_pin_item(ctx,(uint8_t*)c.torn,0);
   }
-  ctx->data = (void*)(best + ewlf_header_phy_size(ctx));
+  ctx->data = (void*)(c.best + ewlf_header_phy_size(ctx));
 }
 
 /**

@@ -1161,8 +1161,8 @@ void bad_config_test(){
   RESET_BAD_CTX();
   bad.data_size = props.erase_size - 8;
   EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_ewlf(&bad));
-  //a single EWLF record per erase unit (LFTL-008): a copy forward from the top
-  //record of a unit could not stay in that unit
+  //a single EWLF record per erase unit: at least 2 must fit, a constraint
+  //kept from when a torn record was copied forward within its unit (LFTL-008)
   RESET_BAD_CTX();
   bad.data_size = props.erase_size / 2;
   EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_ewlf(&bad));
@@ -2092,6 +2092,80 @@ void large_write_unit_test(){
   SANITY_CHECK();
 }
 
+//The searches of READ-ONLY-SCAN.md section 6 over an EWLF area with many
+//erase units: every page of the test NVM as one area (17 units of 9 records
+//on the Linux geometry), through three cycles of writes with a reset before
+//every read, and power cuts injected at every stage of a record write and
+//during a rollover's erase. With LFTL_SCAN_CROSS_CHECK (the Linux build) the
+//library runs the fast search and the linear pass at every scan and raises
+//LFTL_INTERNAL_ERROR if they disagree; the test checks that every read after
+//a reset returns the last complete write. The registered areas share these
+//pages: they are formatted again at the end.
+void ewlf_many_units_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props = nvm_props;
+  props.erase = failing_once_nvm_erase;
+  props.write = failing_once_nvm_write;
+  props.next = LFTL_INVALID_POINTER;
+  lftl_ctx_t ewlf = {
+    .nvm_props = &props,
+    .area = &nvm,
+    .area_size = sizeof(nvm),
+    .data = LFTL_INVALID_POINTER,
+    .data_size = 400,
+    .transaction_tracker = LFTL_INVALID_POINTER,
+    .next = LFTL_INVALID_POINTER,
+    .area_type = LFTL_AREA_TYPE_EWLF, //not registered, so set here
+  };
+  uint8_t*const area = (uint8_t*)&nvm;
+  const uintptr_t data_size = ewlf.data_size;
+  const uintptr_t erase_size = props.erase_size;
+  const ewlf_layout_t l = ewlf_layout(&ewlf);
+  const unsigned int n_units = ewlf.area_size / erase_size;
+  const unsigned int records_per_unit = erase_size / l.record_size;
+  if((n_units < 8) || (records_per_unit < 4)) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+  uint8_t d[data_size];
+  uint8_t expected[data_size];
+  lftl_format(&ewlf);
+  memset(expected,0xFF,data_size); //a formatted EWLF area reads erased
+  read_and_check(&ewlf,area,expected,data_size);
+  const unsigned int n_writes = 3*n_units*records_per_unit;
+  unsigned int stage = 0;
+  for(unsigned int i=0;i<n_writes;i++){
+    stateful_prng_fill(d,data_size);
+    //whether this write rolls over: the current record is the lowest of its unit
+    const uintptr_t current = (uintptr_t)ewlf.data - l.header_size;
+    const bool rollover = ((current - (uintptr_t)area) % erase_size) < l.record_size;
+    if(rollover && (0 == (i % 5))){
+      //the power cut during the erase of the unit the rollover enters
+      erase_calls_before_failure = 0;
+      EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_ERASE | 1, lftl_write(&ewlf,area,d,data_size));
+      erase_calls_before_failure = -1;
+    } else if(3 == (i % 7)){
+      //the power cut at every stage of a record write in turn: start marker,
+      //data, magic, version and checksum, end marker. The last one leaves a
+      //complete record with an erased end marker, which is not taken
+      write_calls_before_failure = stage;
+      stage = (stage + 1) % 5;
+      EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_WRITE | 1, lftl_write(&ewlf,area,d,data_size));
+      write_calls_before_failure = -1;
+    } else {
+      lftl_write(&ewlf,area,d,data_size);
+      memcpy(expected,d,data_size);
+    }
+    ewlf.data = LFTL_INVALID_POINTER; //reset
+    read_and_check(&ewlf,area,expected,data_size);
+  }
+  //the registered areas live in these pages
+  format_func(&nvma);
+  format_func(&nvmb);
+  format_func(&ewlfa);
+  format_func(&ewlfb);
+  format_func(&nvmc);
+  format_func(&nvmd);
+  SANITY_CHECK();
+}
+
 #ifdef HAS_TEARING_SIMULATION
 //The simulator must corrupt every byte past the cut and none before it, for a
 //cut anywhere in a multi-unit write or erase: its corruption loop once stopped
@@ -2401,7 +2475,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 35
+  #define N_TESTS 36
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -2533,6 +2607,10 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         test_and_simulate_tearing(tearing_sim_self_test,0);
         #endif
         break;
+      case 36:
+        //Hardcoded 0, ignoring --tear-cov: the test cuts power at chosen points
+        //itself, and an injected failure would change the expected error.
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_many_units_test,0);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

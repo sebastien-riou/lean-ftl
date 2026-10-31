@@ -15,7 +15,7 @@ mkdir -p "$OUTDIR"
 
 gcc -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all \
   -I"$ROOT/liblean-ftl/include" \
-  -DGIT_VERSION=asan -DVERSION_TIMESTAMP=0 -DBUILD_TYPE=asan \
+  -DGIT_VERSION=asan -DVERSION_TIMESTAMP=0 -DBUILD_TYPE=asan -DLFTL_SCAN_CROSS_CHECK \
   "$ROOT/test/asan/asan_harness.c" "$ROOT/liblean-ftl/source/ftl.c" \
   -o "$OUTDIR/asan_harness"
 

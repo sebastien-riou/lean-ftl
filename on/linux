@@ -7,6 +7,8 @@ set(target_SRCS
 add_definitions( -DHAS_SAFE_BUTTON )
 add_definitions( -DHAS_TEARING_SIMULATION )
 add_definitions( -DHAS_PRINTF )
+#every EWLF scan runs both the fast and the linear search and raises LFTL_INTERNAL_ERROR if they disagree
+add_definitions( -DLFTL_SCAN_CROSS_CHECK )
 #add_definitions( -DLFTL_DEBUG )
 
 set(target_include_sys_c_DIRS 

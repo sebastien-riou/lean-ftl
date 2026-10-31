@@ -1316,7 +1316,8 @@ static uint8_t failing_once_nvm_write(void*dst_nvm_addr, const void*const src, u
 //programmed in it, and a power cut during that erase or during the record
 //leaves the previous record current and the next write erasing again. 1000
 //bytes of data make records of about 1 KB: 4 per 4 KB erase unit, 7 per 8 KB
-//one.
+//one; on 2 KB units (STM32L5) only one would fit, so the data is shrunk to
+//fit two, the minimum the layout requires and this test assumes.
 void ewlf_tearing_test(){
   DEBUG_PRINTLN(__func__);
   lftl_nvm_props_t props = nvm_props3;
@@ -1324,7 +1325,11 @@ void ewlf_tearing_test(){
   props.write = failing_once_nvm_write;
   props.next = LFTL_INVALID_POINTER;
   const uint32_t write_size = props.write_size;
-  const uintptr_t data_size = 1000;
+  const uintptr_t magic_size = write_size > 8 ? write_size : 8;
+  const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t header_size = magic_size + write_size + LFTL_META_N_ITEMS*item_size;
+  const uintptr_t record_size_1000 = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(1000,write_size),8);
+  const uintptr_t data_size = (props.erase_size / record_size_1000 >= 2) ? 1000 : props.erase_size/2 - header_size - 16;
   lftl_ctx_t ewlf = nvmd;
   ewlf.nvm_props = &props;
   ewlf.data = LFTL_INVALID_POINTER;
@@ -1333,10 +1338,8 @@ void ewlf_tearing_test(){
   ewlf.next = LFTL_INVALID_POINTER;
   ewlf.area_type = LFTL_AREA_TYPE_EWLF;
   uint8_t*const area = (uint8_t*)ewlf.area;
-  const uintptr_t magic_size = write_size > 8 ? write_size : 8;
-  const uintptr_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
-  const uintptr_t header_size = magic_size + write_size + LFTL_META_N_ITEMS*item_size;
   const uintptr_t record_size = LFTL_ROUND_UP(header_size + LFTL_ROUND_UP(data_size,write_size),8);
+  if(props.erase_size / record_size < 2) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
   uint8_t d[data_size];
 
   //a write cut while writing data leaves a partial record right below the

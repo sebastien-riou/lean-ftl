@@ -174,6 +174,8 @@ This is the same pattern TF-M Protected Storage uses over its internal trusted s
 
 `testit` also runs `test/asan/build-and-run`, which builds `test/asan/asan_harness.c` with AddressSanitizer and UndefinedBehaviorSanitizer. The harness covers hand-built scenarios: out-of-range arguments, an error inside a transaction, write units larger than 16 bytes, a transaction started first after a reset, power cuts in EWLF writes on NOR and STM32U5-like flash, hostile EWLF content, and an oversized EWLF record. Each test must end without a sanitizer report or a callback access outside the area, and with its expected result.
 
+On 2026-10-31 the suite ran on the NUCLEO-U5A5ZJ-Q and NUCLEO-L552ZE-Q boards (through lean-hwbridge, the test firmware built with `HAS_PRINTF`): tests 1 to 36 passed on both, in the pinning variant their builds declare, so the pins and tombstones of the scan have been programmed over partially programmed words on real STM32 flash, through callbacks that check the flash's error flags. A board run does not produce a torn program, which only a power cut during one does.
+
 Not covered: the ECC behaviour of real flash (T1.13). The simulator returns the raw content of a torn word; the NMI handling is the integrator's, and a power cut during a program or erase on an STM32L5 or STM32U5 board would be the test for it.
 
 Three fuzzing harnesses would widen the coverage beyond these scenarios:

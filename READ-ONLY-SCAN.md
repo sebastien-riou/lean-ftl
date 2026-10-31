@@ -70,7 +70,9 @@ At the scan, the marker reads one of three ways:
 
 - **Programmed in some bits, not all:** its programming had started, so the slot or record is
   stable. Take it, and pin the marker before returning to the application. It then reads zeros for
-  good: the weak word cannot later read all erased and make the next boot think otherwise.
+  good: the weak word cannot later read all erased and make the next boot think otherwise. A marker
+  that reads all zeros is one that was pinned, or an all-zero end marker written in full: take it,
+  there is nothing to program.
 - **All erased:** either the marker was never programmed, and the checksum may be weak, or it was
   marginal and has drifted. The two cannot be told apart and need not be: do not take the slot or
   record, B is current, and **tombstone** T by pinning its version word. Its checksum can no longer
@@ -96,8 +98,9 @@ The scan already takes the highest version among valid slots, and reads the whol
 since 426fcb1. Today's layout allows both pins, so this part needs no format change:
 
 - `checksum2` partially programmed: pin the whole item to zeros. Its value becomes 0, a stable
-  mismatch that the existing rule reads as "keep"; it can never read all erased again. (Today the
-  slot is kept without the pin: LFTL-011.)
+  mismatch that the existing rule reads as "keep"; it can never read all erased again, and a unit
+  that reads all zeros is a pinned one, kept without another program. (Today the slot is kept
+  without the pin: LFTL-011.)
 - `checksum2` all erased, another valid slot exists: tombstone T by pinning its version item,
   instead of `erase_slot()`. T becomes invalid for good; the next write erases it anyway, as every
   write erases its target. Nothing is erased at boot. (Today: the erase, the regular-area part of
@@ -188,7 +191,7 @@ the current one. Versions are unique among candidates: a tombstoned record can s
 the record written after it, a candidate cannot. Section 6 shows how to find the current unit and
 its newest record without visiting every unit or every position.
 
-## 5. Costs and residuals
+## 5. Costs
 
 - **Boot time.** Visited unit by unit, every unit contributes one candidate, so a boot would cost
   one pass and one checksum per unit, and an area with many erase units would pay for all of them.
@@ -203,14 +206,14 @@ its newest record without visiting every unit or every position.
   raises the NMI; the pin or tombstone that follows programs a valid codeword over it, so the NMI
   does not come back. That is better than today, where a kept slot keeps its weak word until a
   later write erases it.
-- **The timing residual** of section 2: a marker that reads complete at every boot and all erased
-  before the next, a rollback by one version after exposure, never a loss.
 - **The application's own boot-time writes** stay its own: a counter incremented at every boot costs
   a slot erase per boot in a regular area and an erase per `records_per_unit` boots in an EWLF
   area. That is T1.5's budget, and the reason to keep such counters in EWLF areas.
 - **Memory layout.** Nothing changes for regular areas. EWLF records keep their size, but the
   `prev_erased` field becomes the start marker and `checksum2` an all-zero end marker: existing
   EWLF areas would need a format.
+
+What stays exposed, with and without pinning, is in section 8.
 
 ## 6. Boot time with many units
 
@@ -388,9 +391,37 @@ attacker of LFTL-010 the NVM is not touched at boot, where the pinning variant p
 per boot. The two variants share the layout and the format; which one runs is the NVM's
 declaration. The Linux simulator models the pinning device, a write over programmed cells refused
 unless it writes zeros; a configuration that refuses the all-zero case too would run the test
-suite against this variant.
+suite against this variant. Section 8 puts the two variants' remaining vulnerabilities side by side.
 
-## 8. Distance from today's lean-ftl
+## 8. Remaining vulnerabilities
+
+Measured against the objectives of THREAT-MODEL.md: O1, after any power cut the data reads as the
+old or the new committed version and nothing is lost; O2, no rollback below the last committed
+version; O3, no bricking; and the wear threat T1.5. "Until the next write" means the application's
+next completed write to the area: from then on the newest version is complete and ahead of any weak
+word, and the weak word goes when its slot or unit is reused. The weak word in question is the one
+of section 2, the end marker of the write a power cut interrupted; nothing else can be weak.
+
+| Threat | Consequence | With pinning | Without pinning |
+|---|---|---|---|
+| Marker read partially programmed at one boot, all erased at a later one (T2) | Rollback by one version (O2); no loss | Closed: the first boot that sees it pins it | Open until the next write: LFTL-011 as today |
+| Marker read complete at one boot, all erased at a later one | Rollback by one version (O2); no loss | Excluded by T3 wherever the marker carries 16 programmed bits once read complete: the EWLF zero marker on any geometry (an item is at least 4 bytes), a regular area's `checksum2` on 8- and 16-byte write units (its zero padding). Open for a regular area on 2-byte units (CH32V307), until the next write; the per-boot pin of section 2 closes it everywhere | Same scope; no per-boot pin to close it |
+| Marker read all erased at one boot, programmed at a later one | A late new by one version: the data of the interrupted write shows up after B was shown; each boot alone is old-or-new | Closed: T is tombstoned at the first boot | Open until the next write; the numbering rule keeps it from becoming a collision |
+| Power cut at every boot (the attacker of LFTL-010) | Wear, availability (O3) | One word program per boot, on the same word, until one completes; a pinned word is final; never an erase | Nothing is written at boot |
+| Power cut during a pin or tombstone | None by itself | The word is left weak and decided again at the next boot, on a word closer to settled; at worst the row above | n/a |
+| Torn record write, then reuse of cells that merely read erased, within a unit or at a rollover (T4, LFTL-013) | Loss (O1) today | Closed: the unit is erased at the rollover into it, and a reused position held at most the all-zero start marker, which the new write programs again | Same |
+| Torn erase, a weakly erased unit (T4) | Corruption of the records written over it | Closed: a unit is erased right before its first record is programmed; reading erased is never trusted | Same |
+| Two candidates with one version | `LFTL_ERROR_VERSION_COLLISION` at every boot: availability (O3) | Closed by the tombstone | Closed by numbering a new record above every valid checksum, taken or not; a requirement of the variant, not an option |
+| A hole in the run of started positions of the current unit (6c) | An older record taken as newest, the next write shadowed later: a committed write lost (O1) | Closed: skipped start markers are pinned; the one start marker that can be weak, the last started, is read once per scan and gives the same newest record either way | Avoided: the pass of 4c is used instead of 6c |
+| Weak word on ECC flash (T1.13) | NMI on read; a handler that does not return hangs the device (O3) | One NMI at the first boot after the torn write, then the pin or tombstone programs a valid codeword; the handler must return, as today | No such target; it would be one NMI per boot until the word's unit is erased |
+| Hostile NVM content (Case 2) | A wrong record chosen (integrity is not a Case 2 goal), the collision error (availability), memory safety | Positions stay inside the area (the check of 6b, the linear fallback); crafted content can make the scan program one word of zeros, once per crafted word | Same, and nothing is programmed |
+| Stale data (T1.8) | Old records readable physically until their unit is reused | Longer than today, where the vacated unit is erased at the rollover | Same |
+| The model itself | T2, T3 and T4 are physics assumptions no vendor documents; N3 is documented on the STM32L5 and STM32U5 only | Rests on T2, T4, N3, and T3 for the second row | Rests on T2, T4, and T3 for the second row |
+
+Unchanged from today in both variants: wear driven by the application's writes (T1.5), a torn
+`lftl_format()` (T1.6), and everything in THREAT-MODEL.md that is not about the scan.
+
+## 9. Distance from today's lean-ftl
 
 Less than the list above suggests: the regular-area scan is already max-version, the whole-unit
 reading of `checksum2` exists since 426fcb1, and `write_ewlf_core()` already finds the next free

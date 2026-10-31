@@ -34,6 +34,7 @@ It assumes the reader knows EWLF.md and THREAT-MODEL.md.
   not something lean-ftl assumes; the Linux simulator accepts it (a write over programmed cells is
   refused unless it writes zeros). It gives the cells a full pulse, so a pinned word reads zeros
   for good, and on ECC flash it replaces a codeword a torn program left inconsistent by a valid one.
+  Section 7 says what the design keeps and what it loses on a device without it.
 - Diagrams: `U1` is the unit at the higher addresses, `U0` the lower one; `p0` is the top position
   of a unit (highest address), `p3` its bottom. Writes fill a unit from `p0` down.
 
@@ -333,11 +334,70 @@ strict write order (the unit below, wrapping to the top) and the top record bein
 written into a unit. Regular areas keep their one version read per slot, which is fine at the
 wear-leveling factors they are used with, and their layout stays as it is.
 
-## 7. Distance from today's lean-ftl
+## 7. Without pinning
+
+Pinning needs a flash that accepts a program of zeros over a partially programmed word. The
+STM32L5 and STM32U5 document it; the W25Q32RV of the Pico 2 specifies programming for erased
+locations only, and the M5531 and CH32V307 manuals do not say (FLASH.md). On such a device the
+capability is not declared (N3 of the flash page) and the design runs without its three pins: the
+pin of a partially programmed end marker, the tombstone of a torn record, and the pin of the start
+markers the write path skips. Everything else stands: the scan never erases, a unit is erased at
+the rollover into it, the end marker is an all-zero word written last and the start marker an
+all-zero word written first, the newest record is the highest version, and the unit search of 6b
+works unchanged, since it only reads keys. What changes:
+
+- **A weak end marker is decided again at every boot, until the next write.** Partially
+  programmed: take the record, as in section 2, but nothing makes that durable; if the marker reads
+  all erased at a later boot, B is current again, a rollback by one version (LFTL-011 as it stands
+  today). All erased: take B and leave T as it is, neither tombstoned nor erased; if the marker
+  reads partially programmed at a later boot, T is taken then, a "late new" by one version. Both
+  last until the application's next write, after which the newest version is complete and the weak
+  word is behind it: in a regular area because that write erases T's slot, the slot after B; in an
+  EWLF area because of the next point. Erasing T at boot instead, today's regular-area repair,
+  would make the decision durable at the price of LFTL-010's erase per boot; this variant does not.
+- **A new record is numbered above every record with a valid checksum, taken or not.** With T left
+  in place, "current version plus one" gives the next record T's version, and if T's marker later
+  reads programmed the scan finds two candidates sharing a version and raises
+  `LFTL_ERROR_VERSION_COLLISION` at every such boot. The scan reads T's header anyway, right below
+  the newest record in its pass up the unit, or at the top of the next unit in the neighbour check
+  of 6b, so it keeps the highest version it saw on a valid checksum and the write numbers above it.
+  Later boots then agree whatever T's marker reads. The pinning variant can use the same rule; with
+  tombstoning it is only a simplification.
+- **The newest record in the current unit is found by the pass of 4c, not the halving of 6c.** 6c
+  needs "position started" to be monotone, and that holds only because the write path pins the
+  start marker of every started position it skips. Without pinning, a position whose start marker
+  was cut is skipped while it reads partially programmed and may read all erased later, a hole in
+  the run. The halving can then stop above the hole and report an older record as the newest, and
+  the next write, placed below that older record, is shadowed by the real newest at the following
+  boot: a committed write lost. The pass from the unit's bottom up to its first candidate is immune
+  to holes; it costs up to one header read per position of the current unit, what today's scan
+  costs, while the unit search keeps its logarithmic cost. Programming some other erased word of the
+  skipped position as a mark does not help: the mark can be cut too, and cannot be refreshed, which
+  is the whole problem.
+- **LFTL-013's within-unit case is closed anyway.** A position reused because it reads all erased
+  held at most a weak start marker, an all-zero word, and the new write programs that same all-zero
+  word over it: every cell is meant to end at 0, so no cell with residual charge is left at 1 to
+  flip later. The unit case is closed by the lazy erase. Both hold with or without pinning, and are
+  the reason the start marker, not the magic, is written first.
+- **No boot-time pin of the current marker** (the option of section 2) and no ECC repair
+  (section 5). No target combines ECC with the lack of pinning; if one did, a weak word would raise
+  its NMI at every boot until a write erases it, as today (T1.13).
+
+What the variant gives in exchange is a scan that writes nothing at all: under the repeated-cut
+attacker of LFTL-010 the NVM is not touched at boot, where the pinning variant programs one word
+per boot. The two variants share the layout and the format; which one runs is the NVM's
+declaration. The Linux simulator models the pinning device, a write over programmed cells refused
+unless it writes zeros; a configuration that refuses the all-zero case too would run the test
+suite against this variant.
+
+## 8. Distance from today's lean-ftl
 
 Less than the list above suggests: the regular-area scan is already max-version, the whole-unit
 reading of `checksum2` exists since 426fcb1, and `write_ewlf_core()` already finds the next free
 position by reading the cells. The changes would be:
+
+- `lftl_nvm_props_t`: a declaration of the pinning capability (N3), which selects the pins of
+  sections 2 to 4 or the variant of section 7; the layout is the same either way.
 
 - `find_current_slot()`: pin `checksum2` when it is partially programmed, tombstone the version
   item instead of `erase_slot()` when it is all erased; `other_valid_slot()` stays as the guard for
@@ -348,8 +408,9 @@ position by reading the cells. The changes would be:
   parameter of `write_ewlf_core()`.
 - `write_ewlf_core()`: program the start marker first, the end marker as zeros last; choose the
   position by start markers and pin the skipped ones; at a rollover, erase the target unit
-  unconditionally and do not erase the vacated one. `format_ewlf()` writes a start marker and a
-  zero end marker and no flag.
+  unconditionally and do not erase the vacated one; number the record above the highest version
+  the scan saw on a valid checksum, taken or not (today: the current record's version plus one).
+  `format_ewlf()` writes a start marker and a zero end marker and no flag.
 - Tests 24, 33 and 34 rewritten around pinning and tombstoning; test 29's wrap case and tests 22
   and 23's erase counts re-derived for lazy erasing; the raw-state builders of tests 28 and 29
   given a start marker.

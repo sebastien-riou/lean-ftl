@@ -34,6 +34,21 @@
 
 #define WRITE_BIT(reg,bit,val) do{if(val) SET_BIT(reg,bit); else CLEAR_BIT(reg,bit);}while(0)
 
+#define NVM_SR_ERRORS (FLASH_NSSR_OPERR | FLASH_NSSR_PROGERR | FLASH_NSSR_WRPERR | FLASH_NSSR_PGAERR | FLASH_NSSR_SIZERR | FLASH_NSSR_PGSERR | FLASH_NSSR_OPTWERR)
+
+//The flash error flags: a program or erase that the flash refuses (a word
+//not erased, a write-protected page, a bad sequence...) sets one of them and
+//is aborted, and while any is set every later operation is refused with
+//PGSERR (RM0456 7.3.6, 7.3.7, 7.3.9; RM0438 6.3.6, 6.3.7, 6.3.8). They are
+//cleared before each operation and checked after it, so that a refused
+//operation is reported once, to the caller, and poisons nothing.
+static inline void nvm_ll_clear_flags(void){
+  WRITE_REG(FLASH_NS->NSSR, NVM_SR_ERRORS | FLASH_NSSR_EOP);
+}
+static inline uint32_t nvm_ll_errors(void){
+  return READ_BIT(FLASH_NS->NSSR, NVM_SR_ERRORS);
+}
+
 uint8_t __attribute__((weak)) nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
   if((uintptr_t)src_nvm_addr < FLASH_BASE_NS) return 1;
   if(((uintptr_t)src_nvm_addr + size) > (FLASH_BASE_NS + FLASH_SIZE)) return 2;
@@ -155,6 +170,7 @@ uint8_t __attribute__((weak)) nvm_erase(void*base_address, unsigned int n_pages)
   //unlock flash write
   WRITE_REG(FLASH->NSKEYR, FLASH_KEY1);
   WRITE_REG(FLASH->NSKEYR, FLASH_KEY2);
+  nvm_ll_clear_flags();
 
   uint64_t*dst64 = (uint64_t*)base_address;
   for(unsigned int i=0;i<n_pages;i++){
@@ -162,10 +178,13 @@ uint8_t __attribute__((weak)) nvm_erase(void*base_address, unsigned int n_pages)
     dst64 += SIZE64(FLASH_PAGE_SIZE);
   }
 
+  const uint32_t errors = nvm_ll_errors();
+  nvm_ll_clear_flags();
   //lock flash write
   SET_BIT(FLASH->NSCR, FLASH_NSCR_LOCK);
   // Restore backed-up-state
   __set_PRIMASK(primask);
+  if(errors) return 6; //the flash refused or aborted an erase
   
   return 0;
 }
@@ -182,16 +201,22 @@ uint8_t __attribute__((weak)) nvm_write(void*dst_nvm_addr, const void*const src,
   //unlock flash write
   WRITE_REG(FLASH->NSKEYR, FLASH_KEY1);
   WRITE_REG(FLASH->NSKEYR, FLASH_KEY2);
+  nvm_ll_clear_flags();
   uint64_t*dst_nvm_addr64 = (uint64_t*)dst_nvm_addr;
   uint64_t*src64 = (uint64_t*)src;
   
   nvm_ll_write(dst_nvm_addr64, src64, size / sizeof(uint32_t));
 
+  const uint32_t errors = nvm_ll_errors();
+  nvm_ll_clear_flags();
   //lock flash write
   SET_BIT(FLASH->NSCR, FLASH_NSCR_LOCK);
 
+  //6: the flash refused or aborted a program (a word that was not erased, a
+  //write-protected page...); 5: the flash reported nothing but the content is
+  //not what was written
   uint8_t fail = 0;
-  fail = memcmp(dst_nvm_addr,src,size) ? 5 : 0;
+  fail = errors ? 6 : (memcmp(dst_nvm_addr,src,size) ? 5 : 0);
   // Restore backed-up-state
   __set_PRIMASK(primask);
 

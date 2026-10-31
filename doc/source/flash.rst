@@ -50,7 +50,9 @@ the content.
 A program or an erase that returned success reads its value until the next erase of its unit and
 is not disturbed by operations on other units. Failures are reported by the return code of the
 callback: *lean-ftl* does not retry, verify or time out. Where the hardware does not verify, the
-callback should (the STM32 callbacks of the repository read back what they programmed).
+callback should (the STM32 callbacks of the repository check the flash's error flags after each
+operation, clearing them before it so that a refused one cannot poison the next, and read back
+what they programmed).
 
 **R6. EWLF areas only: erased bytes read 0xFF.**
 Free record positions (an erased start marker) and the erased-data checksum of

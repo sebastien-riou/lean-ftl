@@ -2207,6 +2207,62 @@ void tearing_sim_self_test(){
 }
 #endif
 
+//Areas formatted and written by lean-ftl v0.1.0, whose on-flash format this
+//version must still read: test/v010-compat/gen-images.sh builds them with
+//the sources of that tag and records them in v010_images.h as runs of
+//programmed write units, so that they are rebuilt here in nvmd's pages with
+//an erase and programs of erased units only, as real flash allows. Each is
+//read as after a reset, on an unregistered copy of nvmd whose NVM properties
+//count erases and refuse every program: the scan must settle on the slot
+//v0.1.0 had current, touch nothing, and read what v0.1.0 read back. Then the
+//registered area must still take updates.
+#include "v010_images.h"
+void v010_compat_test(){
+  DEBUG_PRINTLN(__func__);
+  lftl_nvm_props_t props = nvm_props3;
+  props.erase = counting_nvm_erase;
+  props.write = refusing_nvm_write;
+  props.next = LFTL_INVALID_POINTER;
+  const uint32_t write_size = props.write_size;
+  const uint32_t item_size = write_size > sizeof(uint32_t) ? write_size : sizeof(uint32_t);
+  const uintptr_t meta_phy_size = LFTL_META_N_ITEMS * item_size;
+  const uintptr_t erase_size = props.erase_size;
+  const uintptr_t n_pages_in_slot = LFTL_DIV_CEIL(nvmd.data_size + meta_phy_size, erase_size);
+  const uintptr_t slot_size = n_pages_in_slot * erase_size;
+  const uintptr_t n_pages = nvmd.area_size / erase_size;
+  const unsigned int n_images = V010_N_IMAGES;
+  if(0 == n_images) PRINTLN("WARNING: no lean-ftl v0.1.0 images for this geometry, nothing checked");
+  for(unsigned int i=0;i<n_images;i++){
+    const v010_image_t*const img = &v010_images[i];
+    DEBUG_PRINTLN("v0.1.0 image %s",img->name);
+    //made for exactly this area
+    if((img->write_size != write_size) || (img->erase_size != erase_size)) throw_exception(INTERNAL_ERROR_CORRUPT);
+    if((img->data_size != nvmd.data_size) || (img->area_size != nvmd.area_size)) throw_exception(INTERNAL_ERROR_CORRUPT);
+    uint8_t*const area = (uint8_t*)nvmd.area;
+    raw_erase(area,n_pages);
+    for(unsigned int r=0;r<img->n_runs;r++){
+      raw_write(area + img->runs[r].offset, img->runs[r].bytes, img->runs[r].size);
+    }
+    //the first access after a reset
+    lftl_ctx_t ctx = nvmd;
+    ctx.nvm_props = &props;
+    ctx.data = LFTL_INVALID_POINTER;
+    ctx.transaction_tracker = LFTL_INVALID_POINTER;
+    ctx.next = LFTL_INVALID_POINTER;
+    ctx.area_type = LFTL_AREA_TYPE_STD; //not registered, so set here
+    counted_erases = 0;
+    read_and_check(&ctx,nvm.data7,img->expected,nvmd.data_size);
+    if(0 != counted_erases) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(img->slot != ((uintptr_t)ctx.data - (uintptr_t)ctx.area) / slot_size) throw_exception(ERROR_VERIFICATION_FAIL);
+    //the registered area reads the same, and still takes updates
+    nvmd.data = LFTL_INVALID_POINTER;
+    read_and_check(&nvmd,nvm.data7,img->expected,nvmd.data_size);
+    randomized_test_write(&nvmd,nvm.data7,nvmd.data_size);
+  }
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
@@ -2478,7 +2534,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 36
+  #define N_TESTS 37
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -2614,6 +2670,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         //Hardcoded 0, ignoring --tear-cov: the test cuts power at chosen points
         //itself, and an injected failure would change the expected error.
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_many_units_test,0);break;
+      case 37:TEAR_COV(100);test_and_simulate_tearing(v010_compat_test     ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         abort();

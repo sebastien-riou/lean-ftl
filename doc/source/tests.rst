@@ -68,6 +68,20 @@ build also defines ``LFTL_SCAN_CROSS_CHECK``: every scan of an EWLF area runs bo
 and the linear pass of READ-ONLY-SCAN.md section 6, and raises ``LFTL_INTERNAL_ERROR`` if they
 disagree.
 
+Compatibility with v0.1.0
+--------------------------
+
+The on-flash format of regular areas has not changed since lean-ftl v0.1.0 (EWLF areas came
+later). Test 37 (``v010_compat_test``) checks it on every build: it rebuilds, in one of the test
+areas, images that v0.1.0 formatted and wrote (``liblean-ftl-test/source/v010_images.h``), reads
+each one as after a reset and checks that the scan settles on the slot v0.1.0 had current,
+programs and erases nothing, and reads back the data v0.1.0 read; then that the area still takes
+updates. ``test/v010-compat/gen-images.sh`` regenerates the header: it builds
+``test/v010-compat/harness.c`` against the sources of the ``v0.1.0`` tag taken from git and
+against the working tree, generates the images for every geometry of the test suite, checks that
+the working tree reads them, and writes them out as C. Add a geometry there when the test suite
+gains one.
+
 Code coverage
 --------------
 

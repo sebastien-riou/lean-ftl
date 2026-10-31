@@ -13,6 +13,7 @@ Main features:
 - Easily portable to new MCUs / new flash chips
 - [Documentation](https://lean-ftl.rtfd.io) and [threat model](THREAT-MODEL.md) available
 - Bounded execution time: every operation's worst case follows from the configuration, and after the first access a write to a regular area costs the same whatever the NVM holds (see O5 in the [threat model](THREAT-MODEL.md))
+- The on-flash format of regular areas is unchanged since v0.1.0; the test suite reads areas written by v0.1.0 on every build (see [tests](https://lean-ftl.readthedocs.io/en/latest/tests.html))
 - Few requirements on the flash, stated in one page: [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html); regular areas do not depend on the erased value, EWLF areas need erased bytes to read 'FF'
 
 The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions, and an error handler:

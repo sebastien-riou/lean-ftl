@@ -21,6 +21,10 @@ void read_file(const char*name, void*const buf, size_t*size);
 
 const uint32_t nvm_write_size = LFTL_WU_SIZE;
 const uint32_t nvm_erase_size = LFTL_PAGE_SIZE;
+//whether the simulated flash accepts a program of all zeros over a write
+//unit that is not erased (N3 of doc/source/flash.rst): true models the
+//STM32L5 and STM32U5, false a flash without that exception
+bool nvm_zero_overwrite = true;
 
 uint64_t tearing_sim_cnt=0;
 uint64_t tearing_sim_target_cnt = -1;
@@ -119,12 +123,13 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   if(0 != ((uintptr_t)dst_nvm_addr % nvm_write_size)) return 3;
   if(0 != (size % nvm_write_size)) return 4;
   //like STM32U5-class flash: a write unit can be programmed only while it is
-  //erased, unless the data to write is all 0 (R3 and N3 of doc/source/flash.rst:
-  //the library itself never needs the all-zero exception)
+  //erased, unless the data to write is all 0 and the flash accepts that (R3
+  //and N3 of doc/source/flash.rst: the library needs the exception only to
+  //pin a word a power cut left weak, and only on a flash that declares it)
   for(uintptr_t i=0;i<size;i+=nvm_write_size){
     const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr + i;
     const uint8_t*const src8 = (const uint8_t*)src + i;
-    if(!is_all(dst8,0xFF,nvm_write_size) && !is_all(src8,0x00,nvm_write_size)) return 5;
+    if(!is_all(dst8,0xFF,nvm_write_size) && !(nvm_zero_overwrite && is_all(src8,0x00,nvm_write_size))) return 5;
   }
   memcpy(dst_nvm_addr,src,size);
   bool tearing = tearing_sim(dst_nvm_addr,size);

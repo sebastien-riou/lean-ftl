@@ -624,30 +624,53 @@ static uint32_t get_slot_checksum(lftl_ctx_t*ctx, unsigned int slot_index){
 
 /**
  * \brief Read the checksum2 field of a slot's meta-data, and whether its
- * whole write unit reads erased.
+ * whole write unit reads all erased or all zeros.
  *
  * The bytes next to the value are programmed to zero with it, so the whole
  * unit tells a checksum2 that was never programmed from one whose program
- * was torn, see ::find_current_slot.
+ * was torn, and one that ::find_current_slot pinned, see there. One read:
+ * a word a power cut left weak can read differently from one read to the
+ * next, so every decision about it is made on the same reading.
  *
  * \param ctx Context of the LFTL area
  * \param slot_index Index of the slot
  * \param all_erased Output: true if every byte of the write unit reads 0xFF
+ * \param all_zero Output: true if every byte of the write unit reads 0x00
  * \returns The slot's stored checksum2
  */
-static uint32_t get_slot_checksum2(lftl_ctx_t*ctx, unsigned int slot_index, bool*all_erased){
+static uint32_t get_slot_checksum2(lftl_ctx_t*ctx, unsigned int slot_index, bool*all_erased, bool*all_zero){
   const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
   uint32_t unit[LFTL_DIV_CEIL(item_size,sizeof(uint32_t))];
   get_slot_item(ctx,slot_index,2,unit);
   const uint8_t*const unit8 = (const uint8_t*)unit;
   *all_erased = true;
+  *all_zero = true;
   for(unsigned int i=0;i<item_size;i++){
-    if(0xFF != unit8[i]){
-      *all_erased = false;
-      break;
-    }
+    if(0xFF != unit8[i]) *all_erased = false;
+    if(0x00 != unit8[i]) *all_zero = false;
   }
   return unit[0];
+}
+
+/**
+ * \brief Program one meta-data item's whole write unit to zeros.
+ *
+ * The one program a flash declared with `zero_overwrite` accepts on a write
+ * unit in any state (N3 of the flash page): every cell gets a full pulse, so
+ * the unit reads zeros for good. ::find_current_slot uses it to pin a
+ * decision about a word a power cut left weak, and never on a unit that
+ * already reads all zeros (the STM32L5 and STM32U5 refuse that program).
+ *
+ * \param ctx Context of the LFTL area
+ * \param slot_index Index of the slot
+ * \param item Index of the item: 0 version, 1 checksum, 2 checksum2
+ */
+static void pin_slot_item(lftl_ctx_t*ctx, unsigned int slot_index, unsigned int item){
+  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
+  uint8_t*const phy = slot_base(ctx, slot_index) + meta_offset(ctx) + item*item_size;
+  uint32_t zeros[LFTL_DIV_CEIL(item_size,sizeof(uint32_t))];
+  memset(zeros,0,sizeof(zeros));
+  nvm_write(ctx,ctx->nvm_props,phy,zeros,item_size);
 }
 
 /**
@@ -757,7 +780,7 @@ static void erase_slot(lftl_ctx_t*ctx, unsigned int slot_index){
 /**
  * \brief Whether a slot other than `except` is valid.
  *
- * Used by ::find_current_slot before it erases a torn slot, so that the
+ * Used by ::find_current_slot before it sets a torn slot aside, so that the
  * area is never left without a valid slot by its own doing. One checksum
  * per other slot, in that rare case only.
  *
@@ -788,29 +811,39 @@ static bool other_valid_slot(lftl_ctx_t*ctx, unsigned int except){
  *
  * A write programs the data, then version and checksum, then checksum2, so
  * when the winning slot's checksum2 does not match, a tearing left it either
- * erased (the cut came during the checksum word at the latest: that word may
- * be weakly programmed, and read differently at a later boot) or partially
- * programmed (its own program had started, so the checksum is complete).
- * Only the whole write unit tells the two apart (::get_slot_checksum2).
- * In the first case the slot is erased and the scan runs again: the previous
- * version is current, its meta-data complete, and no boot ever returned the
- * torn slot, whose checksum2 never matched. In the second case the slot is
- * kept as it is. The torn slot is never copied, so the previous version is
- * never erased on the strength of a word that may read differently later
- * (ISSUES.md LFTL-009). A torn slot that is the only valid one is kept too:
- * nothing in normal operation produces that state, and keeping it beats
- * having nothing.
+ * all erased (the cut came during the checksum word at the latest: that word
+ * may be weakly programmed, and read differently at a later boot) or
+ * partially programmed (its own program had started, so the checksum is
+ * complete). Only the whole write unit tells the two apart
+ * (::get_slot_checksum2), and the scan never erases, so that a power cut at
+ * every boot costs no erase (ISSUES.md LFTL-010):
+ * - partially programmed: the slot is taken. On a flash with
+ *   `zero_overwrite` the unit is pinned to zeros first, so it can never read
+ *   all erased at a later boot and bring the previous version back
+ *   (LFTL-011); a unit reading all zeros is such a pinned one, or a
+ *   checksum that is legitimately 0, and is taken as complete.
+ * - all erased, another slot valid: the previous version is current and the
+ *   scan runs again without the torn slot. With `zero_overwrite` the torn
+ *   slot is tombstoned first, its version item pinned to zeros, so that its
+ *   checksum can never verify again; without it the slot is left as it is,
+ *   and the next write erases it anyway, as every write erases its target.
+ *   The torn slot is never copied, so the previous version is never erased
+ *   on the strength of a word that may read differently later (LFTL-009).
+ * - all erased, no other slot valid: the slot is taken as it is. Nothing in
+ *   normal operation produces that state, and taking it beats having nothing.
  *
  * \param ctx Context of the LFTL area
  */
 static void find_current_slot(lftl_ctx_t*ctx){
   const unsigned int ns = n_slots(ctx);
   const uint32_t invalid_index = 0xFFFFFFFF;
-  //a second pass at most: the slot erased by the first one is then invalid
+  uint32_t skip_index = invalid_index;
+  //a second pass at most: it leaves out the slot the first one found torn
   for(unsigned int pass = 0; pass < 2; pass++){
     uint32_t max_version_index = invalid_index;
     uint32_t max_version = 0;
     for(unsigned int i=0;i<ns;i++){
+      if(i == skip_index) continue;
       const uint32_t version = get_slot_version(ctx,i);
       if(version == 0xFFFFFFFF) continue;
       const bool found_one = invalid_index != max_version_index;
@@ -826,16 +859,31 @@ static void find_current_slot(lftl_ctx_t*ctx){
       raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
     }
     bool checksum2_erased;
-    const uint32_t checksum2 = get_slot_checksum2(ctx, max_version_index, &checksum2_erased);
+    bool checksum2_zero;
+    const uint32_t checksum2 = get_slot_checksum2(ctx, max_version_index, &checksum2_erased, &checksum2_zero);
     const bool complete = checksum2 == get_slot_checksum(ctx, max_version_index);
-    if(complete || !checksum2_erased || !other_valid_slot(ctx, max_version_index)){
+    if(complete || checksum2_zero){
+      //complete, or pinned by an earlier boot
       ctx->data = slot_base(ctx, max_version_index);
       return;
     }
-    //torn during the checksum word at the latest: erase it, the previous
-    //version is current. ctx->data stays unset until then, so an error here
-    //leaves nothing to trust
-    erase_slot(ctx, max_version_index);
+    if(!checksum2_erased){
+      //partially programmed: the checksum is complete, the slot is stable.
+      //Pin the word so that it cannot read all erased at a later boot
+      if(ctx->nvm_props->zero_overwrite) pin_slot_item(ctx, max_version_index, 2);
+      ctx->data = slot_base(ctx, max_version_index);
+      return;
+    }
+    if(!other_valid_slot(ctx, max_version_index)){
+      ctx->data = slot_base(ctx, max_version_index);
+      return;
+    }
+    //all erased, torn during the checksum word at the latest: the previous
+    //version is current. Tombstone the torn slot where the flash allows it.
+    //ctx->data stays unset until the second pass, so an error here leaves
+    //nothing to trust
+    if(ctx->nvm_props->zero_overwrite) pin_slot_item(ctx, max_version_index, 0);
+    skip_index = max_version_index;
   }
   raise_error(ctx,LFTL_INTERNAL_ERROR);
 }

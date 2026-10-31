@@ -142,6 +142,7 @@ void (*transaction_abort_func)(lftl_ctx_t*ctx);
 #ifdef HAS_TEARING_SIMULATION
 #include <stdio.h>
 #include <stdlib.h>
+extern bool nvm_zero_overwrite; //the simulated flash's all-zero exception, see linux-accessors.c
 data_flash_t nvm_ref;
 data_flash_t nvm_ref_previous_state;
 data_flash_t transaction_buf_ref;
@@ -210,7 +211,7 @@ uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t
       if(0xFF != dst8[j]) erased = 0;
       if(0x00 != src8[j]) zero = 0;
     }
-    if(!erased && !zero) return 5;
+    if(!erased && !(nvm_zero_overwrite && zero)) return 5;
   }
   //update previous state
   nvm_ref_previous_state = nvm_ref;
@@ -1508,14 +1509,18 @@ void version_collision_test(){
 
 //Rebuild nvmd's newest slot as a tearing during the writes of its meta-data
 //leaves it: data, version and checksum programmed, checksum2 erased or with
-//the last programmed byte of its value still erased (ISSUES.md LFTL-009).
-//checksum2 erased: the cut came during the checksum word at the latest, that
-//word may be weakly programmed, and the scan erases the slot: the previous
-//version is current. checksum2 partially programmed: its program had started,
-//the checksum is complete, and the slot is kept as it is. The torn slot is
-//never copied, so the previous version is never erased on the strength of a
-//word that may read differently later. checksum2 erased with no other valid
-//slot: the slot is kept.
+//the last programmed byte of its value still erased (ISSUES.md LFTL-009,
+//LFTL-010, LFTL-011). The scan never erases. checksum2 erased: the cut came
+//during the checksum word at the latest, that word may be weakly programmed,
+//the previous version is current; on a flash with zero overwrite the torn
+//slot is tombstoned, its version item pinned to zeros, otherwise it is left
+//as it is. checksum2 partially programmed: its program had started, the
+//checksum is complete, the slot is taken; with zero overwrite the unit is
+//pinned to zeros first, so that it cannot read all erased at a later boot.
+//Without zero overwrite that decision is not durable: on Linux, where the NVM
+//is RAM, the unit is then made to read all erased, and the previous version
+//comes back (the residual of READ-ONLY-SCAN.md section 7). checksum2 erased
+//with no other valid slot: the slot is kept.
 typedef enum {
   TORN_CHECKSUM2_ERASED,
   TORN_CHECKSUM2_PARTIAL,
@@ -1569,28 +1574,51 @@ void torn_checksum2_test_core(torn_checksum2_mode_t mode){
   }
 
   //force a fresh slot search
+  const bool pinning = nvmd.nvm_props->zero_overwrite;
   const uint8_t*const expected = (TORN_CHECKSUM2_ERASED == mode) ? previous : buf;
   nvmd.data = LFTL_INVALID_POINTER;
   read_and_check(&nvmd,nvm.data7,expected,sizeof(buf));
   const unsigned int index = ((uintptr_t)nvmd.data - (uintptr_t)nvmd.area) / slot_size;
+  uint8_t item_now[item_size];
   if(TORN_CHECKSUM2_ERASED == mode){
-    //the torn slot was erased, the previous version is current
+    //the previous version is current; the torn slot is not erased: its data
+    //and checksum are still there, its version item pinned to zeros where the
+    //flash allows it, untouched otherwise
     if(index != previous_index) throw_exception(ERROR_VERIFICATION_FAIL);
-    if(!raw_reads_erased(slot,slot_size)) throw_exception(ERROR_VERIFICATION_FAIL);
-  } else {
-    //the torn slot is current, as it is
-    if(index != current_index) throw_exception(ERROR_VERIFICATION_FAIL);
-    uint8_t checksum2_now[item_size];
-    lftl_memread(checksum2_now,checksum2,item_size);
-    if(TORN_CHECKSUM2_PARTIAL == mode){
-      if(memcmp(checksum2_now,checksum2_img,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(raw_reads_erased(slot,slot_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    lftl_memread(item_now,meta,item_size);
+    if(pinning){
+      for(unsigned int i=0;i<item_size;i++) if(0 != item_now[i]) throw_exception(ERROR_VERIFICATION_FAIL);
     } else {
-      for(unsigned int i=0;i<item_size;i++) if(0xFF != checksum2_now[i]) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(memcmp(item_now,meta_img,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    }
+    lftl_memread(item_now,meta+item_size,item_size);
+    if(memcmp(item_now,meta_img+item_size,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  } else {
+    //the torn slot is current
+    if(index != current_index) throw_exception(ERROR_VERIFICATION_FAIL);
+    lftl_memread(item_now,checksum2,item_size);
+    if((TORN_CHECKSUM2_PARTIAL == mode) && pinning){
+      //pinned: the whole unit reads zeros
+      for(unsigned int i=0;i<item_size;i++) if(0 != item_now[i]) throw_exception(ERROR_VERIFICATION_FAIL);
+    } else if(TORN_CHECKSUM2_PARTIAL == mode){
+      if(memcmp(item_now,checksum2_img,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    } else {
+      for(unsigned int i=0;i<item_size;i++) if(0xFF != item_now[i]) throw_exception(ERROR_VERIFICATION_FAIL);
     }
   }
-  //it survives another reboot, and the area still takes updates
+  //it survives another reboot
   nvmd.data = LFTL_INVALID_POINTER;
   read_and_check(&nvmd,nvm.data7,expected,sizeof(buf));
+  #ifdef HAS_TEARING_SIMULATION
+  if((TORN_CHECKSUM2_PARTIAL == mode) && !pinning){
+    //the weak word drifts to all erased: the previous version comes back
+    memset(checksum2,0xFF,item_size);
+    nvmd.data = LFTL_INVALID_POINTER;
+    read_and_check(&nvmd,nvm.data7,previous,sizeof(buf));
+  }
+  #endif
+  //and the area still takes updates
   randomized_test_write(&nvmd,nvm.data7,sizeof(buf));
   SANITY_CHECK();
 }
@@ -1840,24 +1868,37 @@ void torn_ewlf_checksum2_test(){
   torn_ewlf_checksum2_test_core(1); //checksum2 partially programmed
 }
 
-//LFTL-009: a power cut right after the first erase of the scan's repair of a
-//slot whose checksum2 is erased. The repair used to copy the torn slot into
-//the next one, erasing it first; with 2 slots that is the previous version,
-//and the torn slot's possibly weak checksum was then the only validator in the
-//area. The scan now erases the torn slot instead: the previous version is
-//untouched. On an unregistered copy of nvmd (2 slots) with NVM properties
-//whose erase callback erases, then reports the cut once.
-static int erases_before_cut = -1;
-static uint8_t erase_then_cut(void*base_address, unsigned int n_pages){
-  const uint8_t status = nvm_erase(base_address,n_pages);
+//LFTL-009, LFTL-010, LFTL-011: the first access after a reset that finds a
+//slot whose checksum2 reads all erased erases nothing: on a flash with zero
+//overwrite it tombstones the slot, one word program, and a power cut during
+//that program leaves the previous version untouched, to be decided again at
+//the next boot; on a flash without it the scan programs nothing at all. On an
+//unregistered copy of nvmd (2 slots) with NVM properties whose erase callback
+//counts, and whose write callback writes, then reports the cut once, or
+//refuses every write.
+static int writes_before_cut = -1;
+static uint8_t write_then_cut(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  const uint8_t status = nvm_write(dst_nvm_addr,src,size);
   if(status) return status;
-  if(0 == erases_before_cut--) return 0x7F;
+  if(0 == writes_before_cut--) return 0x7F;
   return 0;
+}
+static uint8_t refusing_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  (void)dst_nvm_addr;
+  (void)src;
+  (void)size;
+  return 0x7E;
+}
+static unsigned int counted_erases = 0;
+static uint8_t counting_nvm_erase(void*base_address, unsigned int n_pages){
+  counted_erases++;
+  return nvm_erase(base_address,n_pages);
 }
 void torn_checksum2_cut_repair_test(){
   DEBUG_PRINTLN(__func__);
+  const bool pinning = nvm_props3.zero_overwrite;
   lftl_nvm_props_t props = nvm_props3;
-  props.erase = erase_then_cut;
+  props.erase = counting_nvm_erase;
   props.next = LFTL_INVALID_POINTER;
   lftl_ctx_t ctx = nvmd;
   ctx.nvm_props = &props;
@@ -1896,17 +1937,35 @@ void torn_checksum2_cut_repair_test(){
   raw_write(torn_meta,meta_img,meta_phy_size - item_size); //version and checksum
   uint32_t previous_version;
   lftl_memread(&previous_version,previous_meta,sizeof(previous_version));
-  //the first access after a reset repairs: the power cut comes right after
-  //the repair's first erase
-  erases_before_cut = 0;
+  //the first access after a reset: no erase, and at most one word program
+  counted_erases = 0;
   ctx.data = LFTL_INVALID_POINTER; //reset
-  EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_ERASE | 0x7F, lftl_read(&ctx,rbuf,nvm.data7,sizeof(rbuf)));
-  erases_before_cut = -1;
-  //the previous version is untouched: the erase hit the torn slot
+  if(pinning){
+    //the tombstone, cut right after it landed
+    props.write = write_then_cut;
+    writes_before_cut = 0;
+    EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_WRITE | 0x7F, lftl_read(&ctx,rbuf,nvm.data7,sizeof(rbuf)));
+    writes_before_cut = -1;
+    //the program hit the torn slot's version item, and nothing else
+    uint8_t item[item_size];
+    lftl_memread(item,torn_meta,item_size);
+    for(unsigned int i=0;i<item_size;i++) if(0 != item[i]) throw_exception(ERROR_VERIFICATION_FAIL);
+    lftl_memread(item,torn_meta+item_size,item_size);
+    if(memcmp(item,meta_img+item_size,item_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    uint8_t data_now[ctx.data_size];
+    lftl_memread(data_now,torn,ctx.data_size);
+    if(memcmp(data_now,data_img,ctx.data_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  } else {
+    //nothing is programmed: a write callback that refuses every write is never called
+    props.write = refusing_nvm_write;
+    read_and_check(&ctx,nvm.data7,previous,sizeof(previous));
+  }
+  if(0 != counted_erases) throw_exception(ERROR_VERIFICATION_FAIL);
+  //the previous version is untouched
   uint32_t version_now;
   lftl_memread(&version_now,previous_meta,sizeof(version_now));
   if(version_now != previous_version) throw_exception(ERROR_VERIFICATION_FAIL);
-  if(!raw_reads_erased(torn,slot_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  props.write = nvm_write;
   //the previous version is read, and the area still takes updates
   ctx.data = LFTL_INVALID_POINTER; //reset
   read_and_check(&ctx,nvm.data7,previous,sizeof(previous));
@@ -2290,11 +2349,13 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   bool report_n_tests=0;
   bool lib_info=0;
   bool run_test_callbacks=0;
+  bool no_pinning=0;
   for(int i=1;i<argc;i++){
     if(consumed[i]) continue;
     ACTION_ARG(report_n_tests,"--n-tests");
     ACTION_ARG(lib_info,"--lib-info");
     ACTION_ARG(run_test_callbacks,"--test-callbacks");
+    ACTION_ARG(no_pinning,"--no-pinning");
     U64_ARG(test_index,"--test=",0);
     U64_ARG(first_index,"--first=",0);
     U64_ARG(last_index,"--last=",0);
@@ -2303,6 +2364,17 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
       abort();
     }
+  }
+  if(no_pinning){
+    //a flash without the all-zero exception (N3 of the flash page): the scan
+    //then never programs, and its decisions about a weak word are not durable
+    nvm_props.zero_overwrite = 0;
+    nvm_props2.zero_overwrite = 0;
+    nvm_props3.zero_overwrite = 0;
+    #ifdef HAS_TEARING_SIMULATION
+    nvm_zero_overwrite = 0;
+    #endif
+    PRINTLN("NVM without zero overwrite: the scan programs nothing");
   }
   if(report_n_tests){
     if(lib_info){

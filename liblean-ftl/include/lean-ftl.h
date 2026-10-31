@@ -155,6 +155,7 @@ typedef struct lftl_nvm_props_struct {
   uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
   uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it: a power of two dividing `erase_size`, at most ::LFTL_WU_MAX_SIZE. On flash with ECC, at least the ECC codeword, so that each meta-data item is its own codeword (R2 of the "Flash requirements and assumptions" page) */
   uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it; an area is whole erase units (R1 of the "Flash requirements and assumptions" page) */
+  bool zero_overwrite;  /**< true if the NVM accepts programming a write unit to all zeros whatever it currently holds, as the STM32L5 and STM32U5 document (N3 of the "Flash requirements and assumptions" page): lean-ftl then pins the words a power cut left weak, one word program at the first access after a reset, instead of leaving the decision to be made again at the next one. false, the value of a zeroed initializer, when the NVM does not or when it is unknown: lean-ftl then never programs a unit that is not erased. */
   nvm_erase_t erase;    /**< Erase function for this area. */
   nvm_write_t write;    /**< Write function for this area. */
   nvm_read_t read;      /**< Read function for this area. */

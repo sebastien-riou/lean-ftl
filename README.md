@@ -111,6 +111,7 @@ Release are created for each tag formatted as `v*.*.*`
 ```
 
 ### Make the doc
+You need Doxygen and Graphviz (`dot`) in your path, and the Python dependencies installed once with `pipenv install`.
 ```
 ./build-doc
 ```

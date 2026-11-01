@@ -24,6 +24,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.autodoc',
     'sphinx.ext.ifconfig',
+    'sphinx.ext.graphviz',
     'sphinx_rtd_theme'
 ]
 
@@ -48,6 +49,9 @@ breathe_default_project = "lean-ftl"
 breathe_show_define_initializer = True
 breathe_show_enumvalue_initializer = True
 breathe_show_include = False
+
+# diagrams of the design page: SVG in HTML, PDF in LaTeX; needs the `dot` program of graphviz
+graphviz_output_format = 'svg'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']

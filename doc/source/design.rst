@@ -91,15 +91,19 @@ Layout
 A regular area, declared with :c:macro:`LFTL_AREA`, is ``ns`` slots of ``np`` pages each: ``np``
 is the smallest number of pages that holds the data plus the three meta-data items, and ``ns``,
 the wear leveling factor, is at least 2. The data sits at the start of a slot and the meta-data at
-its very end; the rest of the slot, between the two, stays erased::
+its very end; the rest of the slot, between the two, stays erased. In this diagram and the
+following ones a grey cell reads erased, and the numbers under the cells give the order in which an
+update programs them:
 
-  one slot, np pages
-  +---------------------------+------------------- - - -+------+------+------+
-  | data                      | erased                  | ver  | chk  | chk2 |
-  | data_size bytes,          |                         |      |      |      |
-  | whole write units         |                         |      |      |      |
-  +---------------------------+------------------- - - -+------+------+------+
-  ^ slot base                                            meta-data items
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="5" align="left"><b>one slot</b>, np pages</td></tr><tr><td width="190" height="42">data<br/><font point-size="9">data_size bytes, whole write units</font></td><td width="120" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="72">version</td><td width="72">checksum</td><td width="72">checksum2</td></tr><tr><td border="0" align="left"><font point-size="9">slot base</font></td><td border="0"></td><td border="0" colspan="3"><font point-size="9">meta-data items, one write unit each, at the end of the slot</font></td></tr><tr><td border="0">1</td><td border="0"></td><td border="0">2</td><td border="0">2</td><td border="0">3</td></tr></table>>];
+   }
 
 .. image:: lean-ftl-area.drawio.svg
 
@@ -214,13 +218,18 @@ erase units, at least 2 records must fit in a unit, and the erased bytes of the 
 Layout
 ^^^^^^
 
-A record is a header followed by the data::
+A record is a header followed by the data; the second row gives the size of each field, the
+last one the order in which an update programs them:
 
-  one record
-  +-------+--------+-----+-----+--------+---------------------------+-----+
-  | magic | start  | ver | chk | end    | data                      | pad |
-  |       | marker |     |     | marker | data_size bytes           |     |
-  +-------+--------+-----+-----+--------+---------------------------+-----+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="7" align="left"><b>one record</b></td></tr><tr><td width="80" height="42">magic<br/><font point-size="9">64-bit constant</font></td><td width="80" height="42">start marker<br/><font point-size="9">all zeros</font></td><td width="66" height="42">version</td><td width="66" height="42">checksum</td><td width="80" height="42">end marker<br/><font point-size="9">all zeros</font></td><td width="170" height="42">data<br/><font point-size="9">data_size bytes</font></td><td width="60" height="42">pad</td></tr><tr><td border="0"><font point-size="9">at least 8 B</font></td><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">at least 4 B</font></td><td border="0"><font point-size="9">at least 4 B</font></td><td border="0"><font point-size="9">at least 4 B</font></td><td border="0"><font point-size="9">rounded up to whole write units</font></td><td border="0"><font point-size="9">to a multiple of 8 B</font></td></tr><tr><td border="0">3</td><td border="0">1</td><td border="0">4</td><td border="0">4</td><td border="0">5</td><td border="0">2</td><td border="0"></td></tr></table>>];
+   }
 
 - the *magic*, a 64-bit constant, in one write unit of at least 8 bytes;
 - the *start marker*, one write unit, programmed to all zeros, and the first word of the record to
@@ -237,15 +246,17 @@ never be mistaken for a record, even when it holds a copy of a header, and every
 within one erase unit. Positions fill a unit from its top down, and the units are used from the
 highest address down, wrapping from the lowest back to the highest. Three units, four records per
 unit, the data at its 11th update of the current cycle; ``U2`` is the unit at the highest address,
-``p0`` the top position of a unit::
+``p0`` the top position of a unit, and the blue cell is the current record:
 
-         U2 (current)             U1 (oldest)              U0
-        +------------------+      +------------------+      +------------------+
-    p0  | v+9              |      | v+1              |      | v+5              |
-    p1  | v+10             |      | v+2              |      | v+6              |
-    p2  | v+11  current    |      | v+3              |      | v+7              |
-    p3  | erased           |      | v+4              |      | v+8              |
-        +------------------+      +------------------+      +------------------+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U2</b> (current)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+9</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+10</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70" bgcolor="#dbeafe"><b>v+11</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U1</b> (oldest)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+1</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+2</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+3</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+4</td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+5</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+6</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+7</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+8</td></tr></table></td></tr></table>>];
+   }
 
 Format
 ^^^^^^
@@ -281,15 +292,17 @@ whole new record:
 
 In the example above, the update to ``v+13`` finds ``U2`` full after ``v+12`` and rolls over: it
 erases ``U1``, the next unit in write order and always the oldest, then programs ``v+13`` at its
-top::
+top:
 
-         U2                       U1                       U0
-        +------------------+      +------------------+      +------------------+
-    p0  | v+9              |      | v+13  current    |      | v+5              |
-    p1  | v+10             |      | erased           |      | v+6              |
-    p2  | v+11             |      | erased           |      | v+7              |
-    p3  | v+12             |      | erased           |      | v+8              |
-        +------------------+      +------------------+      +------------------+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U2</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+9</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+10</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+11</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+12</td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U1</b> (current)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70" bgcolor="#dbeafe"><b>v+13</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+5</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+6</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+7</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+8</td></tr></table></td></tr></table>>];
+   }
 
 A cut during the erase of ``U1`` leaves it partly erased and nothing else changed: the scan finds
 ``v+12`` in ``U2``, and the next update erases ``U1`` again before programming it. A cut during the
@@ -329,16 +342,17 @@ counts; the pass over every unit, the *linear pass*, is its fallback.
 a candidate in full, checksum included, and 0 otherwise. The top record is the first one written
 into the unit after its erase, so every record of a newer unit has a higher version than every
 record of an older one: keys order the units by age. Four units, four records per unit; the first
-cycle filled ``U3`` to ``U0`` with versions 1 to 16, the second cycle has reached ``U1``::
+cycle filled ``U3`` to ``U0`` with versions 1 to 16, the second cycle has reached ``U1``:
 
-         U3                       U2                       U1 (current)             U0
-        +------------------+      +------------------+      +------------------+      +------------------+
-    p0  | 17               |      | 21               |      | 25               |      | 13               |
-    p1  | 18               |      | 22               |      | 26  current      |      | 14               |
-    p2  | 19               |      | 23               |      | erased           |      | 15               |
-    p3  | 20               |      | 24               |      | erased           |      | 16               |
-        +------------------+      +------------------+      +------------------+      +------------------+
-    key   17                        21                        25                        13
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U3</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">17</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">18</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">19</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">20</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>17</b></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U2</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">21</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">22</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">23</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">24</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>21</b></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U1</b> (current)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">25</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70" bgcolor="#dbeafe"><b>26</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>25</b></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">13</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">14</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">15</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">16</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>13</b></td></tr></table></td></tr></table>>];
+   }
 
 Read in write order from the current unit, ``U1``, ``U2``, ``U3``, ``U0``, the keys only decrease:
 25, 21, 17, 13. Read in address order, ``U0`` to ``U3``, that is 13, 25, 21, 17: a decreasing
@@ -356,21 +370,23 @@ of units that contains the jump, probe its middle unit and compare its key with 
 range's last unit; higher means the jump is at the middle or before it, otherwise after. Each
 probe is one header read and one checksum, and the number of probes is the number of times the
 unit count can be halved, plus one for the last unit. Eight units, eight records each, the second
-cycle has reached ``U2``::
+cycle has reached ``U2``:
 
-         U7         U6         U5         U4         U3         U2         U1         U0
-        +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+
-    p0  | 65     | | 73     | | 81     | | 89     | | 97     | | 105    | | 49     | | 57     |
-    p1  | 66     | | 74     | | 82     | | 90     | | 98     | | 106    | | 50     | | 58     |
-    ..  | ..     | | ..     | | ..     | | ..     | | ..     | | erased | | ..     | | ..     |
-    p7  | 72     | | 80     | | 88     | | 96     | | 104    | | erased | | 56     | | 64     |
-        +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+ +--------+
-    key   65         73         81         89         97         105        49         57
+.. graphviz::
+   :align: center
 
-    range U0..U7:  read U7, key 65
-    probe U3:      key 97 > 65   the jump is in U0..U3
-    probe U1:      key 49 > 97?  no, it is in U2..U3
-    probe U2:      key 105 > 97  it is in U2..U2: U2 is the current unit, after 4 reads
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0"><b>U7</b></td><td border="0"><b>U6</b></td><td border="0"><b>U5</b></td><td border="0"><b>U4</b></td><td border="0"><b>U3</b></td><td border="0"><b>U2</b> <font point-size="9">(current)</font></td><td border="0"><b>U1</b></td><td border="0"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="44">65</td><td width="44">73</td><td width="44">81</td><td width="44">89</td><td width="44">97</td><td width="44">105</td><td width="44">49</td><td width="44">57</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="44">66</td><td width="44">74</td><td width="44">82</td><td width="44">90</td><td width="44">98</td><td width="44" bgcolor="#dbeafe"><b>106</b></td><td width="44">50</td><td width="44">58</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">...</font></td><td width="44">...</td><td width="44">...</td><td width="44">...</td><td width="44">...</td><td width="44">...</td><td width="44" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="44">...</td><td width="44">...</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p7</font></td><td width="44">72</td><td width="44">80</td><td width="44">88</td><td width="44">96</td><td width="44">104</td><td width="44" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="44">56</td><td width="44">64</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>65</b></td><td border="0"><b>73</b></td><td border="0"><b>81</b></td><td border="0"><b>89</b></td><td border="0"><b>97</b></td><td border="0"><b>105</b></td><td border="0"><b>49</b></td><td border="0"><b>57</b></td></tr></table>>];
+   }
+
+1. the range is ``U0`` to ``U7``; the key of ``U7``, its last unit, is 65;
+2. probe ``U3``: 97 is higher than 65, so the jump is in ``U0`` to ``U3``;
+3. probe ``U1``: 49 is not higher than 97, so the jump is in ``U2`` to ``U3``;
+4. probe ``U2``: 105 is higher than 97, so the jump is in ``U2`` to ``U2``: ``U2`` is the current
+   unit, after 4 reads.
 
 **The newest record inside it.** On a flash with ``zero_overwrite`` the started positions of the
 current unit form one run from the top, with no hole in it: the update path only uses a position
@@ -382,23 +398,18 @@ data leaves a position with data and no magic, a hole. Neither could the erased 
 position: a torn position whose weak word drifts to erased would be a hole too. The start marker
 can, because a stepped-over start marker is programmed again, and because the only start marker
 that can be weak is the last started one, read once per scan and giving the same newest record
-whichever way it reads, since nothing after it was ever programmed::
+whichever way it reads, since nothing after it was ever programmed. An orange cell is a torn
+record; the last column lists the scan's probes, three reads of one write unit each:
 
-         U2 (current)
-        +------------------------------------------+
-    p0  | started   105                            |
-    p1  | started   106                            |
-    p2  | started   data, no magic: a torn write   |   stepped over by the update to 107,
-    p3  | started   107  newest                    |   which programmed its start marker again
-    p4  | erased                                   |
-    p5  | erased                                   |
-    p6  | erased                                   |
-    p7  | erased                                   |
-        +------------------------------------------+
+.. graphviz::
+   :align: center
 
-    probe p3:  started, the boundary is below it
-    probe p5:  not started, the boundary is above it
-    probe p4:  not started: p3 is the last started position, after 3 reads of one write unit each
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="3" align="left"><b>U2</b> (current)</td></tr><tr><td border="0"></td><td border="0"><font point-size="9">start marker</font></td><td border="0"><font point-size="9">record</font></td><td border="0" align="left"><font point-size="9">the scan's probes, in order</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="56">started</td><td width="170">105</td><td border="0"></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="56">started</td><td width="170">106</td><td border="0"></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="56">started</td><td width="170" bgcolor="#fde7c8">data, no magic: a torn write</td><td border="0" align="left"><font point-size="9">stepped over by the update to 107, which programmed its start marker again</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="56">started</td><td width="170" bgcolor="#dbeafe"><b>107</b></td><td border="0" align="left"><font point-size="9">probe 1: started, the boundary is below</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p4</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0" align="left"><font point-size="9">probe 3: not started, so p3 is the last started position</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p5</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0" align="left"><font point-size="9">probe 2: not started, the boundary is above</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p6</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0"></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p7</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0"></td></tr></table>>];
+   }
 
 Without ``zero_overwrite`` a stepped-over start marker can be weak and later read erased, a hole in
 the run above which the halving could stop, so the current unit is read from its bottom up to its

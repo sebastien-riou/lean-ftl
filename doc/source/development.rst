@@ -77,7 +77,8 @@ Development dependencies
 All other dependencies are related to documentation:
 
 - `Python <https://www.python.org/>`_ and `pipenv <https://pipenv.pypa.io/en/latest/>`_ 
-- `Doxygen <http://www.stack.nl/~dimitri/doxygen/>`_
+- `Doxygen <https://www.doxygen.nl/>`_
+- `Graphviz <https://graphviz.org/>`_, whose ``dot`` program draws the diagrams of the :ref:`design` page
 - `Sphinx <http://sphinx-doc.org/>`_ 
 
 Installing *sphinx*

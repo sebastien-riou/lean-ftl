@@ -125,7 +125,8 @@ but EWLF areas do not support transactions: :c:func:`lftl_transaction_start`
 raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. A record, the area
 content plus a header, must fit in one page, and the NVM's erased bytes must
 read ``0xFF`` (R6 of :ref:`flash-required`). Use :c:func:`lftl_is_ewlf` if you need to tell,
-given a context, whether it refers to an EWLF area or a regular one.
+given a context, whether it refers to an EWLF area or a regular one. How EWLF areas work is
+described in :ref:`design-ewlf`.
 
 Single LFTL area vs many
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -186,7 +187,8 @@ the :ref:`flash` page (R1, R2). ``zero_overwrite`` says whether the flash accept
 write unit to all zeros whatever it currently holds (N3 there; the STM32L5 and STM32U5 document
 it): *lean-ftl* then pins the words a power cut left weak at the first access after a reset, one
 word program, instead of deciding about them again at every boot. Leave it false when the manual
-does not say.
+does not say. :ref:`design` describes the pins, and :ref:`design-without-pinning` what changes
+without them.
 
 Implementing the callbacks
 -----------------------------

@@ -1277,7 +1277,7 @@ static uint32_t ewlf_unit_key(lftl_ctx_t*ctx, unsigned int unit_index, ewlf_reco
 
 /**
  * \brief The scan with a number of reads logarithmic in the unit and record
- * counts (READ-ONLY-SCAN.md section 6).
+ * counts (the EWLF scan section of the documentation's anti-tearing page).
  *
  * Read in address order, the keys decrease from the current unit's, which is
  * the highest, except for one jump up, at the current unit itself: the units

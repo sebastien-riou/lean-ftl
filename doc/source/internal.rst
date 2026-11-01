@@ -31,12 +31,8 @@ buffer in RAM.
 If the user desire to optimize storage footprint, the way to go is to use ``LFTL_COMPACT_ARRAY``
 and use a buffer in RAM to group write operations as demonstrated in the ``single_area`` example.
 
-Memory layout
----------------
+Memory layout and algorithms
+----------------------------
 
-The diagram below present the structure of an LFTL area.
-The area contains ``ns`` slots, each containing ``np`` pages.
-The data size supported by the area is ``np`` pages minus the size of the meta-data.
-
-.. image:: lean-ftl-area.drawio.svg
-
+The layout of regular and EWLF areas, how an update is written, how the first access after a reset
+finds the current data and what a power cut can leave behind are on the :ref:`design` page.

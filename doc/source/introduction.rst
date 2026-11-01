@@ -59,6 +59,8 @@ An LFTL area contains 2 or more slots. At any given time, a single
 slot is used to store the current data. 
 Other slots are spare storage space for the wear level and anti tearing
 mechanisms.
+How the slots are used, and how EWLF areas pack many records into one page, is on the
+:ref:`design` page.
 
 .. note:: An LFTL area contains a single type of slot (slots of the same size)
   however an application can use any number of LFTL areas and 

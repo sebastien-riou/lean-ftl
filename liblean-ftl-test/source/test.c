@@ -1553,7 +1553,7 @@ void version_collision_test(){
 //pinned to zeros first, so that it cannot read all erased at a later boot.
 //Without zero overwrite that decision is not durable: on Linux, where the NVM
 //is RAM, the unit is then made to read all erased, and the previous version
-//comes back (the residual of READ-ONLY-SCAN.md section 7). checksum2 erased
+//comes back (the residual of the documentation's "Without pinning" section). checksum2 erased
 //with no other valid slot: the slot is kept.
 typedef enum {
   TORN_CHECKSUM2_ERASED,
@@ -1831,7 +1831,7 @@ static void check_torn_record(lftl_ctx_t*ewlf, uint8_t*R, uint8_t*B, uint32_t ve
 //Linux, where the NVM is RAM, the torn record's checksum is then made to read
 //erased (nothing changes), and without zero overwrite a partially programmed
 //marker is made to read erased: the previous version comes back, the residual
-//of READ-ONLY-SCAN.md section 7.
+//of the documentation's "Without pinning" section.
 void torn_ewlf_checksum2_test_core(bool partial){
   const bool pinning = nvmd.nvm_props->zero_overwrite;
   lftl_ctx_t ewlf = nvmd;
@@ -2095,7 +2095,7 @@ void large_write_unit_test(){
   SANITY_CHECK();
 }
 
-//The searches of READ-ONLY-SCAN.md section 6 over an EWLF area with many
+//The searches of the EWLF scan (documentation, anti-tearing page) over an EWLF area with many
 //erase units: every page of the test NVM as one area (17 units of 9 records
 //on the Linux geometry), through three cycles of writes with a reset before
 //every read, and power cuts injected at every stage of a record write and

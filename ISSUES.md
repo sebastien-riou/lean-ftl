@@ -14,4 +14,4 @@ Add the next issue to this table, under the next free `LFTL-nnn` (LFTL-014).
 |---|---|---|---|
 
 No open issue. LFTL-001 to LFTL-013 are fixed; their entries are in the git history of this file,
-the last three (LFTL-010, LFTL-011, LFTL-013) closed by the read-only scan of READ-ONLY-SCAN.md.
+the last three (LFTL-010, LFTL-011, LFTL-013) closed by the read-only scan ([documentation](https://lean-ftl.readthedocs.io/en/latest/design.html)).

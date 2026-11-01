@@ -65,7 +65,7 @@ R1 to R5 of :ref:`flash-required`.
 :ref:`flash-not-relied-on`): the simulator refuses it and every test NVM is declared without
 ``zero_overwrite``, so the scan never programs; ``testit`` runs the suite both ways. The Linux
 build also defines ``LFTL_SCAN_CROSS_CHECK``: every scan of an EWLF area runs both the fast search
-and the linear pass of READ-ONLY-SCAN.md section 6, and raises ``LFTL_INTERNAL_ERROR`` if they
+and the linear pass of :ref:`design-ewlf-scan`, and raises ``LFTL_INTERNAL_ERROR`` if they
 disagree.
 
 Compatibility with v0.1.0

@@ -5,7 +5,7 @@ each assumption against the vendor documentation of four targets, read on 2026-1
 the hardware as documented; the requirements and assumptions themselves are stated, numbered R, N
 and T, on the documentation page
 [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html), and
-what lean-ftl does with them is in `README.md`, `EWLF.md` and `THREAT-MODEL.md`. Where a document
+what lean-ftl does with them is in `README.md`, `THREAT-MODEL.md` and on the documentation page [Anti-tearing and wear leveling](https://lean-ftl.readthedocs.io/en/latest/design.html). Where a document
 says nothing, the table says so rather than guessing; the guesses that remain are listed in §4 as
 things to measure. The documents themselves are not in the repository (`git_ignore/downloads/`).
 
@@ -236,7 +236,7 @@ The ids are those of the documentation page
 | R2, R7 | `write_size` is at least the ECC codeword, so an item is one codeword and a torn program spoils only its own unit | `write_size` doc in `lean-ftl.h`; T1.13 | 16 B = codeword | 8 B = codeword | n/a | n/a |
 | R7, T5 | A double-bit ECC error raises an NMI rather than returning a wrong value; a weak word may do so until it is erased or pinned | T1.13; the integrator guide | doc | doc | n/a | n/a |
 | T1 | A cut during a program or erase leaves only the unit being written undefined; other units keep their content | anti-tearing, O1 and O2 of `THREAT-MODEL.md` | "not guaranteed" for the accessed content; others not stated | same | not stated | "may become corrupted" for the unit; others not stated |
-| T2, T3, T4 | A unit left by a cut may be weak: read differently at different times and drift toward erased; 16 programmed bits once read correctly never read all erased; a weakly erased unit may read all erased, then show programmed bits | LFTL-011, `READ-ONLY-SCAN.md` | not documented by any vendor; a physics assumption | same | same | same |
+| T2, T3, T4 | A unit left by a cut may be weak: read differently at different times and drift toward erased; 16 programmed bits once read correctly never read all erased; a weakly erased unit may read all erased, then show programmed bits | LFTL-011, the [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual) | not documented by any vendor; a physics assumption | same | same | same |
 | R5 | Erase and program are blocking and finish; a reset or cut is the only interruption | the accessors poll BSY or ISPGO | doc | doc | doc | suspend exists but a port would not use it |
 | N4 | Endurance used in wear estimates: 10 k cycles per erase unit (a figure the library does not rely on) | T1.5; LFTL-010 | 10 k (100 k on at most 32 pages per bank) | — | — | 100 k |
 
@@ -254,7 +254,7 @@ Two consequences of the ECC rows, now T5 on the page:
 1. **M5531 re-programming.** Program a word twice (expected: the AND of the two values, no ISPFF),
    then all zeros over a partially programmed word; and whether a page that was being programmed at
    a reset behaves like the STM32 one ("may no longer be writable"). Needed before the M5531 port,
-   and before the pinning of `READ-ONLY-SCAN.md` can claim that target.
+   and before the pinning of the scan ([documentation](https://lean-ftl.readthedocs.io/en/latest/design.html#design-common)) can claim that target.
 2. **STM32: all zeros over all zeros.** 7.3.7/6.3.7 allow it, the PROGERR bullet lists it as an
    error. Measure once on each board (PROGERR set or not; the accessor's read-back passes either
    way). It only matters for a repeated pin.

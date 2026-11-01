@@ -9,7 +9,7 @@ Main features:
 - Anti-tearing is exhaustively tested via a dedicated emulator
 - Avoid fragmentation
 - Support transactions
-- Support high number of updates (see [Extrem Wear Leveling Factors](EWLF.md))
+- Support high number of updates (see [EWLF areas](https://lean-ftl.readthedocs.io/en/latest/design.html#design-ewlf))
 - Easily portable to new MCUs / new flash chips
 - [Documentation](https://lean-ftl.rtfd.io), [threat model](THREAT-MODEL.md) and [issue tracker](ISSUES.md) available
 - Bounded execution time: every operation's worst case follows from the configuration, and after the first access a write to a regular area costs the same whatever the NVM holds (see O5 in the [threat model](THREAT-MODEL.md))
@@ -70,7 +70,7 @@ Release package contains binaries for the following platforms:
 ### Data access process
 The first time one `lftl_ctx_t` is used since reset, a search take place to identify the valid slot within the NVM area.
 The valid slot is the one which has the highest `version` and which pass the integrity check.
-The search only reads the NVM; what it does with a slot a power cut left behind is described in [READ-ONLY-SCAN.md](READ-ONLY-SCAN.md).
+The search only reads the NVM. How both kinds of areas work, update by update and after a power cut, is on the [Anti-tearing and wear leveling](https://lean-ftl.readthedocs.io/en/latest/design.html) page of the documentation.
 
 ## Transaction API
 The concept outlined above assumes the application rewrite the entire `data` everytime.

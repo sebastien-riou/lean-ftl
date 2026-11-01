@@ -78,8 +78,8 @@ Not relied on
 Any stable value works: 0x00, 0xFF or another. Checksums are computed from the data as it reads
 back, so an erased slot never passes as valid whatever its erased value. Two places look at
 ``0xFF`` and are safe with any other value: a version word reading ``0xFFFFFFFF`` is skipped as
-"no version" (a shortcut, the checksum would reject it anyway), and the repair of a torn slot only
-acts when its last meta-data word reads all ``0xFF`` (otherwise the slot is kept, the safe
+"no version" (a shortcut, the checksum would reject it anyway), and the scan sets a torn slot aside only
+when its last meta-data word reads all ``0xFF`` (otherwise the slot is kept, the safe
 side). EWLF areas do need ``0xFF`` (R6).
 
 **N2. Bit- or byte-granular programming.**

@@ -11,7 +11,7 @@ Main features:
 - Support transactions
 - Support high number of updates (see [Extrem Wear Leveling Factors](EWLF.md))
 - Easily portable to new MCUs / new flash chips
-- [Documentation](https://lean-ftl.rtfd.io) and [threat model](THREAT-MODEL.md) available
+- [Documentation](https://lean-ftl.rtfd.io), [threat model](THREAT-MODEL.md) and [issue tracker](ISSUES.md) available
 - Bounded execution time: every operation's worst case follows from the configuration, and after the first access a write to a regular area costs the same whatever the NVM holds (see O5 in the [threat model](THREAT-MODEL.md))
 - The on-flash format of regular areas is unchanged since v0.1.0; the test suite reads areas written by v0.1.0 on every build (see [tests](https://lean-ftl.readthedocs.io/en/latest/tests.html))
 - Few requirements on the flash, stated in one page: [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html); regular areas do not depend on the erased value, EWLF areas need erased bytes to read 'FF'
@@ -70,6 +70,7 @@ Release package contains binaries for the following platforms:
 ### Data access process
 The first time one `lftl_ctx_t` is used since reset, a search take place to identify the valid slot within the NVM area.
 The valid slot is the one which has the highest `version` and which pass the integrity check.
+The search only reads the NVM; what it does with a slot a power cut left behind is described in [READ-ONLY-SCAN.md](READ-ONLY-SCAN.md).
 
 ## Transaction API
 The concept outlined above assumes the application rewrite the entire `data` everytime.

@@ -71,7 +71,7 @@ You can verify support for your platform by compiling main.c from the example/he
 
 .. code-block:: bash
 
-  tar xf ~/Downloads/lean-ftl-v0.1.0.tar.gz
+  tar xf ~/Downloads/lean-ftl-v0.2.0.tar.gz
   tar xf dist/liblean-ftl-debug.tar.gz
   gcc examples/hello/main.c -o hello -Iliblean-ftl/include \
     -Lliblean-ftl/build/linux/liblean-ftl -llean-ftl
@@ -81,7 +81,7 @@ You should get something like:
 
 .. code-block:: bash
 
-  Hello from lean-ftl 0.1.0
+  Hello from lean-ftl 0.2.0
 
 
 Troubleshooting

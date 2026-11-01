@@ -1,6 +1,6 @@
 # A read-only scan
 
-**Status:** implemented on branch `read-only-scan` (2026-10-31). Sections 1 to 8 describe the
+**Status:** implemented, released in v0.2.0 (2026-10-31). Sections 1 to 8 describe the
 design as built, section 9 what changed in the code. It closes ISSUES.md LFTL-010 (boot-time repairs
 give an attacker with a power switch an erase per boot), LFTL-011 (a weak `checksum2` read twice) and
 LFTL-013 (a write over a torn record that drifted to all erased). It assumes the reader knows
@@ -438,7 +438,7 @@ Unchanged from today in both variants: wear driven by the application's writes (
 Less than the sections above suggest, as predicted: the regular-area scan was already
 max-version, the whole-unit reading of `checksum2` existed, and `write_ewlf_core()` already found
 the next free position by reading the cells. The changes, in three commits on branch
-`read-only-scan`:
+`read-only-scan`, released in v0.2.0:
 
 - `lftl_nvm_props_t` gained `zero_overwrite`, the pinning capability of N3, false by default and
   for the CH32V307; the Linux simulator honours it, and `--no-pinning` runs the test suite as on a

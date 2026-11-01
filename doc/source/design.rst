@@ -105,7 +105,17 @@ update programs them:
        <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="5" align="left"><b>one slot</b>, np pages</td></tr><tr><td width="190" height="42">data<br/><font point-size="9">data_size bytes, whole write units</font></td><td width="120" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="72">version</td><td width="72">checksum</td><td width="72">checksum2</td></tr><tr><td border="0" align="left"><font point-size="9">slot base</font></td><td border="0"></td><td border="0" colspan="3"><font point-size="9">meta-data items, one write unit each, at the end of the slot</font></td></tr><tr><td border="0">1</td><td border="0"></td><td border="0">2</td><td border="0">2</td><td border="0">3</td></tr></table>>];
    }
 
-.. image:: lean-ftl-area.drawio.svg
+An area is a row of such slots, each one starting on a page boundary and spanning whole pages:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td colspan="7" align="left"><b>one area</b>, ns slots of np pages</td></tr><tr><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="4" align="left"><b>slot 0</b></td></tr><tr><td width="56">page 0</td><td width="28">...</td><td colspan="2" width="110">page np-1</td></tr><tr><td colspan="3">data</td><td width="66">meta-data</td></tr></table></td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="4" align="left"><b>slot 1</b></td></tr><tr><td width="56">page 0</td><td width="28">...</td><td colspan="2" width="110">page np-1</td></tr><tr><td colspan="3">data</td><td width="66">meta-data</td></tr></table></td><td border="0" width="16"></td><td>...</td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="4" align="left"><b>slot ns-1</b></td></tr><tr><td width="56">page 0</td><td width="28">...</td><td colspan="2" width="110">page np-1</td></tr><tr><td colspan="3">data</td><td width="66">meta-data</td></tr></table></td></tr><tr><td align="left"><font point-size="9">area base</font></td><td colspan="6"></td></tr></table>>];
+   }
 
 The data of a regular area is whole write units, which registration checks, so that a transaction
 can commit it unit by unit.

@@ -696,16 +696,22 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
   struct {area_content} _##name##_data;\
   };
 
-/// Effective write-unit size used for EWLF meta-data sizing, same as ::LFTL_META_ITEM_SIZE.
-#define LFTL_EWLF_WU_SIZE LFTL_META_ITEM_SIZE
+/// Size in bytes of an EWLF record's start marker and of each of its two
+/// flags, as laid out at run time: one write unit.
+#define LFTL_EWLF_FLAG_SIZE (LFTL_WU_SIZE)
+
+/// Size in bytes of an EWLF record's meta field (a 32-bit version and a
+/// 64-bit checksum), as laid out at run time: 12 bytes rounded up to whole
+/// write units.
+#define LFTL_EWLF_META_SIZE LFTL_ROUND_UP(12,LFTL_WU_SIZE)
 
 #define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
 /// Size in bytes of one EWLF record of `area_content`, as laid out at run time:
-/// the magic, the start marker and each meta-data item take at least one
-/// write unit, the data is rounded up to whole write units, the record to 8 bytes.
-#define LFTL_EWLF_RECORD_SIZE(area_content) LFTL_ROUND_UP(\
-  LFTL_MAX(LFTL_WU_SIZE,8) + LFTL_MAX(LFTL_WU_SIZE,1) + LFTL_META_N_ITEMS*LFTL_EWLF_WU_SIZE \
-  + LFTL_ROUND_UP(sizeof(struct {area_content}),LFTL_WU_SIZE), 8)
+/// the start marker, the meta field, flag-a, flag-b, then the data rounded up
+/// to whole write units.
+#define LFTL_EWLF_RECORD_SIZE(area_content) (\
+  3*LFTL_EWLF_FLAG_SIZE + LFTL_EWLF_META_SIZE \
+  + LFTL_ROUND_UP(sizeof(struct {area_content}),LFTL_WU_SIZE))
 
 /// Declare an LFTL area with Extreme Wear Leveling Factor
 /// \param name Name of the LFTL area.

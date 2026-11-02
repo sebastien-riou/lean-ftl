@@ -6,8 +6,6 @@
 
 #include "lean-ftl.h"
 
-#define EWLF_MAGIC 0x2CF292E376D73985
-
 #ifdef LFTL_DEBUG
   #ifdef HAS_PRINTF
     #include <stdio.h>
@@ -149,6 +147,35 @@ static uint32_t crc32c(uint32_t crc, const void*const buf, unsigned int len) {
     crc = crc ^ *buf8++;
     for (unsigned int i = 0; i<8; i++) {
         uint32_t mask = -(crc & 1);
+        crc = (crc >> 1) ^ (poly & mask);
+    }
+    len--;
+  }
+  return crc;
+}
+
+/**
+ * \brief Compute (part of) a CRC-64/NVME, the checksum of EWLF records.
+ *
+ * Width 64, polynomial 0xAD93D23594C93659 (0x9A6C9329AC4BC9B5 reflected),
+ * reflected input and output, initial value and final XOR all ones; the
+ * check value of "123456789" is 0xAE8B14860A799888. This is the core only:
+ * to get the full CRC, initialize `crc` to all ones and complement the
+ * result. Bitwise, with a branch-free mask: no table, and a running time
+ * that depends on the length alone.
+ *
+ * \param crc Initial/accumulated CRC value
+ * \param buf Start address of the buffer
+ * \param len Size in bytes of the buffer
+ * \returns The updated (not yet complemented) CRC value
+ */
+static uint64_t crc64_update(uint64_t crc, const void*const buf, unsigned int len) {
+  const uint8_t*buf8 = (const uint8_t*)buf;
+  const uint64_t poly = 0x9A6C9329AC4BC9B5ull;
+  while (len != 0) {
+    crc = crc ^ *buf8++;
+    for (unsigned int i = 0; i<8; i++) {
+        const uint64_t mask = -(crc & 1);
         crc = (crc >> 1) ^ (poly & mask);
     }
     len--;
@@ -422,21 +449,6 @@ static uint32_t checksum_update(lftl_ctx_t*ctx, uint32_t out, const void*const s
  */
 static uint32_t checksum(lftl_ctx_t*ctx, const void*const src, uintptr_t size){
   return checksum_update(ctx,0xFFFFFFFF,src,size);
-}
-
-/**
- * \brief Update a CRC32C checksum with erased (0xFF) bytes.
- *
- * \param out Checksum so far, 0xFFFFFFFF to start one
- * \param size Number of erased bytes
- * \returns The updated checksum
- */
-static uint32_t checksum_update_erased(uint32_t out, uintptr_t size){
-  const uint8_t erased = 0xFF;
-  while(size--){
-    out = crc32c(out,&erased,1);
-  }
-  return out;
 }
 
 /// How a write unit reads, see ::read_unit_state.
@@ -921,37 +933,57 @@ static void find_current_slot(lftl_ctx_t*ctx){
   raise_error(ctx,LFTL_INTERNAL_ERROR);
 }
 
-/**
- * \brief Physical size in bytes of an EWLF record's magic field.
- *
- * \param ctx Context of the EWLF area
- */
-static uintptr_t ewlf_magic_phy_size(lftl_ctx_t*ctx){
-  return max_uintptr(ctx->nvm_props->write_size, sizeof(uint64_t));
-}
+/// Size in bytes of the content of an EWLF record's meta field: a 32-bit
+/// version followed by a 64-bit checksum, both little endian.
+#define EWLF_META_SIZE 12
+
+/// Whether the stuck-state pin of ::find_current_record programs a flag that
+/// already reads all zeros. A weak word can read all zeros, so leaving it
+/// alone keeps a residual (the anti-tearing page, "What a power cut can still
+/// do"); programming it needs a flash that accepts all zeros over all zeros,
+/// FLASH.md open point 2, to be measured on the STM32L5 and STM32U5. Off
+/// unless the build says otherwise.
+#ifndef LFTL_EWLF_PIN_OVER_ZEROS
+#define LFTL_EWLF_PIN_OVER_ZEROS 0
+#endif
 
 /**
- * \brief Physical size in bytes of an EWLF record's start marker.
+ * \brief Physical size in bytes of an EWLF record's start marker, and of
+ * each of its two flags: one write unit.
  *
- * One write unit, right after the magic. It is the first word of a record
- * to be programmed, to all zeros: a position is started once its start
- * marker has a bit at 0, and nothing after an erased start marker was ever
- * programmed (see ::write_ewlf_core).
+ * The start marker is the first word of a record to be programmed, to all
+ * zeros: a position is started once its start marker has a bit at 0, and
+ * nothing after an erased start marker was ever programmed (see
+ * ::ewlf_place_and_write). Flag-a is programmed after the meta field and
+ * flag-b after flag-a, both to zeros: a bit at 0 in flag-a proves the meta
+ * field complete, one in flag-b proves flag-a complete (see
+ * ::ewlf_record_state).
  *
  * \param ctx Context of the EWLF area
  */
-static uintptr_t ewlf_start_marker_phy_size(lftl_ctx_t*ctx){
+static uintptr_t ewlf_flag_phy_size(lftl_ctx_t*ctx){
   return max_uintptr(ctx->nvm_props->write_size, sizeof(uint8_t));
 }
 
 /**
- * \brief Physical size in bytes of an EWLF record's whole header
- * (magic + start marker + version/checksum/end marker).
+ * \brief Physical size in bytes of an EWLF record's meta field:
+ * ::EWLF_META_SIZE rounded up to whole write units, programmed in one call.
+ *
+ * \param ctx Context of the EWLF area
+ */
+static uintptr_t ewlf_meta_phy_size(lftl_ctx_t*ctx){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  return LFTL_DIV_CEIL(EWLF_META_SIZE, write_size) * write_size;
+}
+
+/**
+ * \brief Physical size in bytes of an EWLF record's whole header: start
+ * marker, meta field, flag-a, flag-b.
  *
  * \param ctx Context of the EWLF area
  */
 static uintptr_t ewlf_header_phy_size(lftl_ctx_t*ctx){
-  return ewlf_magic_phy_size(ctx) + ewlf_start_marker_phy_size(ctx) + meta_phy_size(ctx);
+  return 3*ewlf_flag_phy_size(ctx) + ewlf_meta_phy_size(ctx);
 }
 
 /**
@@ -964,18 +996,13 @@ static uintptr_t ewlf_data_phy_size(lftl_ctx_t*ctx){
 }
 
 /**
- * \brief Physical size in bytes of one whole EWLF record, including pad.
- *
- * Rounded up to a multiple of `sizeof(uint64_t)`: since records are
- * placed at successive `record_phy_size` offsets from an erase unit's
- * (8-byte-aligned) top address, this padding keeps every record, and so
- * its 64-bit magic, 8-byte aligned.
+ * \brief Physical size in bytes of one whole EWLF record: a multiple of the
+ * write unit, since every field is one.
  *
  * \param ctx Context of the EWLF area
  */
 static uintptr_t ewlf_record_phy_size(lftl_ctx_t*ctx){
-  const uintptr_t raw_size = ewlf_header_phy_size(ctx) + ewlf_data_phy_size(ctx);
-  return LFTL_DIV_CEIL(raw_size, sizeof(uint64_t)) * sizeof(uint64_t);
+  return ewlf_header_phy_size(ctx) + ewlf_data_phy_size(ctx);
 }
 
 /**
@@ -991,6 +1018,16 @@ static uint8_t* ewlf_unit_base(lftl_ctx_t*ctx, unsigned int unit_index){
 }
 
 /**
+ * \brief Index of the erase unit holding a record.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ */
+static unsigned int ewlf_unit_index(lftl_ctx_t*ctx, const uint8_t*record_addr){
+  return (uintptr_t)(record_addr - (uint8_t*)ctx->area) / page_size(ctx);
+}
+
+/**
  * \brief Physical address of the first (topmost) record slot of an EWLF erase unit.
  *
  * \param ctx Context of the EWLF area
@@ -1001,25 +1038,44 @@ static uint8_t* ewlf_unit_top_record(lftl_ctx_t*ctx, unsigned int unit_index){
 }
 
 /**
- * \brief Physical address of an EWLF record's start marker.
- *
- * \param ctx Context of the EWLF area
- * \param record_addr Physical address of the start of the record (its magic field)
- */
-static uint8_t* ewlf_start_marker_addr(lftl_ctx_t*ctx, const uint8_t*record_addr){
-  return (uint8_t*)record_addr + ewlf_magic_phy_size(ctx);
-}
-
-/**
- * \brief Physical address of one of an EWLF record's meta-data items.
+ * \brief Physical address of an EWLF record's start marker: its first word.
  *
  * \param ctx Context of the EWLF area
  * \param record_addr Physical address of the start of the record
- * \param item Index of the item: 0 version, 1 checksum, 2 end marker
  */
-static uint8_t* ewlf_item_addr(lftl_ctx_t*ctx, const uint8_t*record_addr, unsigned int item){
-  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
-  return (uint8_t*)record_addr + ewlf_magic_phy_size(ctx) + ewlf_start_marker_phy_size(ctx) + item*item_size;
+static uint8_t* ewlf_start_marker_addr(lftl_ctx_t*ctx, const uint8_t*record_addr){
+  (void)ctx;
+  return (uint8_t*)record_addr;
+}
+
+/**
+ * \brief Physical address of an EWLF record's meta field.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ */
+static uint8_t* ewlf_meta_addr(lftl_ctx_t*ctx, const uint8_t*record_addr){
+  return (uint8_t*)record_addr + ewlf_flag_phy_size(ctx);
+}
+
+/**
+ * \brief Physical address of an EWLF record's flag-a.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ */
+static uint8_t* ewlf_flag_a_addr(lftl_ctx_t*ctx, const uint8_t*record_addr){
+  return (uint8_t*)record_addr + ewlf_flag_phy_size(ctx) + ewlf_meta_phy_size(ctx);
+}
+
+/**
+ * \brief Physical address of an EWLF record's flag-b.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ */
+static uint8_t* ewlf_flag_b_addr(lftl_ctx_t*ctx, const uint8_t*record_addr){
+  return (uint8_t*)record_addr + 2*ewlf_flag_phy_size(ctx) + ewlf_meta_phy_size(ctx);
 }
 
 /**
@@ -1031,7 +1087,7 @@ static uint8_t* ewlf_item_addr(lftl_ctx_t*ctx, const uint8_t*record_addr, unsign
  * \param record_addr Physical address of the start of the record
  */
 static unit_state_t ewlf_start_marker_state(lftl_ctx_t*ctx, const uint8_t*record_addr){
-  return read_unit_state(ctx,ewlf_start_marker_addr(ctx,record_addr),ewlf_start_marker_phy_size(ctx));
+  return read_unit_state(ctx,ewlf_start_marker_addr(ctx,record_addr),ewlf_flag_phy_size(ctx));
 }
 
 /**
@@ -1046,180 +1102,291 @@ static unit_state_t ewlf_start_marker_state(lftl_ctx_t*ctx, const uint8_t*record
  * \param record_addr Physical address of the start of the record
  */
 static void ewlf_write_start_marker(lftl_ctx_t*ctx, uint8_t*record_addr){
-  pin_unit(ctx,ewlf_start_marker_addr(ctx,record_addr),ewlf_start_marker_phy_size(ctx));
+  pin_unit(ctx,ewlf_start_marker_addr(ctx,record_addr),ewlf_flag_phy_size(ctx));
 }
 
 /**
- * \brief Program one of an EWLF record's meta-data items to zeros.
+ * \brief Program one of an EWLF record's flags to zeros: one write unit.
  *
- * The end marker (item 2) is written this way at the end of every record
- * write; the scan also pins a partially programmed end marker with it, and
- * tombstones a torn record by pinning its version (item 0): its checksum can
- * then never verify again (a version is never 0: format writes 1).
+ * \param ctx Context of the EWLF area
+ * \param flag_addr Physical address of the flag, see ::ewlf_flag_a_addr and ::ewlf_flag_b_addr
+ */
+static void ewlf_write_flag(lftl_ctx_t*ctx, uint8_t*flag_addr){
+  pin_unit(ctx,flag_addr,ewlf_flag_phy_size(ctx));
+}
+
+/// The content of an EWLF record's meta field, in volatile memory.
+typedef struct {
+  uint32_t version;  /**< never 0 (a tombstone) nor 0xFFFFFFFF (erased): format writes 1 */
+  uint64_t checksum; /**< CRC-64/NVME of the version then the data, see ::ewlf_checksum_start */
+} ewlf_meta_t;
+
+/**
+ * \brief Start the checksum of an EWLF record: a CRC-64/NVME over the four
+ * bytes of its version, little endian, then its data
+ * (::ewlf_checksum_update), then ::ewlf_checksum_end.
+ *
+ * \param version The record's version
+ * \returns The checksum so far
+ */
+static uint64_t ewlf_checksum_start(uint32_t version){
+  uint8_t bytes[sizeof(version)];
+  for(unsigned int i=0;i<sizeof(version);i++) bytes[i] = (uint8_t)(version >> (8*i));
+  return crc64_update(~(uint64_t)0,bytes,sizeof(bytes));
+}
+
+/**
+ * \brief Update the checksum of an EWLF record with a (possibly non-RAM) range.
+ *
+ * \param ctx Context of the LFTL area on whose behalf this checksum is computed
+ * \param crc Checksum so far
+ * \param src Start address of the range
+ * \param size Size in bytes of the range
+ * \returns The updated checksum
+ */
+static uint64_t ewlf_checksum_update(lftl_ctx_t*ctx, uint64_t crc, const void*const src, uintptr_t size){
+  const uint8_t*src8 = (const uint8_t*)src;
+  uint64_t buf[16];
+  while(size){
+    const uint32_t readsize = size > sizeof(buf) ? sizeof(buf) : size;
+    mem_read(ctx,buf,src8,readsize);
+    crc = crc64_update(crc,buf,readsize);
+    size -= readsize;
+    src8 += readsize;
+  }
+  return crc;
+}
+
+/**
+ * \brief Update the checksum of an EWLF record with erased (0xFF) bytes.
+ *
+ * \param crc Checksum so far
+ * \param size Number of erased bytes
+ * \returns The updated checksum
+ */
+static uint64_t ewlf_checksum_update_erased(uint64_t crc, uintptr_t size){
+  uint8_t erased[16];
+  memset(erased,0xFF,sizeof(erased));
+  while(size){
+    const uintptr_t chunk = size > sizeof(erased) ? sizeof(erased) : size;
+    crc = crc64_update(crc,erased,chunk);
+    size -= chunk;
+  }
+  return crc;
+}
+
+/**
+ * \brief Finish the checksum of an EWLF record.
+ *
+ * \param crc Checksum so far
+ * \returns The value stored in the record's meta field
+ */
+static uint64_t ewlf_checksum_end(uint64_t crc){
+  return ~crc;
+}
+
+/**
+ * \brief Encode a meta field: version then checksum, little endian, then
+ * zeros up to the write unit.
+ *
+ * \param meta The content
+ * \param bytes Destination, ::EWLF_META_SIZE bytes at least
+ */
+static void ewlf_meta_to_bytes(const ewlf_meta_t*meta, uint8_t*bytes){
+  for(unsigned int i=0;i<sizeof(meta->version);i++) bytes[i] = (uint8_t)(meta->version >> (8*i));
+  for(unsigned int i=0;i<sizeof(meta->checksum);i++) bytes[sizeof(meta->version)+i] = (uint8_t)(meta->checksum >> (8*i));
+}
+
+/**
+ * \brief Decode a meta field, see ::ewlf_meta_to_bytes.
+ *
+ * \param meta Destination
+ * \param bytes The field as read, ::EWLF_META_SIZE bytes at least
+ */
+static void ewlf_meta_from_bytes(ewlf_meta_t*meta, const uint8_t*bytes){
+  meta->version = 0;
+  for(unsigned int i=0;i<sizeof(meta->version);i++) meta->version |= ((uint32_t)bytes[i]) << (8*i);
+  meta->checksum = 0;
+  for(unsigned int i=0;i<sizeof(meta->checksum);i++) meta->checksum |= ((uint64_t)bytes[sizeof(meta->version)+i]) << (8*i);
+}
+
+/// One reading of an EWLF record's meta field and flags: every decision
+/// about a record is made on one reading, since a word a power cut left weak
+/// can read differently from one read to the next.
+typedef struct {
+  ewlf_meta_t meta;         /**< the meta field as read */
+  unit_state_t flag_a;      /**< how flag-a's write unit reads */
+  unit_state_t flag_b;      /**< how flag-b's write unit reads */
+  uint32_t meta_zero_units; /**< bit i set when write unit i of the meta field read all zeros */
+  bool erased;              /**< the meta field and both flags read all erased: nothing after the start marker was programmed, or reads so */
+} ewlf_reading_t;
+
+/**
+ * \brief Read an EWLF record's meta field and both flags, in one read.
  *
  * \param ctx Context of the EWLF area
  * \param record_addr Physical address of the start of the record
- * \param item Index of the item: 0 version, 1 checksum, 2 end marker
+ * \param r Output: the reading
  */
-static void ewlf_pin_item(lftl_ctx_t*ctx, uint8_t*record_addr, unsigned int item){
-  const unsigned int item_size = max_uintptr(ctx->nvm_props->write_size,sizeof(uint32_t));
-  pin_unit(ctx,ewlf_item_addr(ctx,record_addr,item),item_size);
-}
-
-/**
- * \brief Read the version and checksum of an EWLF record, and how its end
- * marker reads.
- *
- * One read of the three items: the end marker may be weak, and every
- * decision about it is made on the same reading.
- *
- * \param ctx Context of the EWLF area
- * \param dst Destination of the meta-data, in volatile memory (`checksum2` is 0)
- * \param end_marker Output: how the end marker's write unit reads
- * \param record_addr Physical address of the start of the record (its magic field)
- */
-static void ewlf_get_record_meta_ex(lftl_ctx_t*ctx, lftl_meta_t*dst, unit_state_t*end_marker, const uint8_t*record_addr){
+static void ewlf_read_record(lftl_ctx_t*ctx, const uint8_t*record_addr, ewlf_reading_t*r){
   const uint32_t write_size = ctx->nvm_props->write_size;
-  const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
-  const uintptr_t meta_size = LFTL_META_N_ITEMS * item_size;
-  const uint8_t*const meta_addr = ewlf_item_addr(ctx,record_addr,0);
-  uint32_t buf[LFTL_DIV_CEIL(meta_size,sizeof(uint32_t))];
-  nvm_read(ctx,ctx->nvm_props,buf,meta_addr,meta_size);
-  dst->version = buf[0];
-  dst->checksum = buf[item_size/sizeof(uint32_t)];
-  dst->checksum2 = 0;
-  *end_marker = unit_state_of(((const uint8_t*)buf) + 2*item_size,item_size);
+  const uintptr_t flag_size = ewlf_flag_phy_size(ctx);
+  const uintptr_t meta_size = ewlf_meta_phy_size(ctx);
+  uint64_t buf[SIZE64(3*LFTL_WU_MAX_SIZE)];
+  nvm_read(ctx,ctx->nvm_props,buf,ewlf_meta_addr(ctx,record_addr),meta_size + 2*flag_size);
+  const uint8_t*const bytes = (const uint8_t*)buf;
+  ewlf_meta_from_bytes(&r->meta,bytes);
+  r->meta_zero_units = 0;
+  r->erased = true;
+  for(unsigned int i=0;i*write_size<meta_size;i++){
+    const unit_state_t unit = unit_state_of(bytes + i*write_size,write_size);
+    if(UNIT_ZERO == unit) r->meta_zero_units |= ((uint32_t)1) << i;
+    if(UNIT_ERASED != unit) r->erased = false;
+  }
+  r->flag_a = unit_state_of(bytes + meta_size,flag_size);
+  r->flag_b = unit_state_of(bytes + meta_size + flag_size,flag_size);
+  if((UNIT_ERASED != r->flag_a) || (UNIT_ERASED != r->flag_b)) r->erased = false;
 }
 
 /**
- * \brief Read the version and checksum of an EWLF record.
- *
- * \param ctx Context of the EWLF area
- * \param dst Destination, in volatile memory
- * \param record_addr Physical address of the start of the record
- */
-static void ewlf_get_record_meta(lftl_ctx_t*ctx, lftl_meta_t*dst, const uint8_t*record_addr){
-  unit_state_t end_marker;
-  ewlf_get_record_meta_ex(ctx,dst,&end_marker,record_addr);
-}
-
-/**
- * \brief Write the version, the checksum and the end marker of an EWLF record.
- *
- * Version and checksum first, in one write, then the end marker, an all-zero
- * write unit, last: a complete write leaves it solid, and a write cut before
- * it leaves it all erased (see ::find_current_record).
+ * \brief Program an EWLF record's meta field, in one call.
  *
  * \param ctx Context of the EWLF area
  * \param record_addr Physical address of the start of the record
- * \param meta The version and checksum to write
+ * \param meta The content
  */
-static void ewlf_write_record_meta_core(lftl_ctx_t*ctx, uint8_t*record_addr, const lftl_meta_t*meta){
-  const uint32_t write_size = ctx->nvm_props->write_size;
-  const unsigned int item_size = max_uintptr(write_size,sizeof(uint32_t));
-  uint32_t buf[LFTL_DIV_CEIL(2*item_size,sizeof(uint32_t))];
+static void ewlf_write_meta(lftl_ctx_t*ctx, uint8_t*record_addr, const ewlf_meta_t*meta){
+  uint64_t buf[SIZE64(LFTL_WU_MAX_SIZE)];
   memset(buf,0,sizeof(buf));
-  buf[0] = meta->version;
-  buf[item_size/sizeof(uint32_t)] = meta->checksum;
-  nvm_write(ctx,ctx->nvm_props,ewlf_item_addr(ctx,record_addr,0),buf,2*item_size);
-  ewlf_pin_item(ctx,record_addr,2);
+  ewlf_meta_to_bytes(meta,(uint8_t*)buf);
+  nvm_write(ctx,ctx->nvm_props,ewlf_meta_addr(ctx,record_addr),buf,ewlf_meta_phy_size(ctx));
 }
 
 /**
- * \brief Write an EWLF record's magic field.
+ * \brief Tombstone an EWLF record: program its meta field to zeros, so that
+ * its version reads 0 and it is no record for good (see
+ * ::ewlf_record_state).
+ *
+ * Every write unit of the field that did not read all zeros in the reading
+ * the decision was made on is programmed, the checksum's units first, with
+ * the one program a flash declared with `zero_overwrite` accepts on a unit
+ * in any state (N3 of the flash page). A cut leaves the field weak: the
+ * record then reads as no record, or aborted and is tombstoned again.
  *
  * \param ctx Context of the EWLF area
  * \param record_addr Physical address of the start of the record
+ * \param meta_zero_units The reading's ::ewlf_reading_t::meta_zero_units
  */
-static void ewlf_write_record_magic(lftl_ctx_t*ctx, uint8_t*record_addr){
-  const uintptr_t size = ewlf_magic_phy_size(ctx);
-  uint8_t buf[size];
-  memset(buf,0,size);
-  *(uint64_t*)buf = EWLF_MAGIC;
-  nvm_write(ctx,ctx->nvm_props,record_addr,buf,size);
+static void ewlf_tombstone(lftl_ctx_t*ctx, uint8_t*record_addr, uint32_t meta_zero_units){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  const unsigned int n_units = ewlf_meta_phy_size(ctx) / write_size;
+  uint8_t*const base = ewlf_meta_addr(ctx,record_addr);
+  for(unsigned int i = n_units; i-- > 0;){
+    if(0 == (meta_zero_units & (((uint32_t)1) << i))) pin_unit(ctx,base + i*write_size,write_size);
+  }
 }
 
 /// What a record position holds, see ::ewlf_record_state.
 typedef enum {
-  EWLF_RECORD_NONE,      /**< no record: the position is erased, torn before its checksum was complete, tombstoned, or holds anything else */
-  EWLF_RECORD_UNMARKED,  /**< magic and checksum valid, end marker all erased: a write cut during its checksum word at the latest; never taken, its checksum may be weak */
-  EWLF_RECORD_CANDIDATE, /**< magic and checksum valid, end marker programmed in part or in full: taken when newest */
+  EWLF_RECORD_NONE,     /**< no record: erased, torn before or during its meta field, tombstoned, or foreign content */
+  EWLF_RECORD_ABORTED,  /**< checksum valid, both flags all erased: a write cut before flag-a, or whose flag-a is weak and reads erased */
+  EWLF_RECORD_HALF,     /**< checksum valid, flag-a has a programmed bit, flag-b all erased: the data is solid, flag-a may be weak */
+  EWLF_RECORD_COMPLETE, /**< checksum valid, flag-b has a programmed bit: flag-a is solid, the record is taken when newest */
 } ewlf_record_state_t;
 
 /**
- * \brief Classify a record position.
+ * \brief Classify a record position, from one reading of its meta field and
+ * flags.
  *
- * Reads the magic, and when it matches the meta-data and the data: a
- * record is valid when its checksum is the one of its data and version.
- * The end marker then tells a complete or stable record (programmed in
- * full, or in part: its own program had started, so the checksum before it
- * is complete) from one torn earlier (all erased: the checksum word may be
- * weak and read differently later), see ::find_current_record.
+ * A version reading 0xFFFFFFFF (erased) or 0 (a tombstone) is no record,
+ * and that test comes before the checksum. The checksum covers the version
+ * and the data. The flags are programmed one after the other, each once the
+ * previous step completed, so a bit at 0 in flag-a proves the meta field
+ * and the data solid, and one in flag-b proves flag-a solid (see
+ * ::find_current_record).
  *
  * \param ctx Context of the EWLF area
  * \param record_addr Physical address of the start of the record
- * \param meta Output: the record's version and checksum, valid unless ::EWLF_RECORD_NONE is returned
- * \param end_marker Output: how the end marker reads, valid unless ::EWLF_RECORD_NONE is returned
+ * \param r Output: the reading, meaningful unless ::EWLF_RECORD_NONE is returned
  */
-static ewlf_record_state_t ewlf_record_state(lftl_ctx_t*ctx, const uint8_t*record_addr, lftl_meta_t*meta, unit_state_t*end_marker){
-  uint64_t magic;
-  nvm_read(ctx,ctx->nvm_props,&magic,record_addr,sizeof(magic));
-  if(magic != EWLF_MAGIC) return EWLF_RECORD_NONE;
-  ewlf_get_record_meta_ex(ctx,meta,end_marker,record_addr);
-  const uint32_t recomputed = checksum(ctx,record_addr+ewlf_header_phy_size(ctx),ctx->data_size) + meta->version;
-  if(recomputed != meta->checksum) return EWLF_RECORD_NONE;
-  return (UNIT_ERASED == *end_marker) ? EWLF_RECORD_UNMARKED : EWLF_RECORD_CANDIDATE;
+static ewlf_record_state_t ewlf_record_state(lftl_ctx_t*ctx, const uint8_t*record_addr, ewlf_reading_t*r){
+  ewlf_read_record(ctx,record_addr,r);
+  const uint32_t version = r->meta.version;
+  if((0xFFFFFFFF == version) || (0 == version)) return EWLF_RECORD_NONE;
+  uint64_t crc = ewlf_checksum_start(version);
+  crc = ewlf_checksum_update(ctx,crc,record_addr+ewlf_header_phy_size(ctx),ctx->data_size);
+  if(ewlf_checksum_end(crc) != r->meta.checksum) return EWLF_RECORD_NONE;
+  if(UNIT_ERASED != r->flag_b) return EWLF_RECORD_COMPLETE;
+  if(UNIT_ERASED != r->flag_a) return EWLF_RECORD_HALF;
+  return EWLF_RECORD_ABORTED;
 }
 
-/// What a scan of an EWLF area chose, before anything is programmed.
+/// What a scan of an EWLF area chose, before anything is programmed. A
+/// version of 0 stands for "none": versions start at 1.
 typedef struct {
-  const uint8_t*best;           /**< the newest candidate, NULL if none */
-  uint32_t best_version;        /**< its version */
-  unit_state_t best_end_marker; /**< how its end marker read */
-  const uint8_t*torn;           /**< the newest unmarked record, NULL if none */
-  uint32_t torn_version;        /**< its version */
+  const uint8_t*complete;    /**< the newest complete record, NULL if none */
+  uint32_t complete_version; /**< its version */
+  const uint8_t*half;        /**< the newest half record, NULL if none */
+  uint32_t half_version;     /**< its version */
+  unit_state_t half_flag_a;  /**< how its flag-a read */
+  const uint8_t*torn;        /**< the newest aborted record, NULL if none */
+  uint32_t torn_version;     /**< its version */
+  uint32_t torn_zero_units;  /**< which units of its meta field read all zeros */
+  uint32_t max_version;      /**< the highest version of every valid record seen */
 } ewlf_choice_t;
 
 static void ewlf_choice_init(ewlf_choice_t*c){
-  c->best = NULL;
-  c->best_version = 0;
-  c->best_end_marker = UNIT_ZERO;
-  c->torn = NULL;
-  c->torn_version = 0;
+  memset(c,0,sizeof(*c));
+  c->half_flag_a = UNIT_ERASED;
 }
 
 /**
  * \brief Offer a record position to a choice.
  *
- * An unmarked record is remembered when it is the newest one seen; a
- * candidate replaces the best one when its version is higher, and two
- * candidates sharing a version are ::LFTL_ERROR_VERSION_COLLISION (hostile
- * content, or a bug).
+ * Every valid record raises the highest version seen. An aborted or a half
+ * record is remembered when it is the newest of its kind; a complete one
+ * replaces the newest complete when its version is higher, and two complete
+ * records sharing a version are ::LFTL_ERROR_VERSION_COLLISION (hostile
+ * content, or a bug: a complete record's meta field is solid, and the write
+ * path numbers above every valid record). A half or aborted record sharing
+ * a version with a complete one is reachable after a cut tombstone and
+ * harmless: comparisons are strict, the complete one wins.
  *
- * \returns true if the position holds a candidate
+ * \returns true if the position holds a complete record
  */
-static bool ewlf_choice_offer(lftl_ctx_t*ctx, ewlf_choice_t*c, const uint8_t*addr, ewlf_record_state_t state, const lftl_meta_t*meta, unit_state_t end_marker){
+static bool ewlf_choice_offer(lftl_ctx_t*ctx, ewlf_choice_t*c, const uint8_t*addr, ewlf_record_state_t state, const ewlf_reading_t*r){
   if(EWLF_RECORD_NONE == state) return false;
-  if(EWLF_RECORD_UNMARKED == state){
-    if((NULL == c->torn) || (meta->version > c->torn_version)){
+  const uint32_t version = r->meta.version;
+  if(version > c->max_version) c->max_version = version;
+  if(EWLF_RECORD_ABORTED == state){
+    if(version > c->torn_version){
       c->torn = addr;
-      c->torn_version = meta->version;
+      c->torn_version = version;
+      c->torn_zero_units = r->meta_zero_units;
     }
     return false;
   }
-  if((NULL != c->best) && (meta->version == c->best_version)) raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
-  if((NULL == c->best) || (meta->version > c->best_version)){
-    c->best = addr;
-    c->best_version = meta->version;
-    c->best_end_marker = end_marker;
+  if(EWLF_RECORD_HALF == state){
+    if(version > c->half_version){
+      c->half = addr;
+      c->half_version = version;
+      c->half_flag_a = r->flag_a;
+    }
+    return false;
+  }
+  if((NULL != c->complete) && (version == c->complete_version) && (addr != c->complete)) raise_error(ctx,LFTL_ERROR_VERSION_COLLISION);
+  if(version > c->complete_version){
+    c->complete = addr;
+    c->complete_version = version;
   }
   return true;
 }
 
 /**
  * \brief Offer a unit's positions to a choice, from the lowest up to the
- * first candidate: records are written from the top down, so that candidate
- * is the newest of the unit.
+ * first complete record: records are written from the top down, so that
+ * record is the newest complete one of the unit, and the half and aborted
+ * records above it in age are seen on the way.
  *
  * \param ctx Context of the EWLF area
  * \param unit_index Index of the erase unit
@@ -1231,17 +1398,16 @@ static void ewlf_offer_unit_from(lftl_ctx_t*ctx, unsigned int unit_index, unsign
   const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
   for(unsigned int i = from + 1; i > 0; i--){
     const uint8_t*const addr = top - (i-1)*record_size;
-    lftl_meta_t meta;
-    unit_state_t end_marker;
-    const ewlf_record_state_t state = ewlf_record_state(ctx,addr,&meta,&end_marker);
-    if(ewlf_choice_offer(ctx,c,addr,state,&meta,end_marker)) return;
+    ewlf_reading_t r;
+    const ewlf_record_state_t state = ewlf_record_state(ctx,addr,&r);
+    if(ewlf_choice_offer(ctx,c,addr,state,&r)) return;
   }
 }
 
 /**
  * \brief The baseline scan: every unit, from its bottom up to its first
- * candidate. Bounded by the unit and record counts, and right whatever the
- * area holds.
+ * complete record. Bounded by the unit and record counts, and right whatever
+ * the area holds.
  */
 static void ewlf_choose_linear(lftl_ctx_t*ctx, ewlf_choice_t*c){
   const unsigned int n_units = n_pages(ctx);
@@ -1252,27 +1418,28 @@ static void ewlf_choose_linear(lftl_ctx_t*ctx, ewlf_choice_t*c){
 }
 
 /**
- * \brief A unit's key: the version of its top record when that record is a
- * candidate in full, checksum included, 0 otherwise.
+ * \brief A unit's key: the version of its top record when its checksum
+ * verifies, 0 otherwise.
  *
  * A unit is erased right before its first record is programmed and that
  * record is its top one, so every record of a newer unit has a higher
  * version than every record of an older one: keys order the units by age,
  * and a unit without a key (erased, left partly erased by a torn erase,
- * holding a torn or tombstoned top record) is older than any keyed one. The
- * magic and the marker alone would not do: a torn erase only sets bits to 1,
- * and can leave a top record with a valid magic and a version word that
- * reads larger; the checksum rejects it.
+ * holding a top record torn in its meta field or tombstoned) is older than
+ * any keyed one. A valid checksum is enough for the key, whatever the
+ * flags: a torn rollover record at the top of a unit keys it, and the
+ * copies the scan may have placed below it are found in it. The start
+ * marker alone would not do: a torn erase only sets bits to 1, and can
+ * leave a top record with a version word that reads larger; the checksum
+ * rejects it.
  *
  * \param ctx Context of the EWLF area
  * \param unit_index Index of the erase unit
- * \param state Output: the top record's state
- * \param meta Output: its meta-data, valid unless the state is ::EWLF_RECORD_NONE
  */
-static uint32_t ewlf_unit_key(lftl_ctx_t*ctx, unsigned int unit_index, ewlf_record_state_t*state, lftl_meta_t*meta){
-  unit_state_t end_marker;
-  *state = ewlf_record_state(ctx,ewlf_unit_top_record(ctx,unit_index),meta,&end_marker);
-  return (EWLF_RECORD_CANDIDATE == *state) ? meta->version : 0;
+static uint32_t ewlf_unit_key(lftl_ctx_t*ctx, unsigned int unit_index){
+  ewlf_reading_t r;
+  const ewlf_record_state_t state = ewlf_record_state(ctx,ewlf_unit_top_record(ctx,unit_index),&r);
+  return (EWLF_RECORD_NONE == state) ? 0 : r.meta.version;
 }
 
 /**
@@ -1286,21 +1453,22 @@ static uint32_t ewlf_unit_key(lftl_ctx_t*ctx, unsigned int unit_index, ewlf_reco
  * the oldest ones have no key. Keeping a range of units that contains the
  * jump and comparing a probe in its middle with the range's last key tells
  * which half holds it, so the current unit costs one key per halving plus one.
- * Inside it, on a flash with `zero_overwrite`, the started positions form a
- * run from the top, since the write path pins the start marker of every
- * started position it skips: the last started one is found by halving on
- * start markers, one write unit per probe, and the newest candidate is there
- * or at the first candidate above it. Without `zero_overwrite` a skipped
- * start marker can be weak and later read erased, a hole in the run, so the
- * unit is read from its bottom up instead.
+ * Inside it the newest records are the lowest started positions: the start
+ * markers are read from the bottom up to the first started one, one write
+ * unit per read, and the records from there up to the first complete one.
+ * The start markers are not halved on: a start marker a power cut left weak
+ * can read erased at a later boot, a hole in the run of started positions,
+ * which a halving would take for its end.
  *
  * The result is checked before it is trusted: the current unit must be a
  * local maximum in write order, both its neighbours holding a lower key or
- * none, and the record found must have a higher version than both. Only
- * hostile content or a bug can fail that check, and the caller then falls
- * back to ::ewlf_choose_linear. The two neighbours are read anyway: the
- * next unit in write order is where a torn rollover leaves its record,
- * which is offered to the choice so that it can be tombstoned.
+ * none, and the complete record found must have a higher version than both.
+ * Only hostile content, a bug, or a unit whose newest records are all half
+ * or aborted (a rollover write cut in a flag, before the scan repaired it)
+ * can fail that check, and the caller then falls back to
+ * ::ewlf_choose_linear. The next unit in write order is then walked whole:
+ * it is where a torn rollover leaves its record, and where the copies the
+ * scan made of one sit below it.
  *
  * \returns true if the result passed the check
  */
@@ -1308,15 +1476,13 @@ static bool ewlf_choose_fast(lftl_ctx_t*ctx, ewlf_choice_t*c){
   const unsigned int n_units = n_pages(ctx);
   const uintptr_t record_size = ewlf_record_phy_size(ctx);
   const unsigned int records_per_unit = page_size(ctx) / record_size;
-  ewlf_record_state_t state;
-  lftl_meta_t meta;
   //the current unit: the jump up in the cyclic sequence of keys
   unsigned int lo = 0;
   unsigned int hi = n_units - 1;
-  uint32_t last_key = ewlf_unit_key(ctx,hi,&state,&meta);
+  uint32_t last_key = ewlf_unit_key(ctx,hi);
   while(lo < hi){
     const unsigned int mid = (lo + hi) / 2;
-    const uint32_t key = ewlf_unit_key(ctx,mid,&state,&meta);
+    const uint32_t key = ewlf_unit_key(ctx,mid);
     if(key > last_key){
       hi = mid;
       last_key = key;
@@ -1330,99 +1496,171 @@ static bool ewlf_choose_fast(lftl_ctx_t*ctx, ewlf_choice_t*c){
   //one it will roll over to, below
   const unsigned int prev_unit = (current_unit + 1) % n_units;
   const unsigned int next_unit = (current_unit + n_units - 1) % n_units;
-  lftl_meta_t prev_meta;
-  ewlf_record_state_t prev_state;
-  const uint32_t prev_key = ewlf_unit_key(ctx,prev_unit,&prev_state,&prev_meta);
-  lftl_meta_t next_meta;
-  ewlf_record_state_t next_state;
-  const uint32_t next_key = (next_unit == prev_unit) ? prev_key : ewlf_unit_key(ctx,next_unit,&next_state,&next_meta);
-  if(next_unit == prev_unit){
-    next_state = prev_state;
-    next_meta = prev_meta;
-  }
+  const uint32_t prev_key = ewlf_unit_key(ctx,prev_unit);
+  const uint32_t next_key = (next_unit == prev_unit) ? prev_key : ewlf_unit_key(ctx,next_unit);
   if((prev_key >= last_key) || (next_key >= last_key)) return false;
-  //the newest record of the current unit
+  //the newest records of the current unit: positions fill from the top, so
+  //they are the lowest started ones. The start markers are read from the
+  //bottom up to the first started one, one write unit per read and no
+  //checksum. A search by halving would take a start marker a power cut left
+  //weak, reading erased at this boot, for the end of the run of started
+  //positions and miss the records below it; a search from the bottom cannot
+  //be fooled by it. The top position is started: it holds the key
   const uint8_t*const top = ewlf_unit_top_record(ctx,current_unit);
   unsigned int from = records_per_unit - 1;
-  if(ctx->nvm_props->zero_overwrite){
-    //the last started position; the top one is started: it holds the key
-    unsigned int slo = 0;
-    unsigned int shi = records_per_unit - 1;
-    while(slo < shi){
-      const unsigned int mid = (slo + shi + 1) / 2;
-      if(UNIT_ERASED != ewlf_start_marker_state(ctx,top - mid*record_size)){
-        slo = mid;
-      } else {
-        shi = mid - 1;
-      }
-    }
-    from = slo;
-  }
+  while((from > 0) && (UNIT_ERASED == ewlf_start_marker_state(ctx,top - from*record_size))) from--;
   ewlf_offer_unit_from(ctx,current_unit,from,c);
-  if(NULL == c->best) return false;
-  if((c->best_version <= prev_key) || (c->best_version <= next_key)) return false;
-  //a torn rollover record at the top of the next unit
-  if(EWLF_RECORD_UNMARKED == next_state){
-    unit_state_t end_marker;
-    ewlf_choice_offer(ctx,c,ewlf_unit_top_record(ctx,next_unit),next_state,&next_meta,end_marker = UNIT_ERASED);
-  }
+  if(NULL == c->complete) return false;
+  if((c->complete_version <= prev_key) || (c->complete_version <= next_key)) return false;
+  //the next unit in write order, whole
+  ewlf_offer_unit_from(ctx,next_unit,records_per_unit-1,c);
   return true;
 }
 
 /**
- * \brief Locate the current EWLF record and update `ctx->data`.
+ * \brief Whether a copy made by the scan may erase a unit: not the one
+ * holding the last complete record, nor one holding a half record newer
+ * than it (the exposed ancestor of a chain of copies may be such a record).
  *
- * Records only ever start at the top of an erase unit minus a multiple of
- * the record size, so only those positions are checked: data can never be
- * mistaken for a header, and every candidate fits in its erase unit. Units
- * are erased right before their first record is programmed and never when
- * the write order leaves them, so stale units are the normal state and the
- * newest record is the candidate with the highest version over all units
- * (::ewlf_choose_fast, ::ewlf_choose_linear).
+ * \param ctx Context of the EWLF area
+ * \param unit_index Index of the erase unit
+ * \param protected_record The last complete record, or NULL
+ * \param protected_version Its version, 0 if none
+ */
+static bool ewlf_unit_erasable(lftl_ctx_t*ctx, unsigned int unit_index, const uint8_t*protected_record, uint32_t protected_version){
+  const uint8_t*const base = ewlf_unit_base(ctx,unit_index);
+  if((NULL != protected_record) && (protected_record >= base) && (protected_record < base + page_size(ctx))) return false;
+  const uintptr_t record_size = ewlf_record_phy_size(ctx);
+  const unsigned int records_per_unit = page_size(ctx) / record_size;
+  const uint8_t*const top = ewlf_unit_top_record(ctx,unit_index);
+  for(unsigned int i=0;i<records_per_unit;i++){
+    ewlf_reading_t r;
+    if((EWLF_RECORD_HALF == ewlf_record_state(ctx,top - i*record_size,&r)) && (r.meta.version > protected_version)) return false;
+  }
+  return true;
+}
+
+/// What ::ewlf_place_and_write needs beyond the write itself.
+typedef struct {
+  const uint8_t*current_record;   /**< the record the new one goes below, and whose data fills what the write leaves untouched */
+  uint32_t base_version;          /**< the new record is numbered above this, and above every valid record stepped over */
+  const uint8_t*protected_record; /**< NULL, or a record whose unit a rollover must not erase (copies only) */
+  uint32_t protected_version;     /**< nor a unit holding a half record newer than this (copies only) */
+  bool copy;                      /**< the source is the current record's own data, and `ctx->data` is left alone */
+} ewlf_write_params_t;
+
+static uint8_t* ewlf_place_and_write(lftl_ctx_t*dst_ctx, const ewlf_write_params_t*p, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data);
+
+/**
+ * \brief Copy a half record forward: write its data again as a new record,
+ * through the write path, so that it ends with a solid flag-b.
  *
- * The scan reads and chooses; it never erases, so that a power cut at every
- * boot costs no erase (ISSUES.md LFTL-010). What it decides about the one
- * word a power cut can have left weak, the end marker of the interrupted
- * write, it decides on one reading, and on a flash with `zero_overwrite` it
- * pins the decision with one word program:
- * - end marker partially programmed: the record is stable and taken; the
- *   marker is pinned to zeros, so that it cannot read all erased at a later
- *   boot and bring the previous version back (LFTL-011);
- * - end marker all erased, a newer version than the record taken: the torn
- *   record is tombstoned, its version item pinned to zeros, so that it
- *   cannot come back later as a "new" version once its marker jitters.
- * Without `zero_overwrite` the same choices are made at every boot on the
- * word as it reads then, and the next write settles them: it numbers its
- * record above every valid checksum it steps over (::write_ewlf_core).
+ * \param ctx Context of the EWLF area
+ * \param c The choice, whose half record is the source
+ * \returns The copy, or NULL when no position exists for it without erasing a protected unit
+ */
+static uint8_t* ewlf_copy_record(lftl_ctx_t*ctx, const ewlf_choice_t*c){
+  ewlf_write_params_t p;
+  p.current_record = c->half;
+  p.base_version = c->max_version;
+  p.protected_record = c->complete;
+  p.protected_version = c->complete_version;
+  p.copy = true;
+  return ewlf_place_and_write(ctx,&p,ctx->area,LFTL_INVALID_POINTER,ctx->data_size,true);
+}
+
+/**
+ * \brief Pin a half record in place, when no position is left for a copy:
+ * program its flag-a, then its flag-b. Once the program of flag-b returned
+ * the record is complete for good; a cut pin is retried at the next boot.
+ *
+ * \param ctx Context of the EWLF area
+ * \param record_addr Physical address of the start of the record
+ * \param flag_a How flag-a read: a flag that read all zeros is left alone unless ::LFTL_EWLF_PIN_OVER_ZEROS
+ */
+static void ewlf_pin_flags(lftl_ctx_t*ctx, uint8_t*record_addr, unit_state_t flag_a){
+  if(LFTL_EWLF_PIN_OVER_ZEROS || (UNIT_ZERO != flag_a)) ewlf_write_flag(ctx,ewlf_flag_a_addr(ctx,record_addr));
+  ewlf_write_flag(ctx,ewlf_flag_b_addr(ctx,record_addr));
+}
+
+/**
+ * \brief Find an EWLF area's current record and set `ctx->data` to its data
+ * (the EWLF scan section of the documentation's anti-tearing page).
+ *
+ * The choice (::ewlf_choose_fast, or ::ewlf_choose_linear when its check
+ * fails) names the newest complete, half and aborted records. Then, at most
+ * one pass per record position plus two:
+ * - an aborted record newer than both others is the abort of a write that
+ *   never reached flag-a, or whose flag-a is weak and read erased: with
+ *   `zero_overwrite` it is tombstoned, so that it never comes back, and the
+ *   choice runs again; without, it is ignored (it was never exposed: an
+ *   exposed record has a bit in flag-a that never reads erased again);
+ * - a half record newer than the complete one holds solid data behind a
+ *   flag-a that may be weak: it is copied forward (::ewlf_copy_record) and
+ *   the choice runs again, finding the copy complete. When no position is
+ *   left without erasing the unit of the complete record or of a half
+ *   record newer than it, the stuck state, it is pinned in place with
+ *   `zero_overwrite` (::ewlf_pin_flags) or, without, exposed as it is: the
+ *   one residual, see the documentation;
+ * - otherwise the complete record is exposed, or
+ *   ::LFTL_ERROR_NO_VALID_VERSION raised when there is none.
+ * A record is thus exposed either after a program that returned in this
+ * very boot, or on a reading of flag-b with a bit, which proves flag-a
+ * solid: it is half or complete at every later boot, it is never tombstoned
+ * (only aborted readings are), its unit is never erased by a copy, and the
+ * application's writes erase only the unit below the current record's. A
+ * half record is never tombstoned: it may be the record exposed at an
+ * earlier boot, when its flag-b read a bit. `ctx->data` is assigned once, at
+ * the end, so that a cut during a copy leaves it unset.
  *
  * With LFTL_SCAN_CROSS_CHECK defined (the Linux and ASan test builds), both
- * scans run and any disagreement is ::LFTL_INTERNAL_ERROR.
+ * scans run and any disagreement on what matters is ::LFTL_INTERNAL_ERROR.
  *
  * \param ctx Context of the EWLF area
  */
 static void find_current_record(lftl_ctx_t*ctx){
-  ewlf_choice_t c;
-  ewlf_choice_init(&c);
-  if(!ewlf_choose_fast(ctx,&c)){
+  const uintptr_t header_size = ewlf_header_phy_size(ctx);
+  const unsigned int max_passes = n_pages(ctx) * (page_size(ctx) / ewlf_record_phy_size(ctx)) + 2;
+  for(unsigned int pass = 0; ; pass++){
+    //a program that reports success without changing the flash must not spin
+    if(pass > max_passes) raise_error(ctx,LFTL_INTERNAL_ERROR);
+    ewlf_choice_t c;
     ewlf_choice_init(&c);
-    ewlf_choose_linear(ctx,&c);
+    if(!ewlf_choose_fast(ctx,&c)){
+      ewlf_choice_init(&c);
+      ewlf_choose_linear(ctx,&c);
+    }
+    const bool half_newest = c.half_version > c.complete_version;
+    const bool torn_newest = (c.torn_version > c.complete_version) && (c.torn_version > c.half_version);
+    #ifdef LFTL_SCAN_CROSS_CHECK
+    {
+      ewlf_choice_t l;
+      ewlf_choice_init(&l);
+      ewlf_choose_linear(ctx,&l);
+      const bool l_half_newest = l.half_version > l.complete_version;
+      const bool l_torn_newest = (l.torn_version > l.complete_version) && (l.torn_version > l.half_version);
+      if((c.complete != l.complete) || (half_newest != l_half_newest) || (half_newest && (c.half != l.half))
+        || (torn_newest != l_torn_newest) || (torn_newest && (c.torn != l.torn))) raise_error(ctx,LFTL_INTERNAL_ERROR);
+    }
+    #endif
+    if(torn_newest && ctx->nvm_props->zero_overwrite){
+      ewlf_tombstone(ctx,(uint8_t*)c.torn,c.torn_zero_units);
+      continue;
+    }
+    if(half_newest){
+      if(NULL != ewlf_copy_record(ctx,&c)) continue;
+      //the stuck state
+      if(ctx->nvm_props->zero_overwrite){
+        ewlf_pin_flags(ctx,(uint8_t*)c.half,c.half_flag_a);
+        continue;
+      }
+      ctx->data = (void*)(c.half + header_size);
+      return;
+    }
+    if(NULL == c.complete) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
+    ctx->data = (void*)(c.complete + header_size);
+    return;
   }
-  #ifdef LFTL_SCAN_CROSS_CHECK
-  {
-    ewlf_choice_t l;
-    ewlf_choice_init(&l);
-    ewlf_choose_linear(ctx,&l);
-    const bool c_torn = (NULL != c.torn) && (c.torn_version > c.best_version);
-    const bool l_torn = (NULL != l.torn) && (l.torn_version > l.best_version);
-    if((c.best != l.best) || (c_torn != l_torn) || (c_torn && (c.torn != l.torn))) raise_error(ctx,LFTL_INTERNAL_ERROR);
-  }
-  #endif
-  if(NULL == c.best) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
-  if(ctx->nvm_props->zero_overwrite){
-    if(UNIT_MIXED == c.best_end_marker) ewlf_pin_item(ctx,(uint8_t*)c.best,2);
-    if((NULL != c.torn) && (c.torn_version > c.best_version)) ewlf_pin_item(ctx,(uint8_t*)c.torn,0);
-  }
-  ctx->data = (void*)(c.best + ewlf_header_phy_size(ctx));
 }
 
 /**
@@ -1707,44 +1945,51 @@ static void write_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*c
 }
 
 /**
- * \brief Shared core for ::write_ewlf and ::erase_ewlf.
+ * \brief Place and write one EWLF record, for the application's writes
+ * (::write_ewlf_core) and for the scan's copies (::ewlf_copy_record).
  *
  * Places the new record below the current one in its own erase unit, at the
- * first position whose start marker reads all erased: a start marker is the
- * first word of a record to be programmed, so nothing after an erased one
- * was ever programmed. A started position on the way holds a record a power
- * cut tore, or one the scan tombstoned: it is skipped, the new record is
- * numbered above its version when its checksum is valid, so that no two
- * candidates ever share a version whatever its end marker reads later, and
- * on a flash with `zero_overwrite` its start marker is pinned to zeros, so
- * that a weak one cannot later read erased and open a hole in the run of
- * started positions. With no room left, rolls over to the top of the unit
- * immediately below, wrapping from the lowest unit back to the highest, and
- * erases that unit first, whatever it reads: a torn erase is redone, and
- * cells a torn record left behind are never programmed over (ISSUES.md
- * LFTL-013). The unit the write order leaves is not erased: it is, lazily,
- * when the order comes back to it, so a unit is erased once per cycle and
- * never at boot.
+ * first position whose start marker reads all erased, and whose meta field
+ * and flags too: a start marker is the first word of a record to be
+ * programmed, so nothing after an erased one was ever programmed, unless the
+ * marker is weak and the position was stepped over and tombstoned since
+ * (below). A started position on the way holds a record a power
+ * cut tore, one the scan tombstoned, or a copy it made: it is skipped, the
+ * new record is numbered above its version when its checksum is valid, so
+ * that no two candidates ever share a version whatever its flags read
+ * later, and on a flash with `zero_overwrite` its start marker is pinned to
+ * zeros, so that a weak one cannot later read erased and open a hole in the
+ * run of started positions, and its meta field is tombstoned when it does
+ * not read valid, so that a weak one cannot later read valid with a
+ * version about to be reused. With no room left, rolls over to the top of
+ * the unit immediately below, wrapping from the lowest unit back to the
+ * highest, and erases that unit first, whatever it reads: a torn erase is
+ * redone, and cells a torn record left behind are never programmed over
+ * (ISSUES.md LFTL-013). The unit the write order leaves is not erased: it
+ * is, lazily, when the order comes back to it, so a unit is erased once per
+ * cycle and never at boot. A copy may not erase the unit of the last
+ * complete record, nor one holding a half record newer than it
+ * (::ewlf_unit_erasable): it then returns NULL and writes nothing.
  *
  * Then writes the start marker, the data (unless `write_data` is false, in
  * which case the fresh, already-erased target data is left untouched so it
- * reads back as erased), the magic, the version and checksum, and the end
- * marker last. The checksum is computed from the data meant to be written
- * rather than from what reads back, so a record that did not program as
- * intended fails its check.
+ * reads back as erased), the meta field in one program, flag-a, and flag-b
+ * last. The checksum is computed from the data meant to be written rather
+ * than from what reads back, so a record that did not program as intended
+ * fails its check.
  *
  * \param dst_ctx Context of the target EWLF area
- * \param dst_nvm_addr Destination logical address (ignored if `write_data` is false)
- * \param src Source address (ignored if `write_data` is false)
- * \param size Size in bytes to write (ignored if `write_data` is false;
+ * \param p The current record, the version base, the protection and whether this is a copy
+ * \param dst_nvm_addr Destination logical address
+ * \param src Source address (ignored for a copy: the current record's data)
+ * \param size Size in bytes to write (ignored when `write_data` is false:
  *   the whole record's data is always (re)written as a unit)
  * \param write_data Whether to actually write new data, or leave the
  *   fresh target data in its erased state
+ * \returns The new record, or NULL when a copy had no position
  */
-static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data){
-  DEBUG_PRINTLN("write_ewlf_core(%p,%p,%p,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,write_data);
-  //check the range as requested: once extended to whole write units below, size could wrap around
-  if(write_data) check_in_data(dst_ctx, dst_nvm_addr, size);
+static uint8_t* ewlf_place_and_write(lftl_ctx_t*dst_ctx, const ewlf_write_params_t*p, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data){
+  DEBUG_PRINTLN("ewlf_place_and_write(%p,%p,%p,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,write_data);
   const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uintptr_t addr_misalignement = write_data ? ((uintptr_t)dst_nvm_addr % write_size) : 0;
   const uintptr_t dst_nvm_addr_aligned = (uintptr_t)dst_nvm_addr - addr_misalignement;
@@ -1757,17 +2002,15 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
       size_aligned += write_size - size_aligned % write_size;
     }
   }
-  //locate the current record: the requested range is checked above, and once
-  //extended to whole write units it may end in the padding after data_size,
-  //which every record has room for (see data_phy_size)
-  const void*const current_data_addr = translate_addr_ewlf(dst_ctx, (void*)dst_nvm_addr_aligned, 0);
-  const uintptr_t offset = (uintptr_t)current_data_addr - (uintptr_t)dst_ctx->data;
+  //the current record: the requested range is checked by the caller, and
+  //once extended to whole write units it may end in the padding after
+  //data_size, which every record has room for (see data_phy_size)
+  const uintptr_t offset = dst_nvm_addr_aligned - (uintptr_t)dst_ctx->area;
   const uintptr_t header_size = ewlf_header_phy_size(dst_ctx);
-  const uint8_t*const current_record_addr = (uint8_t*)dst_ctx->data - header_size;
-  const unsigned int current_unit_index = (uintptr_t)(current_record_addr - (uint8_t*)dst_ctx->area) / page_size(dst_ctx);
-  lftl_meta_t current_meta;
-  ewlf_get_record_meta(dst_ctx,&current_meta,current_record_addr);
-  uint32_t max_version = current_meta.version;
+  const uint8_t*const current_record_addr = p->current_record;
+  const uint8_t*const current_data = current_record_addr + header_size;
+  const unsigned int current_unit_index = ewlf_unit_index(dst_ctx,current_record_addr);
+  uint32_t max_version = p->base_version;
 
   const uintptr_t record_size = ewlf_record_phy_size(dst_ctx);
   //room below the current record in its unit: the first position whose start
@@ -1779,14 +2022,24 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
     candidate_addr -= record_size;
     uint8_t*const candidate = (uint8_t*)candidate_addr;
     const unit_state_t start_marker = ewlf_start_marker_state(dst_ctx,candidate);
-    if(UNIT_ERASED == start_marker){
+    ewlf_reading_t r;
+    const ewlf_record_state_t state = ewlf_record_state(dst_ctx,candidate,&r);
+    //free: nothing after the start marker reads programmed either. A start
+    //marker a power cut left weak can read erased at a boot after the
+    //position was stepped over and its meta field tombstoned: the record
+    //would then be programmed over that tombstone
+    if((UNIT_ERASED == start_marker) && r.erased){
       found = true;
       break;
     }
-    lftl_meta_t meta;
-    unit_state_t end_marker;
-    if(EWLF_RECORD_NONE != ewlf_record_state(dst_ctx,candidate,&meta,&end_marker)){
-      if(meta.version > max_version) max_version = meta.version;
+    if(EWLF_RECORD_NONE != state){
+      if(r.meta.version > max_version) max_version = r.meta.version;
+    } else if(dst_ctx->nvm_props->zero_overwrite){
+      //a meta field that does not read valid may be weak, whether it reads
+      //erased or garbage: it must not read valid at a later boot, with a
+      //version about to be reused. The units that already read zeros are
+      //left alone; over erased ones this is an ordinary program
+      ewlf_tombstone(dst_ctx,candidate,r.meta_zero_units);
     }
     if((UNIT_ZERO != start_marker) && dst_ctx->nvm_props->zero_overwrite) ewlf_write_start_marker(dst_ctx,candidate);
   }
@@ -1796,8 +2049,10 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
   } else {
     // no room left: move to the unit immediately below, wrapping from the
     // lowest unit back to the highest one, and erase it first, whatever it
-    // reads: it holds no record newer than the current one
+    // reads: it holds no record newer than the current one, unless the copy
+    // chain of the scan wrapped around, which the protection refuses
     const unsigned int new_unit_index = (current_unit_index==0) ? (n_pages(dst_ctx)-1) : (current_unit_index-1);
+    if(p->copy && !ewlf_unit_erasable(dst_ctx,new_unit_index,p->protected_record,p->protected_version)) return NULL;
     nvm_erase(dst_ctx,dst_ctx->nvm_props,ewlf_unit_base(dst_ctx,new_unit_index),1);
     new_record_addr = ewlf_unit_top_record(dst_ctx,new_unit_index);
   }
@@ -1806,16 +2061,23 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
   //the start marker first: from here on the position is started
   ewlf_write_start_marker(dst_ctx,new_record_addr);
 
-  const uint8_t* src_phy_addr = src;
+  const uint8_t* src_phy_addr = (const uint8_t*)src;
   lftl_ctx_t* src_ctx = dst_ctx;
   if(write_data){
-    check_src_phy_addr(&src_ctx,&src_phy_addr,size);
+    if(p->copy){
+      //the current record's own data, read where it is: never through
+      //check_src_phy_addr, which takes an address in the area's logical range
+      //for a logical one
+      src_phy_addr = current_data;
+    } else {
+      check_src_phy_addr(&src_ctx,&src_phy_addr,size);
+    }
     write_src_phy_addr_to_dst_phy_addr(
       dst_ctx,
       offset,
       size,
       new_data_addr,
-      (const uint8_t*)dst_ctx->data,
+      current_data,
       src_ctx,
       src_phy_addr,
       write_size,
@@ -1826,27 +2088,61 @@ static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
       0 // no transaction
     );
   }
-  //write magic, then version+checksum, then the end marker (checksum of the
-  //data meant to be written: the current data with the written range
-  //replaced, or, if write_data is false, erased data)
-  ewlf_write_record_magic(dst_ctx,new_record_addr);
-  uint32_t sum = 0xFFFFFFFF;
+  //the meta field: the version, and the checksum of the data meant to be
+  //written (the current data with the written range replaced, or, if
+  //write_data is false, erased data); then flag-a, then flag-b
+  ewlf_meta_t meta;
+  meta.version = max_version + 1;
+  uint64_t crc = ewlf_checksum_start(meta.version);
   if(write_data){
     const uintptr_t first = (uintptr_t)dst_nvm_addr - (uintptr_t)dst_ctx->area;
-    const uint8_t*const current_data = (const uint8_t*)dst_ctx->data;
-    sum = checksum_update(dst_ctx,sum,current_data,first);
-    sum = checksum_update(src_ctx,sum,src_phy_addr,size);
-    sum = checksum_update(dst_ctx,sum,current_data+first+size,dst_ctx->data_size-first-size);
+    crc = ewlf_checksum_update(dst_ctx,crc,current_data,first);
+    crc = ewlf_checksum_update(src_ctx,crc,src_phy_addr,size);
+    crc = ewlf_checksum_update(dst_ctx,crc,current_data+first+size,dst_ctx->data_size-first-size);
   } else {
-    sum = checksum_update_erased(sum,dst_ctx->data_size);
+    crc = ewlf_checksum_update_erased(crc,dst_ctx->data_size);
   }
-  lftl_meta_t meta;
-  meta.version = max_version + 1;
-  meta.checksum = sum + meta.version;
-  meta.checksum2 = 0;
-  ewlf_write_record_meta_core(dst_ctx,new_record_addr,&meta);
+  meta.checksum = ewlf_checksum_end(crc);
+  ewlf_write_meta(dst_ctx,new_record_addr,&meta);
+  ewlf_write_flag(dst_ctx,ewlf_flag_a_addr(dst_ctx,new_record_addr));
+  ewlf_write_flag(dst_ctx,ewlf_flag_b_addr(dst_ctx,new_record_addr));
 
-  dst_ctx->data = new_data_addr;
+  if(!p->copy) dst_ctx->data = new_data_addr;
+  DEBUG_PRINTLN("ewlf_place_and_write exit");
+  return new_record_addr;
+}
+
+/**
+ * \brief Shared core for ::write_ewlf and ::erase_ewlf: the application's
+ * writes, below the current record.
+ *
+ * The current record is the one the scan exposed, or the one the last write
+ * left: its meta field is solid (it is complete, or half with a bit in
+ * flag-a, which proves the meta field complete), so the new record is
+ * numbered from its version.
+ *
+ * \param dst_ctx Context of the target EWLF area
+ * \param dst_nvm_addr Destination logical address
+ * \param src Source address
+ * \param size Size in bytes to write (ignored when `write_data` is false)
+ * \param write_data Whether to actually write new data, or leave the
+ *   fresh target data in its erased state
+ */
+static void write_ewlf_core(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data){
+  DEBUG_PRINTLN("write_ewlf_core(%p,%p,%p,%u,%u) entry",dst_ctx,dst_nvm_addr,src,size,write_data);
+  //check the range as requested: once extended to whole write units, size could wrap around
+  if(write_data) check_in_data(dst_ctx, dst_nvm_addr, size);
+  //locate the current record
+  if(LFTL_INVALID_POINTER == dst_ctx->data) find_current_record(dst_ctx);
+  ewlf_write_params_t p;
+  p.current_record = ((const uint8_t*)dst_ctx->data) - ewlf_header_phy_size(dst_ctx);
+  ewlf_reading_t r;
+  ewlf_read_record(dst_ctx,p.current_record,&r);
+  p.base_version = r.meta.version;
+  p.protected_record = NULL;
+  p.protected_version = 0;
+  p.copy = false;
+  ewlf_place_and_write(dst_ctx,&p,dst_nvm_addr,src,size,write_data);
   DEBUG_PRINTLN("write_ewlf_core exit");
 }
 
@@ -1882,7 +2178,7 @@ static void erase_ewlf(lftl_ctx_t*ctx){
  *
  * Erases every erase unit, then writes the first record (version 1) at
  * the top of the highest unit, per "writes start at the highest possible
- * address": start marker, magic, version and checksum, end marker.
+ * address": start marker, meta field, flag-a, flag-b, its data left erased.
  *
  * \param ctx Context of the target EWLF area
  */
@@ -1892,12 +2188,12 @@ static void format_ewlf(lftl_ctx_t*ctx){
   uint8_t*const record_addr = ewlf_unit_top_record(ctx, n_pages(ctx)-1);
   uint8_t*const data_addr = record_addr + ewlf_header_phy_size(ctx);
   ewlf_write_start_marker(ctx,record_addr);
-  ewlf_write_record_magic(ctx,record_addr);
-  lftl_meta_t meta;
+  ewlf_meta_t meta;
   meta.version = 1;
-  meta.checksum = checksum(ctx,data_addr,ctx->data_size) + meta.version;
-  meta.checksum2 = 0;
-  ewlf_write_record_meta_core(ctx,record_addr,&meta);
+  meta.checksum = ewlf_checksum_end(ewlf_checksum_update_erased(ewlf_checksum_start(meta.version),ctx->data_size));
+  ewlf_write_meta(ctx,record_addr,&meta);
+  ewlf_write_flag(ctx,ewlf_flag_a_addr(ctx,record_addr));
+  ewlf_write_flag(ctx,ewlf_flag_b_addr(ctx,record_addr));
   ctx->data = data_addr;
   DEBUG_PRINTLN("format_ewlf exit");
 }

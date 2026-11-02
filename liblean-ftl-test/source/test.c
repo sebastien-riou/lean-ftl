@@ -30,6 +30,12 @@ static jmp_buf exception_ctx;
 void throw_exception(uint32_t err_code){
   longjmp(exception_ctx,err_code);
 }
+//abort() does not flush stdio: with the output in a file, the message that
+//explains the failure would be lost
+static void fail_abort(void){
+  fflush(stdout);
+  abort();
+}
 
 //order of these headers matters
 #include "ui.h"
@@ -139,10 +145,39 @@ void (*transaction_write_any_func)(lftl_ctx_t*ctx, void*dst_nvm_addr, const void
 void (*transaction_commit_func)(lftl_ctx_t*ctx);
 void (*transaction_abort_func)(lftl_ctx_t*ctx);
 
+//the one cut --tear-at= runs, 0 for all of them: parsed on every build, read
+//by the tearing simulation
+static uint64_t tear_at;
+
 #ifdef HAS_TEARING_SIMULATION
 #include <stdio.h>
 #include <stdlib.h>
 extern bool nvm_zero_overwrite; //the simulated flash's all-zero exception, see linux-accessors.c
+//the weak word model of linux-accessors.c (T2 of the flash page without T3),
+//its seed, the scopes it applies to, and the reading a test can script
+extern bool nvm_weak_model;
+extern uint64_t nvm_weak_seed;
+extern bool (*nvm_weak_override)(const void*unit_nvm_addr, uint8_t*unit, uintptr_t size);
+void tearing_sim_weak_scope_clear();
+void tearing_sim_weak_scope_add(const void*lo, uintptr_t size);
+void tearing_sim_weak_scope_pop();
+void tearing_sim_weak_clear_range(const void*addr, uintptr_t size);
+bool tearing_sim_is_weak(const void*addr, uintptr_t size);
+void tearing_sim_weak_reseed(uint64_t seed);
+void tearing_sim_weak_new_boot();
+//a cut at a program call, for a second cut inside the recovery from the first
+void tearing_sim_set_call_target(uint64_t k, bool at_last_unit);
+void tearing_sim_clear_call_target();
+uint64_t tearing_sim_get_call_count();
+//what the sweep is doing, for the failure messages: the cut and the second
+//cut (-1: none)
+static uint64_t current_cut_target;
+static int64_t current_secondary_target = -1;
+static void print_cut_context(){
+  PRINTF("  cut %llu, second cut %lld, weak words %s, weak seed %llu\n",
+    (unsigned long long)current_cut_target,(long long)current_secondary_target,
+    nvm_weak_model ? "on" : "off",(unsigned long long)nvm_weak_seed);
+}
 data_flash_t nvm_ref;
 data_flash_t nvm_ref_previous_state;
 data_flash_t transaction_buf_ref;
@@ -233,6 +268,7 @@ uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t
   memcpy(dst+offset,src,size);
   //emulate call to nvm_write rather than calling it, to make sure we do not trigger tearing here
   memcpy(dst_nvm_addr,src,size);
+  tearing_sim_weak_clear_range(dst_nvm_addr,size);
   return 0;
 }
 uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
@@ -244,6 +280,7 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
   memset(dst+offset,0xFF,size);
   //emulate call to nvm_erase rather than calling it, to make sure we do not trigger tearing here
   memset(base_address,0xFF,size);
+  tearing_sim_weak_clear_range(base_address,size);
   //for(unsigned int i=offset/LFTL_PAGE_SIZE;i<n_pages;i++){
   //  erase_cnt_inc(i);
   //}
@@ -364,17 +401,20 @@ void check_nvm(){
   for(unsigned int i=0;i<N_CHECKED_AREAS;i++){
     if(AREA_CORRUPT == states[i]){
       PRINTF("NVM corrupted: area %s reads neither the new state nor the old one\n",checked_area_names[i]);
-      abort();
+      print_cut_context();
+      fail_abort();
     }
     if(AREA_NEW == states[i]){
       area_seen_new[i] = 1;
     } else if(area_seen_new[i]){
       PRINTF("NVM rollback: area %s read the new state at an earlier boot and the old one now\n",checked_area_names[i]);
-      abort();
+      print_cut_context();
+      fail_abort();
     }
   }
 }
 static void simulate_reboot(){
+  tearing_sim_weak_new_boot(); //a weak word reads a fresh value
   nvma.data = LFTL_INVALID_POINTER;
   nvma.transaction_tracker = LFTL_INVALID_POINTER;
   nvmb.data = LFTL_INVALID_POINTER;
@@ -955,12 +995,12 @@ void memread_newer_test(){
       stmt;\
       memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
       PRINTF("ERROR: expected err_code 0x%08x but none was raised\n",(unsigned)(expected_err_code));\
-      abort();\
+      fail_abort();\
     }\
     memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
     if(__err_code != (uint32_t)(expected_err_code)){\
       PRINTF("ERROR: expected err_code 0x%08x but got 0x%08x\n",(unsigned)(expected_err_code),(unsigned)__err_code);\
-      abort();\
+      fail_abort();\
     }\
   }while(0)
 
@@ -2227,6 +2267,97 @@ static void check_cut(const uint8_t*nvm_bytes, const uint8_t*intact, uintptr_t c
     if(same != (i < cut)) throw_exception(ERROR_VERIFICATION_FAIL);
   }
 }
+static bool buf_is_all(const uint8_t*buf, uint8_t val, uintptr_t size){
+  for(uintptr_t i=0;i<size;i++) if(buf[i] != val) return false;
+  return true;
+}
+static unsigned int scripted_readings_left;
+static bool scripted_reading(const void*unit_nvm_addr, uint8_t*unit, uintptr_t size){
+  (void)unit_nvm_addr;
+  if(0 == scripted_readings_left) return false;
+  scripted_readings_left--;
+  memset(unit,0xA5,size);
+  return true;
+}
+//The weak word model, on nvmd's page for the duration of this test: a write
+//cut after unit k programs the units before k, leaves unit k weak and the
+//units after it erased; a weak unit reads differently from one read to the
+//next; a program of zeros over it makes it solid; a scripted reading wins
+//over the model; a torn erase leaves the whole page weak, a complete one
+//makes it solid.
+static void tearing_sim_weak_self_test(uint8_t*const page){
+  const bool model_was_on = nvm_weak_model;
+  const uintptr_t ws = nvm_write_size;
+  const unsigned int n_units = 4;
+  const uintptr_t size = n_units * ws;
+  uint8_t src[size];
+  uint8_t buf[size];
+  nvm_weak_model = 1;
+  tearing_sim_weak_scope_add(page,nvm_erase_size);
+  for(unsigned int k=0;k<n_units;k++){
+    stateful_prng_fill(src,size);
+    raw_erase(page,1);
+    tearing_sim_set_target(k);
+    if(SIMULATED_TEARING != nvm_write(page,src,size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(nvm_read(buf,page,size)) throw_exception(ERROR_VERIFICATION_FAIL);
+    for(unsigned int u=0;u<n_units;u++){
+      const uint8_t*const unit = buf + u*ws;
+      if(tearing_sim_is_weak(page+u*ws,ws) != (u == k)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if((u < k) && memcmp(unit,src+u*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if((u > k) && !buf_is_all(unit,0xFF,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    }
+    //the weak unit: intended, erased, zeros or under a mask, the same within
+    //a boot, at least two of them seen over 64 boots
+    unsigned int seen_intended=0, seen_erased=0, seen_zero=0, seen_other=0;
+    for(unsigned int r=0;r<64;r++){
+      uint8_t unit[ws], again[ws];
+      tearing_sim_weak_new_boot();
+      if(nvm_read(unit,page+k*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(nvm_read(again,page+k*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(memcmp(unit,again,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(0 == memcmp(unit,src+k*ws,ws)) seen_intended++;
+      else if(buf_is_all(unit,0xFF,ws)) seen_erased++;
+      else if(buf_is_all(unit,0x00,ws)) seen_zero++;
+      else seen_other++;
+    }
+    if((seen_intended?1:0)+(seen_erased?1:0)+(seen_zero?1:0)+(seen_other?1:0) < 2) throw_exception(ERROR_VERIFICATION_FAIL);
+    //a weak unit is not erased: only zeros may be programmed over it, and
+    //that makes it solid
+    uint8_t values[ws];
+    memset(values,0x5A,ws);
+    if(5 != nvm_write(page+k*ws,values,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    //a scripted reading wins over the model
+    scripted_readings_left = 1;
+    nvm_weak_override = scripted_reading;
+    tearing_sim_weak_new_boot();
+    uint8_t unit[ws];
+    if(nvm_read(unit,page+k*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    nvm_weak_override = 0;
+    if(!buf_is_all(unit,0xA5,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    memset(values,0,ws);
+    if(nvm_zero_overwrite){
+      //zeros over the weak unit: accepted, and the unit is solid
+      if(nvm_write(page+k*ws,values,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(tearing_sim_is_weak(page+k*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(nvm_read(unit,page+k*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(!buf_is_all(unit,0x00,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    } else {
+      //a flash without the all-zero exception refuses it, and the unit stays weak
+      if(5 != nvm_write(page+k*ws,values,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+      if(!tearing_sim_is_weak(page+k*ws,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    }
+  }
+  //a torn erase, then a complete one
+  tearing_sim_set_target(1);
+  if(SIMULATED_TEARING != nvm_erase(page,1)) throw_exception(ERROR_VERIFICATION_FAIL);
+  for(uintptr_t off=0;off<nvm_erase_size;off+=ws){
+    if(!tearing_sim_is_weak(page+off,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+  }
+  if(nvm_erase(page,1)) throw_exception(ERROR_VERIFICATION_FAIL);
+  if(tearing_sim_is_weak(page,nvm_erase_size)) throw_exception(ERROR_VERIFICATION_FAIL);
+  tearing_sim_weak_scope_pop();
+  nvm_weak_model = model_was_on;
+}
 void tearing_sim_self_test(){
   DEBUG_PRINTLN(__func__);
   const unsigned int n_units = 4;
@@ -2248,6 +2379,7 @@ void tearing_sim_self_test(){
     if(SIMULATED_TEARING != nvm_erase(page,1)) throw_exception(ERROR_VERIFICATION_FAIL);
     check_cut(page,erased,k*nvm_write_size,nvm_erase_size);
   }
+  tearing_sim_weak_self_test(page);
   tearing_sim_init();
   format_func(&nvmd); //resync nvm_ref with nvmd's pages
   SANITY_CHECK();
@@ -2321,11 +2453,26 @@ static bool is_simulated_tearing(uint32_t err_code){
 }
 #endif
 
+#ifdef HAS_TEARING_SIMULATION
+//A second cut, inside the recovery from the first: the sweep arms it at one
+//of the program calls the recovery's boots made when run without it (a
+//tombstone, a copy, a pin), and the recovery from that one runs without arming
+static int64_t secondary_call_target = -1;
+static bool secondary_at_last_unit;
+static unsigned int recovery_depth;
+static uint64_t recovery_calls; //program calls made by the recovery's boots, run without a second cut
+#endif
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
   if(is_simulated_tearing(err_code)){
     //simulated tearing, see if we recover well, including for the next write
+    const bool first = (0 == recovery_depth++);
+    if(first && (secondary_call_target >= 0)) tearing_sim_set_call_target(secondary_call_target,secondary_at_last_unit);
+    const uint64_t calls_before = tearing_sim_get_call_count();
     tearing_sim_check_nvm();
+    tearing_sim_clear_call_target();
+    if(first && (secondary_call_target < 0)) recovery_calls = tearing_sim_get_call_count() - calls_before;
     tearing_sim_write_after_recovery();
     format_func(&nvma);
     format_func(&nvmb);
@@ -2337,7 +2484,7 @@ void exception_handler(uint32_t err_code){
     //a real error, that's unexpected
     PRINTF("ERROR: test failed with error code 0x%08x\n",err_code);
     //ui_wait_button();
-    abort();
+    fail_abort();
   }
   #else
     #ifdef HAS_PRINTF
@@ -2359,6 +2506,13 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     erase_cnt_init();
     erase_cnt_enabled = 1;
     tearing_sim_init(); // ensure any previous tearing sim is stopped at this point
+    //the weak word model applies to the EWLF areas; the regular areas rely on T3
+    tearing_sim_weak_scope_clear();
+    tearing_sim_weak_scope_add(ewlfa.area,ewlfa.area_size);
+    tearing_sim_weak_scope_add(ewlfb.area,ewlfb.area_size);
+    recovery_depth = 0;
+    secondary_call_target = -1;
+    current_secondary_target = -1;
     #endif
     lftl_init_lib();
     // nvmc/nvmd are registered first: their nvm_props (nvm_props2/nvm_props3)
@@ -2392,9 +2546,17 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     erase_cnt_enabled = 0;
     tearing_sim_check_nvm();//sanity check that model is in sync
     print_erase_cnt_stats();
-    const unsigned int target_max = tearing_sim_get_max_target();
+    volatile unsigned int target_max = tearing_sim_get_max_target();
     const unsigned int n_targets = (target_max * target_percentage) / 100;
-    const unsigned int target_start = target_max - n_targets;
+    volatile unsigned int target_start = target_max - n_targets;
+    if(tear_at){ //one cut only, to reproduce a failure
+      if(tear_at > target_max){
+        PRINTLN("ERROR: --tear-at=%llu beyond the last cut, %u",(unsigned long long)tear_at,target_max);
+        fail_abort();
+      }
+      target_start = tear_at;
+      target_max = tear_at;
+    }
     PRINTF("%u targets for tearing simulation, testing %u (%u%%) of them from index %u\n",target_max,target_max-target_start,target_percentage,target_start);
     led1(1);
     format_func(&nvma);
@@ -2406,12 +2568,28 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     for(volatile unsigned int i=target_start;i<target_max+1;i++){//volatile to remove warning about setjump.
       //if(0 == (i%1000)) PRINTF("tearing simulation target %u\n",i);
       if(0 == (i%50)) print_progress_bar(i-target_start,n_targets);
-      tearing_sim_set_target(i);
-      if(0 == (err_code = setjmp(exception_ctx))){
-        dut();//simulated tearing test
-      } else {
-        exception_handler(err_code);
+      //the cut alone first; then, when the boots that recovered from it
+      //programmed anything, the same cut followed by a second one at each of
+      //those programs, at its first write unit and at its last
+      recovery_calls = 0;
+      for(volatile int64_t k=-1;k<(int64_t)recovery_calls;k++){
+        for(volatile unsigned int last=0;last<2;last++){
+          if((k < 0) && last) break;
+          recovery_depth = 0;
+          secondary_call_target = k;
+          secondary_at_last_unit = last;
+          current_cut_target = i;
+          current_secondary_target = k;
+          tearing_sim_set_target(i);
+          if(0 == (err_code = setjmp(exception_ctx))){
+            dut();//simulated tearing test
+          } else {
+            exception_handler(err_code);
+          }
+        }
       }
+      secondary_call_target = -1;
+      current_secondary_target = -1;
     }
     print_progress_bar_done();
     err_code = 0;
@@ -2603,19 +2781,24 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   bool lib_info=0;
   bool run_test_callbacks=0;
   bool no_pinning=0;
+  bool weak_words=0;
+  uint64_t weak_seed=1;
   for(int i=1;i<argc;i++){
     if(consumed[i]) continue;
     ACTION_ARG(report_n_tests,"--n-tests");
     ACTION_ARG(lib_info,"--lib-info");
     ACTION_ARG(run_test_callbacks,"--test-callbacks");
     ACTION_ARG(no_pinning,"--no-pinning");
+    ACTION_ARG(weak_words,"--weak-words");
+    U64_ARG(weak_seed,"--weak-seed=",0);
+    U64_ARG(tear_at,"--tear-at=",0);
     U64_ARG(test_index,"--test=",0);
     U64_ARG(first_index,"--first=",0);
     U64_ARG(last_index,"--last=",0);
     U64_ARG(tear_cov,"--tear-cov=",0);
     if(!consumed[i]){
       printf("ERROR unsupported command line argument: '%s'\n",argv[i]);
-      abort();
+      fail_abort();
     }
   }
   if(no_pinning){
@@ -2629,6 +2812,19 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     #endif
     PRINTLN("NVM without zero overwrite: the scan programs nothing");
   }
+  #ifdef HAS_TEARING_SIMULATION
+  if(weak_words){
+    //a word a cut left weak reads differently at every read, all erased
+    //included, for ever (T2 of the flash page without T3), in the EWLF areas
+    nvm_weak_model = 1;
+    nvm_weak_seed = weak_seed;
+    n_check_boots = 2; //a word may read differently at the second boot
+    PRINTLN("Weak words in the EWLF areas, seed %llu",(unsigned long long)weak_seed);
+  }
+  #else
+  (void)weak_words;
+  (void)weak_seed;
+  #endif
   if(report_n_tests){
     if(lib_info){
       print_lib_info();
@@ -2645,7 +2841,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   }
   if(tear_cov>100){
     PRINTLN("ERROR: max value for --tear-cov is 100");
-    abort();
+    fail_abort();
   }
   if(test_index){
     first_index=test_index;
@@ -2653,11 +2849,11 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   }
   if(first_index > last_index){
     PRINTLN("ERROR: '--first' must be less or equal to '--last'");
-    abort();
+    fail_abort();
   }
   if(last_index>N_TESTS){
     PRINTLN("ERROR: '--last' max value is %u",N_TESTS);
-    abort();
+    fail_abort();
   }
   print_lib_info();
   led1(1);
@@ -2731,7 +2927,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
       case 37:TEAR_COV(100);test_and_simulate_tearing(v010_compat_test     ,tear_cov_log[i]);break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
-        abort();
+        fail_abort();
     }
   }
   

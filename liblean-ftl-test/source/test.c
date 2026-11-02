@@ -147,6 +147,19 @@ data_flash_t nvm_ref;
 data_flash_t nvm_ref_previous_state;
 data_flash_t transaction_buf_ref;
 
+//The areas check_nvm verifies after a simulated cut, and whether each one was
+//seen reading the new state since the reference last moved: a rollback is an
+//area that reads the new state at one boot and the old one at a later boot,
+//with no write in between
+#define N_CHECKED_AREAS 4
+static bool area_seen_new[N_CHECKED_AREAS];
+//Every modelled operation moves the reference: the state it is to produce
+//becomes the new one, the previous new state the old one
+static void ref_advance(){
+  nvm_ref_previous_state = nvm_ref;
+  memset(area_seen_new,0,sizeof(area_seen_new));
+}
+
 #define N_ERASE_UNITS (sizeof(data_flash_t) / (LFTL_PAGE_SIZE))
 uint32_t erase_cnt[N_ERASE_UNITS];
 volatile bool erase_cnt_enabled;
@@ -213,8 +226,7 @@ uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t
     }
     if(!erased && !(nvm_zero_overwrite && zero)) return 5;
   }
-  //update previous state
-  nvm_ref_previous_state = nvm_ref;
+  ref_advance();
   //compute new state
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
@@ -224,8 +236,7 @@ uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t
   return 0;
 }
 uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
-  //update previous state
-  nvm_ref_previous_state = nvm_ref;
+  ref_advance();
   //compute new state
   uintptr_t offset = (uintptr_t)base_address - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
@@ -239,8 +250,7 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
   return 0;
 }
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
-  //update previous state
-  nvm_ref_previous_state = nvm_ref;
+  ref_advance();
   //compute new state
   uint8_t*dst = (uint8_t*)&nvm_ref;
   memset(dst,0xFF,ctx->data_size);
@@ -248,8 +258,7 @@ void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
   lftl_erase_all(ctx);
 }
 void tearing_sim_lftl_write(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const src, uintptr_t size){
-  //update previous state
-  nvm_ref_previous_state = nvm_ref;
+  ref_advance();
   //compute new state
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
@@ -264,8 +273,7 @@ void tearing_sim_lftl_write_any(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*con
   //tearing_sim_lftl_write/tearing_sim_lftl_transaction_write_any do.
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   if(ctx->transaction_tracker == LFTL_INVALID_POINTER){
-    //update previous state
-    nvm_ref_previous_state = nvm_ref;
+    ref_advance();
     //compute new state
     uint8_t*dst = (uint8_t*)&nvm_ref;
     lftl_memread(dst+offset,src,size);
@@ -303,8 +311,7 @@ void tearing_sim_lftl_transaction_write_any(lftl_ctx_t*ctx,void*dst_nvm_addr, co
   lftl_transaction_write_any(ctx,dst_nvm_addr,src,size);
 }
 void tearing_sim_lftl_transaction_commit(lftl_ctx_t*ctx){
-  //update previous state
-  nvm_ref_previous_state = nvm_ref;
+  ref_advance();
   //copy transaction buffer to nvm
   uintptr_t offset = (uintptr_t)ctx->area - (uintptr_t)&nvm;
   uint8_t*src = (uint8_t*)&transaction_buf_ref;
@@ -329,15 +336,45 @@ bool nvm_is_equal(data_flash_t*expected){
   if(memcmp(&read_val.ewlfb_data,&expected->ewlfb_data,sizeof(nvm.ewlfb_data))) return 0;
   return 1;
 }
-void check_nvm(){
-  if(nvm_is_equal(&nvm_ref)) return;
-  if(nvm_is_equal(&nvm_ref_previous_state)) return;
-  PRINTF("NVM corrupted\n");
-  abort();
+//What an area reads after a simulated cut, against the reference model: the
+//state the interrupted operation was to produce, the one before it, or
+//neither. The operation touched one area, so the two references agree on the
+//others, which then read as new.
+typedef enum { AREA_NEW, AREA_OLD, AREA_CORRUPT } area_state_t;
+static area_state_t area_state(lftl_ctx_t*ctx, void*data, const void*ref, const void*prev, uintptr_t size){
+  uint8_t read_val[size];
+  lftl_read(ctx,read_val,data,size);
+  if(0 == memcmp(read_val,ref,size)) return AREA_NEW;
+  if(0 == memcmp(read_val,prev,size)) return AREA_OLD;
+  return AREA_CORRUPT;
 }
-void tearing_sim_check_nvm(){
-  //PRINTF("Simulated tearing\n");//too verbose
-  //simulate a reboot
+static const char*const checked_area_names[N_CHECKED_AREAS] = {"a","b","ewlfa","ewlfb"};
+static void nvm_states(area_state_t states[N_CHECKED_AREAS]){
+  states[0] = area_state(&nvma,&nvm.a_data,&nvm_ref.a_data,&nvm_ref_previous_state.a_data,sizeof(nvm.a_data));
+  states[1] = area_state(&nvmb,&nvm.b_data,&nvm_ref.b_data,&nvm_ref_previous_state.b_data,sizeof(nvm.b_data));
+  states[2] = area_state(&ewlfa,&nvm.ewlfa_data,&nvm_ref.ewlfa_data,&nvm_ref_previous_state.ewlfa_data,sizeof(nvm.ewlfa_data));
+  states[3] = area_state(&ewlfb,&nvm.ewlfb_data,&nvm_ref.ewlfb_data,&nvm_ref_previous_state.ewlfb_data,sizeof(nvm.ewlfb_data));
+}
+//One boot: every checked area reads the new state or the old one, and none
+//that read the new state since the reference last moved falls back to the old
+//one (the anti-tearing page's definition of a rollback)
+void check_nvm(){
+  area_state_t states[N_CHECKED_AREAS];
+  nvm_states(states);
+  for(unsigned int i=0;i<N_CHECKED_AREAS;i++){
+    if(AREA_CORRUPT == states[i]){
+      PRINTF("NVM corrupted: area %s reads neither the new state nor the old one\n",checked_area_names[i]);
+      abort();
+    }
+    if(AREA_NEW == states[i]){
+      area_seen_new[i] = 1;
+    } else if(area_seen_new[i]){
+      PRINTF("NVM rollback: area %s read the new state at an earlier boot and the old one now\n",checked_area_names[i]);
+      abort();
+    }
+  }
+}
+static void simulate_reboot(){
   nvma.data = LFTL_INVALID_POINTER;
   nvma.transaction_tracker = LFTL_INVALID_POINTER;
   nvmb.data = LFTL_INVALID_POINTER;
@@ -350,7 +387,17 @@ void tearing_sim_check_nvm(){
   nvmc.transaction_tracker = LFTL_INVALID_POINTER;
   nvmd.data = LFTL_INVALID_POINTER;
   nvmd.transaction_tracker = LFTL_INVALID_POINTER;
-  check_nvm();
+}
+//Boots in a row with no write in between: what a boot decides about the state
+//a cut left must hold at the next ones. With the simulator's fixed cut model
+//every boot reads the same words and decides the same, so one boot is enough;
+//a flash model where a word reads differently at each boot asks for more.
+static unsigned int n_check_boots = 1;
+void tearing_sim_check_nvm(){
+  for(unsigned int boot=0;boot<n_check_boots;boot++){
+    simulate_reboot();
+    check_nvm();
+  }
 }
 void tearing_sim_write_area(lftl_ctx_t*ctx, void*area_data, uintptr_t size){
   static uint8_t rng_state = 0x80;
@@ -2263,9 +2310,20 @@ void v010_compat_test(){
   SANITY_CHECK();
 }
 
+#ifdef HAS_TEARING_SIMULATION
+//A simulated cut is the status byte a callback returns on one of the three
+//low-level errors. LFTL_INTERNAL_ERROR (-1) ends in the same byte and is a bug
+//(a cross-check disagreement, in this build), never a cut.
+static bool is_simulated_tearing(uint32_t err_code){
+  return (err_code == (LFTL_ERROR_LOW_LEVEL_ERASE | SIMULATED_TEARING))
+      || (err_code == (LFTL_ERROR_LOW_LEVEL_WRITE | SIMULATED_TEARING))
+      || (err_code == (LFTL_ERROR_LOW_LEVEL_READ | SIMULATED_TEARING));
+}
+#endif
+
 void exception_handler(uint32_t err_code){
   #ifdef HAS_TEARING_SIMULATION
-  if((err_code & SIMULATED_TEARING) == SIMULATED_TEARING){
+  if(is_simulated_tearing(err_code)){
     //simulated tearing, see if we recover well, including for the next write
     tearing_sim_check_nvm();
     tearing_sim_write_after_recovery();

@@ -153,9 +153,9 @@ typedef void (*error_handler_t)(uint32_t err_code);
 typedef struct lftl_nvm_props_struct {
   void*base;            /**< the base address of the entire NVM */
   uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
-  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it: a power of two dividing `erase_size`, at most ::LFTL_WU_MAX_SIZE. On flash with ECC, at least the ECC codeword, so that each meta-data item is its own codeword (R2 of the "Flash requirements and assumptions" page) */
+  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it: a power of two dividing `erase_size`, at most ::LFTL_WU_MAX_SIZE. On flash with ECC, at least the ECC codeword, so that each meta-data item of a regular area, and each flag of an EWLF record, is its own codeword (R2 of the "Flash requirements and assumptions" page) */
   uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it; an area is whole erase units (R1 of the "Flash requirements and assumptions" page) */
-  bool zero_overwrite;  /**< true if the NVM accepts programming a write unit to all zeros whatever it currently holds, as the STM32L5 and STM32U5 document (N3 of the "Flash requirements and assumptions" page): lean-ftl then pins the words a power cut left weak, one word program at the first access after a reset, instead of leaving the decision to be made again at the next one. false, the value of a zeroed initializer, when the NVM does not or when it is unknown: lean-ftl then never programs a unit that is not erased. */
+  bool zero_overwrite;  /**< true if the NVM accepts programming a write unit to all zeros whatever it currently holds, as the STM32L5 and STM32U5 document (N3 of the "Flash requirements and assumptions" page): lean-ftl then pins words at the first access after a reset, in a regular area the one a power cut left weak, in an EWLF area the meta field of a record it rejects and, when no position is left for the copy that repairs a torn record, its flags, instead of leaving the decision to be made again at the next boot. false, the value of a zeroed initializer, when the NVM does not or when it is unknown: lean-ftl then never programs a unit that is not erased. */
   nvm_erase_t erase;    /**< Erase function for this area. */
   nvm_write_t write;    /**< Write function for this area. */
   nvm_read_t read;      /**< Read function for this area. */
@@ -301,7 +301,9 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx);
 /// that an EWLF area needs at least 2 erase units, and at least 2 records
 /// (the data plus a header each, see ::LFTL_EWLF_RECORD_SIZE) must fit in
 /// one erase unit. The NVM's erased bytes must read 0xFF (R6 of the "Flash
-/// requirements and assumptions" page).
+/// requirements and assumptions" page). The on-flash format of EWLF areas
+/// changed in v0.3.0: an area written by v0.2.0 is not read and must be
+/// formatted again.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////

@@ -122,11 +122,13 @@ An area declared with :c:macro:`LFTL_AREA_EWLF` must be registered with
 :c:func:`lftl_register_area_ewlf` instead of :c:func:`lftl_register_area`.
 Formatting, reading and writing work the same way as for a regular area,
 but EWLF areas do not support transactions: :c:func:`lftl_transaction_start`
-raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. A record, the area
-content plus a header, must fit in one page, and the NVM's erased bytes must
-read ``0xFF`` (R6 of :ref:`flash-required`). Use :c:func:`lftl_is_ewlf` if you need to tell,
-given a context, whether it refers to an EWLF area or a regular one. How EWLF areas work is
-described in :ref:`design-ewlf`.
+raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. At least two records,
+the area content plus a header each (:c:macro:`LFTL_EWLF_RECORD_SIZE`), must fit
+in one page, and the NVM's erased bytes must read ``0xFF`` (R6 of :ref:`flash-required`). Use
+:c:func:`lftl_is_ewlf` if you need to tell, given a context, whether it refers to an EWLF area or
+a regular one. How EWLF areas work is described in :ref:`design-ewlf`. Their on-flash format
+changed in v0.3.0: an EWLF area written by v0.2.0 is not read by later versions and must be
+formatted again (regular areas are unchanged since v0.1.0).
 
 Single LFTL area vs many
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -185,10 +187,10 @@ The integrator shall declare one :c:type:`lftl_nvm_props_t` for each targeted NV
 What ``write_size`` and ``erase_size`` may be, and what the NVM behind them must provide, is on
 the :ref:`flash` page (R1, R2). ``zero_overwrite`` says whether the flash accepts programming a
 write unit to all zeros whatever it currently holds (N3 there; the STM32L5 and STM32U5 document
-it): *lean-ftl* then pins the words a power cut left weak at the first access after a reset, one
-word program, instead of deciding about them again at every boot. Leave it false when the manual
-does not say. :ref:`design` describes the pins, and :ref:`design-without-pinning` what changes
-without them.
+it): *lean-ftl* then pins, at the first access after a reset, the words a power cut left weak in
+a regular area, and in an EWLF area the records it rejects, instead of deciding about them again
+at every boot. Leave it false when the manual does not say. :ref:`design` describes the pins, and
+:ref:`design-without-pinning` what changes without them.
 
 Implementing the callbacks
 -----------------------------

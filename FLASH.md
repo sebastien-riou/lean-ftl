@@ -217,9 +217,12 @@ all 0xFF, or when the data is all zeros (lines 121-126, "like STM32U5-class flas
 0xFF; the tearing simulator in `liblean-ftl-test/source/test.c` (`tearing_sim_nvm_write`) refuses
 the same writes so that tests only build states a real flash can hold. The geometry comes from
 `on/linux` and `testit`, today the CH32V307 values (4 KB pages, 2-byte write units; the STM32 values
-are there, commented out). It models no ECC and no weak cell; a simulated cut lands the whole write,
-then corrupts the bytes past a write-unit boundary (XOR 0x55) and reports the tear. The partially
-programmed words of the tear tests (24, 33, 34) are built by the tests themselves.
+are there, commented out). It models no ECC. In the regular areas a simulated cut lands the whole
+write, then corrupts the bytes past a write-unit boundary (XOR 0x55) and reports the tear; in the
+EWLF areas it leaves the write unit it lands in *weak*, reading differently at every read (as
+programmed, all erased, all zeros, or under a random mask: T2 without T3), the units after it
+untouched, until a program or an erase makes it solid again. The partially programmed words of the
+tear tests (24, 33, 34) are built by the tests themselves.
 
 ## 3. Status per target of the requirements and assumptions
 
@@ -233,10 +236,11 @@ The ids are those of the documentation page
 | R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum | 1 B minimum |
 | R3, N3 | Between two erases every write unit is programmed once; the library re-programs a unit only where `zero_overwrite` is declared, and only to all zeros | slot and record layouts; `LFTL_ERROR_TRANSACTION_OVERWRITE` | by construction | by construction | by construction | by construction |
 | N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan, only on an NVM declared with `zero_overwrite`; the Linux simulator | doc; all-zero target open | doc; same | — to measure | — outside the spec |
+| N3 (opt-in) | All zeros can be programmed over a write unit that already reads all zeros | the stuck-state pin of the EWLF scan when `LFTL_EWLF_PIN_OVER_ZEROS` is set; without it a flag that read all zeros is left alone, a residual | open point 2 | open point 2 | — | — |
 | R2, R7 | `write_size` is at least the ECC codeword, so an item is one codeword and a torn program spoils only its own unit | `write_size` doc in `lean-ftl.h`; T1.13 | 16 B = codeword | 8 B = codeword | n/a | n/a |
 | R7, T5 | A double-bit ECC error raises an NMI rather than returning a wrong value; a weak word may do so until it is erased or pinned | T1.13; the integrator guide | doc | doc | n/a | n/a |
 | T1 | A cut during a program or erase leaves only the unit being written undefined; other units keep their content | anti-tearing, O1 and O2 of `THREAT-MODEL.md` | "not guaranteed" for the accessed content; others not stated | same | not stated | "may become corrupted" for the unit; others not stated |
-| T2, T3, T4 | A unit left by a cut may be weak: read differently at different times and drift toward erased; 16 programmed bits once read correctly never read all erased; a weakly erased unit may read all erased, then show programmed bits | LFTL-011, the [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual) | not documented by any vendor; a physics assumption | same | same | same |
+| T2, T3, T4 | A unit left by a cut may be weak: read differently at different times and drift toward erased; 16 programmed bits once read correctly never read all erased (T3, relied on by regular areas only); a weakly erased unit may read all erased, then show programmed bits | the [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual) | not documented by any vendor; a physics assumption | same | same | same |
 | R5 | Erase and program are blocking and finish; a reset or cut is the only interruption | the accessors poll BSY or ISPGO | doc | doc | doc | suspend exists but a port would not use it |
 | N4 | Endurance used in wear estimates: 10 k cycles per erase unit (a figure the library does not rely on) | T1.5; LFTL-010 | 10 k (100 k on at most 32 pages per bank) | — | — | 100 k |
 
@@ -256,8 +260,11 @@ Two consequences of the ECC rows, now T5 on the page:
    a reset behaves like the STM32 one ("may no longer be writable"). Needed before the M5531 port,
    and before the pinning of the scan ([documentation](https://lean-ftl.readthedocs.io/en/latest/design.html#design-common)) can claim that target.
 2. **STM32: all zeros over all zeros.** 7.3.7/6.3.7 allow it, the PROGERR bullet lists it as an
-   error. Measure once on each board (PROGERR set or not; the accessor's read-back passes either
-   way). It only matters for a repeated pin.
+   error. Measure once on each board: PROGERR set or not (the accessor's read-back passes either
+   way, so only the flag tells whether the pulse was applied). It decides the stuck-state pin of
+   the EWLF scan: accepted, `LFTL_EWLF_PIN_OVER_ZEROS` can be set for the part and the scan has no
+   residual; refused, a flag that read all zeros is left alone, the residual of the
+   [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual).
 3. **Endurance and retention of the STM32L5 and M5531.** In their datasheets, not in the folder;
    LFTL-010 and T1.5 use 10 k cycles for every target.
 4. **STM32U5 FLASH_OPSR.** After a system reset it names the interrupted operation and its address.

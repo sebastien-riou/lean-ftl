@@ -11,7 +11,7 @@ If this assumption holds:
     - That number of erase is meta data's `version` field divided by the number of erase units in that area.
 - for EWLF areas:
     - All erase units within one area are likely to have seen a similar number of erase.
-    - That number of erase is the meta data's `version` field divided by the number of erase units in that area and further divided by how many records are packed into one erase unit.
+    - That number of erase is the meta data's `version` field divided by the number of erase units in that area and further divided by how many records are packed into one erase unit. A record the scan copied forward after a power cut takes a version number like an update does.
 
 ### API
 `void lftl_health_status(lftl_ctx_t*ctx, uint32_t*n_erase)`

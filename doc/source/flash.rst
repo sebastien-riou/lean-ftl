@@ -32,15 +32,17 @@ value matches the hardware is not checkable (R8).
 **R2. One write size.**
 ``write_size`` is the write unit of the whole area: a power of two, dividing ``erase_size``, at
 most :c:macro:`LFTL_WU_MAX_SIZE` (128 bytes). The data of a regular area is whole write units. On
-flash with ECC, ``write_size`` is at least the ECC codeword, so that each meta-data item is one
-codeword. Enforced by registration (:c:macro:`LFTL_ERROR_BAD_CONFIG`,
+flash with ECC, ``write_size`` is at least the ECC codeword, so that each meta-data item of a
+regular area, and each flag of an EWLF record, is one codeword; the meta field of an EWLF record
+may span two, and is validated as a whole. Enforced by registration (:c:macro:`LFTL_ERROR_BAD_CONFIG`,
 :c:macro:`LFTL_ERROR_WU_SIZE_TOO_LARGE`), except the ECC part.
 
 **R3. An erased write unit accepts one program of any value.**
 *lean-ftl* programs each write unit at most once between two erases, whole units only, aligned,
 possibly several units per call, with one exception that only a flash declared with
-``zero_overwrite`` gets: a program of all zeros over a word a power cut left weak (N3). The source
-may be unaligned RAM, or NVM that does not overlap the destination (:c:type:`nvm_write_t`).
+``zero_overwrite`` gets: a program of all zeros over a word a power cut left weak, or over a
+programmed meta field the scan tombstones (N3). The source may be unaligned RAM, or NVM that does
+not overlap the destination (:c:type:`nvm_write_t`).
 
 **R4. Reads of any byte range.**
 Any size at any alignment, through the memory map or :c:type:`nvm_read_t`, without side effect on
@@ -92,10 +94,15 @@ which is what makes flash that refuses to program a non-erased word (STM32L5, ST
 One exception is opt-in. A flash whose manual documents the program of all zeros over a programmed
 word (the STM32L5 and STM32U5 do; the M5531's does not say; the W25Q32RV's specifies programming
 for erased locations only) can be declared with ``zero_overwrite`` in :c:type:`lftl_nvm_props_t`:
-*lean-ftl* then *pins* the one word a power cut can leave weak, programming its write unit to
-zeros at the first access after a reset, so that no later boot decides otherwise about it, and
-never re-programs a unit that already reads all zeros. Left false, the value of a zeroed
-initializer, *lean-ftl* never programs a unit that is not erased and the scan writes nothing.
+*lean-ftl* then *pins* words at the first access after a reset, programming their write unit to
+zeros so that no later boot decides otherwise about them: in a regular area the one word a power
+cut can leave weak; in an EWLF area the meta field of an aborted record (a tombstone) and, when no
+position is left for the copy that repairs a torn record, its two flags. It never re-programs a
+unit that already reads all zeros, unless the build declares that the flash accepts it
+(``LFTL_EWLF_PIN_OVER_ZEROS``, the stuck state of :ref:`design-ewlf-scan`). Left false, the value
+of a zeroed initializer, *lean-ftl* never programs a unit that is not erased, and the scan of a
+regular area writes nothing; the scan of an EWLF area still copies a torn record forward, which
+programs erased units only.
 
 **N4. Advanced features and figures.**
 Read-while-write, suspend and resume, hardware verify, CRC or all-one checks, program and erase
@@ -129,11 +136,13 @@ fully programmed at one boot may read all erased at a later one.
 **T3. Exception: at least 16 programmed bits, once read correctly.**
 If the data written has at least 16 programmed bits (a Hamming weight of 16 or more in programmed
 cells) and the weak unit once read correctly, it may later read incorrectly but never all erased.
-Three consequences. A 32-bit checksum alone does not guarantee the weight (about 16 programmed
-bits on average, often fewer). The zero padding that fills an 8- or 16-byte meta-data item
-supplies it on the STM32L5 and STM32U5; 2-byte write units (CH32V307, the Linux test geometry) get
-it only from an all-zero unit. On flash with ECC, "read correctly" includes a corrected single-bit
-error: the first cell that flips is invisible to the software.
+Regular areas rely on it for one case, their ``checksum2`` read complete at one boot and erased
+at a later one (:ref:`design-residual`); EWLF areas do not rely on it at all. Three consequences
+for regular areas. A 32-bit checksum alone does not guarantee the weight (about 16 programmed bits
+on average, often fewer). The zero padding that fills an 8- or 16-byte meta-data item supplies it
+on the STM32L5 and STM32U5; 2-byte write units (CH32V307, the Linux test geometry) do not get it.
+On flash with ECC, "read correctly" includes a corrected single-bit error: the first cell that
+flips is invisible to the software.
 
 **T4. A weakly erased unit may read all erased, then not.**
 Yes, this is assumed. An interrupted erase can leave cells just over the threshold on the erased

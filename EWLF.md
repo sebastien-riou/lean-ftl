@@ -277,10 +277,9 @@ STM32L5 and STM32U5, only the ECC codeword point.
 | Header, 1-byte write unit | 21 | 13 | 17 |
 | Records of 16 bytes per unit: STM32U5, STM32L5, M5531, CH32V307, W25Q32RV | 85, 36, 204, 102, 102 | 102, 42, 256, 136, 141 | 85, 36, 227, 120, 124 |
 
-Recommendation: the middle column. Drop the magic and the pad, keep the start marker as it is, add the `0xFFFFFFFF`
-rule to `ewlf_record_state()`; nothing else in the scan or the write path changes. The reserved word is worth its
-unit only where a target without `zero_overwrite` is a deployment rather than a port; it is then the taken-pin,
-programmed by the scan when it takes a record whose end marker read partially programmed, and by nothing else.
+Recommendation at the time: the middle column. Superseded by "Two flags, repair by copy, sticky abort" below,
+which takes the third column, with a 64-bit checksum in a single meta field: the second word is what makes the
+scan rollback-free without T3.
 
 ## Support for extended transactions
 EWLF could be the base to support extended transactions which can involve data from several areas, including EWLF areas.

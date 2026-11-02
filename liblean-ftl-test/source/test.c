@@ -2546,6 +2546,533 @@ static bool is_simulated_tearing(uint32_t err_code){
       || (err_code == (LFTL_ERROR_LOW_LEVEL_WRITE | SIMULATED_TEARING))
       || (err_code == (LFTL_ERROR_LOW_LEVEL_READ | SIMULATED_TEARING));
 }
+
+//--- EWLF v2 under weak words without T3, with two cuts in a row: the cases
+//the anti-tearing page's argument for EWLF areas rests on (the residual
+//table of the documentation), as regression tests.
+
+//The reading of a scripted weak write unit, the same at every read of a
+//boot: what its program meant to leave (the unit comes pre-filled with it),
+//all erased, all zeros, or given bytes
+typedef enum { WEAK_INTENDED, WEAK_ERASED, WEAK_ZEROS, WEAK_VALUE } weak_mode_t;
+#define WEAK_SCRIPT_MAX 8
+static struct {
+  const void*unit;
+  weak_mode_t mode;
+  uint8_t value[LFTL_WU_MAX_SIZE];
+} weak_script[WEAK_SCRIPT_MAX];
+static unsigned int n_weak_script;
+static bool weak_script_reading(const void*unit_nvm_addr, uint8_t*unit, uintptr_t size){
+  for(unsigned int i=0;i<n_weak_script;i++){
+    if(unit_nvm_addr != weak_script[i].unit) continue;
+    switch(weak_script[i].mode){
+      case WEAK_ERASED: memset(unit,0xFF,size); break;
+      case WEAK_ZEROS: memset(unit,0x00,size); break;
+      case WEAK_VALUE: memcpy(unit,weak_script[i].value,size); break;
+      default: break;
+    }
+    return true;
+  }
+  return false;
+}
+static void weak_script_clear(){
+  n_weak_script = 0;
+}
+static void weak_script_set(const void*unit, weak_mode_t mode, const uint8_t*value){
+  unsigned int i = 0;
+  while((i < n_weak_script) && (unit != weak_script[i].unit)) i++;
+  if(WEAK_SCRIPT_MAX == i) throw_exception(INTERNAL_ERROR_CORRUPT);
+  if(i == n_weak_script) n_weak_script++;
+  weak_script[i].unit = unit;
+  weak_script[i].mode = mode;
+  if(WEAK_VALUE == mode) memcpy(weak_script[i].value,value,nvm_write_size);
+}
+
+//a statement that must end in a simulated cut
+#define EXPECT_CUT(stmt) do{\
+    jmp_buf __saved_ctx;\
+    memcpy(__saved_ctx, exception_ctx, sizeof(jmp_buf));\
+    uint32_t __err_code = setjmp(exception_ctx);\
+    if(0 == __err_code){\
+      stmt;\
+      memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
+      PRINTF("ERROR: expected a simulated cut but none happened, line %d\n",__LINE__);\
+      fail_abort();\
+    }\
+    memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
+    if(!is_simulated_tearing(__err_code)){\
+      PRINTF("ERROR: expected a simulated cut but got 0x%08x, line %d\n",(unsigned)__err_code,__LINE__);\
+      fail_abort();\
+    }\
+  }while(0)
+//a statement that may end in a simulated cut; `cut` tells whether it did
+#define MAYBE_CUT(cut, stmt) do{\
+    jmp_buf __saved_ctx;\
+    memcpy(__saved_ctx, exception_ctx, sizeof(jmp_buf));\
+    uint32_t __err_code = setjmp(exception_ctx);\
+    if(0 == __err_code){\
+      stmt;\
+      cut = 0;\
+    } else {\
+      if(!is_simulated_tearing(__err_code)){\
+        PRINTF("ERROR: unexpected error 0x%08x, line %d\n",(unsigned)__err_code,__LINE__);\
+        fail_abort();\
+      }\
+      cut = 1;\
+    }\
+    memcpy(exception_ctx, __saved_ctx, sizeof(jmp_buf));\
+  }while(0)
+
+//An unregistered EWLF area over the pages of a registered one, with NVM
+//properties that count erases, under the weak word model with scripted
+//readings. Every record write is 5 program calls, start marker, data, meta
+//field, flag-a, flag-b, 6 when it rolls over (the erase first).
+#define EWLF_CALL_START 0
+#define EWLF_CALL_DATA 1
+#define EWLF_CALL_META 2
+#define EWLF_CALL_FLAG_A 3
+#define EWLF_CALL_FLAG_B 4
+typedef struct {
+  lftl_ctx_t ctx;
+  lftl_nvm_props_t props;
+  ewlf_layout_t l;
+  uint8_t*area;
+  uintptr_t erase_size;
+  unsigned int n_units;
+  unsigned int records_per_unit;
+  bool model_was_on;
+} ewlf_scratch_t;
+static void ewlf_scratch_init(ewlf_scratch_t*s, const lftl_ctx_t*base, const lftl_nvm_props_t*props, unsigned int records_per_unit){
+  s->props = *props;
+  s->props.erase = counting_nvm_erase;
+  s->props.next = LFTL_INVALID_POINTER;
+  s->ctx = *base;
+  s->ctx.nvm_props = &s->props;
+  s->ctx.data = LFTL_INVALID_POINTER;
+  s->ctx.data_size = 64; //for the header size, which does not depend on it
+  s->ctx.transaction_tracker = LFTL_INVALID_POINTER;
+  s->ctx.next = LFTL_INVALID_POINTER;
+  s->ctx.area_type = LFTL_AREA_TYPE_EWLF;
+  s->l = ewlf_layout(&s->ctx);
+  s->erase_size = s->props.erase_size;
+  const uint32_t write_size = s->props.write_size;
+  s->ctx.data_size = ((s->erase_size / records_per_unit - s->l.header_size) / write_size) * write_size;
+  s->l = ewlf_layout(&s->ctx);
+  s->area = (uint8_t*)s->ctx.area;
+  s->n_units = s->ctx.area_size / s->erase_size;
+  s->records_per_unit = s->erase_size / s->l.record_size;
+  if(s->records_per_unit != records_per_unit) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+  s->model_was_on = nvm_weak_model;
+  nvm_weak_model = 1;
+  tearing_sim_weak_scope_add(s->ctx.area,s->ctx.area_size);
+  nvm_weak_override = weak_script_reading;
+  weak_script_clear();
+  tearing_sim_weak_reseed(0x5EED);
+  counted_erases = 0;
+}
+static void ewlf_scratch_end(ewlf_scratch_t*s){
+  weak_script_clear();
+  nvm_weak_override = 0;
+  tearing_sim_weak_scope_pop();
+  nvm_weak_model = s->model_was_on;
+  tearing_sim_clear_call_target();
+}
+//the record at position `index` of a unit, 0 being the top one
+static uint8_t*ewlf_scratch_record(const ewlf_scratch_t*s, unsigned int unit, unsigned int index){
+  return s->area + unit*s->erase_size + s->erase_size - (index+1)*s->l.record_size;
+}
+static uint8_t*ewlf_scratch_current(const ewlf_scratch_t*s){
+  return (uint8_t*)s->ctx.data - s->l.header_size;
+}
+//a write cut at a program call, at its last write unit
+static void ewlf_scratch_cut_write(ewlf_scratch_t*s, const uint8_t*d, unsigned int call){
+  tearing_sim_set_call_target(call,true);
+  EXPECT_CUT(lftl_write(&s->ctx,s->area,d,s->ctx.data_size));
+  tearing_sim_clear_call_target();
+}
+//a boot: reset, then a read that must return `expected`
+static void ewlf_scratch_boot(ewlf_scratch_t*s, const uint8_t*expected){
+  tearing_sim_weak_new_boot();
+  s->ctx.data = LFTL_INVALID_POINTER;
+  read_and_check(&s->ctx,s->area,expected,s->ctx.data_size);
+}
+//a boot whose scan is cut at one of its program calls
+static void ewlf_scratch_cut_boot(ewlf_scratch_t*s, unsigned int call){
+  uint8_t buf[s->ctx.data_size];
+  tearing_sim_weak_new_boot();
+  s->ctx.data = LFTL_INVALID_POINTER;
+  tearing_sim_set_call_target(call,true);
+  EXPECT_CUT(lftl_read(&s->ctx,buf,s->area,s->ctx.data_size));
+  tearing_sim_clear_call_target();
+}
+static bool ewlf_scratch_meta_valid(const ewlf_scratch_t*s, const uint8_t*record, uint32_t version){
+  return ewlf_raw_version(&s->ctx,record) == version;
+}
+#define EWLF_CHECK(cond) do{ if(!(cond)){ PRINTF("ERROR: %s, line %d\n",#cond,__LINE__); throw_exception(ERROR_VERIFICATION_FAIL); } }while(0)
+
+//H1: a write cut in flag-b at the top of a unit is exposed when flag-b reads
+//a bit, copied when it reads erased; the copy is cut; when no room is left the
+//half record is pinned in place, never tombstoned, and the data stays.
+static void ewlf_h1_test(ewlf_scratch_t*s){
+  DEBUG_PRINTLN(__func__);
+  const bool pinning = s->props.zero_overwrite;
+  const uintptr_t size = s->ctx.data_size;
+  uint8_t d2[size], d3[size];
+  lftl_format(&s->ctx); //v1 at the top of the last unit
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size); //v2 below it
+  stateful_prng_fill(d3,size);
+  ewlf_scratch_cut_write(s,d3,1+EWLF_CALL_FLAG_B); //v3 rolls over to the top of the unit below, cut in flag-b
+  uint8_t*const V3 = ewlf_scratch_record(s,s->n_units-2,0);
+  EWLF_CHECK(tearing_sim_is_weak(ewlf_raw_flag_b(&s->l,V3),s->l.flag_size));
+  //boot 1: flag-b reads as programmed: complete, exposed
+  weak_script_set(ewlf_raw_flag_b(&s->l,V3),WEAK_INTENDED,0);
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == V3);
+  //boot 2: flag-b reads erased: half, copied below; the copy's flag-b is cut
+  weak_script_set(ewlf_raw_flag_b(&s->l,V3),WEAK_ERASED,0);
+  ewlf_scratch_cut_boot(s,EWLF_CALL_FLAG_B);
+  uint8_t*const C1 = ewlf_scratch_record(s,s->n_units-2,1);
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,C1,4));
+  EWLF_CHECK(tearing_sim_is_weak(ewlf_raw_flag_b(&s->l,C1),s->l.flag_size));
+  //boot 3: both flag-b read erased: the copy is the newest half record, no
+  //room below it, the unit above holds the complete record: pinned in place
+  weak_script_set(ewlf_raw_flag_b(&s->l,C1),WEAK_ERASED,0);
+  counted_erases = 0;
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  EWLF_CHECK(0 == counted_erases);
+  EWLF_CHECK(pinning != tearing_sim_is_weak(ewlf_raw_flag_b(&s->l,C1),s->l.flag_size));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,V3,3)); //no half record tombstoned
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,C1,4));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,ewlf_scratch_record(s,s->n_units-1,1),2)); //the complete record untouched
+  //boot 4: nothing scripted, the copy is complete for good
+  weak_script_clear();
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  EWLF_CHECK(0 == counted_erases);
+}
+
+//H2: a chain of copies, each cut in flag-a, rolls over into the next unit but
+//never into the unit of the complete record; when it is stuck the newest half
+//record is pinned in place and the data stays. On a 3-unit area with 2
+//records per unit, the chain spans two units.
+static void ewlf_h2_test(ewlf_scratch_t*s){
+  DEBUG_PRINTLN(__func__);
+  const bool pinning = s->props.zero_overwrite;
+  const uintptr_t size = s->ctx.data_size;
+  if(s->n_units < 3) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+  uint8_t d2[size], d3[size];
+  lftl_format(&s->ctx);
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size);
+  stateful_prng_fill(d3,size);
+  ewlf_scratch_cut_write(s,d3,1+EWLF_CALL_FLAG_B); //v3 at the top of unit n-2, flag-b weak
+  const unsigned int u = s->n_units-2;
+  uint8_t*const V3 = ewlf_scratch_record(s,u,0);
+  weak_script_set(ewlf_raw_flag_b(&s->l,V3),WEAK_INTENDED,0);
+  ewlf_scratch_boot(s,d3); //exposed
+  weak_script_set(ewlf_raw_flag_b(&s->l,V3),WEAK_ERASED,0);
+  ewlf_scratch_cut_boot(s,EWLF_CALL_FLAG_A); //C1 below v3, cut in flag-a
+  uint8_t*const C1 = ewlf_scratch_record(s,u,1);
+  weak_script_set(ewlf_raw_flag_a(&s->l,C1),WEAK_INTENDED,0);
+  counted_erases = 0;
+  ewlf_scratch_cut_boot(s,1+EWLF_CALL_FLAG_A); //C2 rolls over to unit n-3, erased first, cut in flag-a
+  EWLF_CHECK(1 == counted_erases);
+  uint8_t*const C2 = ewlf_scratch_record(s,u-1,0);
+  weak_script_set(ewlf_raw_flag_a(&s->l,C2),WEAK_INTENDED,0);
+  ewlf_scratch_cut_boot(s,EWLF_CALL_FLAG_A); //C3 below C2, cut in flag-a
+  uint8_t*const C3 = ewlf_scratch_record(s,u-1,1);
+  weak_script_set(ewlf_raw_flag_a(&s->l,C3),WEAK_INTENDED,0);
+  //stuck: the next unit in write order holds the complete record v2
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C3);
+  EWLF_CHECK(1 == counted_erases);
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,ewlf_scratch_record(s,s->n_units-1,0),1));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,ewlf_scratch_record(s,s->n_units-1,1),2));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,V3,3));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,C1,4));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,C2,5));
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,C3,6));
+  if(pinning) EWLF_CHECK(ewlf_raw_is_all(ewlf_raw_flag_b(&s->l,C3),s->l.flag_size,0));
+  //nothing scripted: with the pin, C3 is complete for good and nothing moves;
+  //without, whichever record of the chain reads as the newest half one is
+  //shown, and the chain may grow again from v3, whose flag-a is solid: all
+  //hold d3
+  weak_script_clear();
+  ewlf_scratch_boot(s,d3);
+  if(pinning){
+    EWLF_CHECK(ewlf_scratch_current(s) == C3);
+    EWLF_CHECK(1 == counted_erases);
+  }
+}
+
+//H3: a tombstone cut in its first program leaves a weak unit in the meta
+//field of an aborted record, the checksum's; at a later boot the field reads
+//as written again and flag-a reads programmed: the record is half, and its
+//copy is numbered above every valid record, not from a re-read field.
+static void ewlf_h3_test(ewlf_scratch_t*s){
+  DEBUG_PRINTLN(__func__);
+  const uintptr_t size = s->ctx.data_size;
+  const uint32_t write_size = s->props.write_size;
+  if(!s->props.zero_overwrite) return; //no tombstone without zero overwrite
+  uint8_t d2[size], d3[size];
+  lftl_format(&s->ctx);
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size);
+  stateful_prng_fill(d3,size);
+  ewlf_scratch_cut_write(s,d3,1+EWLF_CALL_FLAG_A); //v3 at the top of the unit below, flag-a weak
+  uint8_t*const V3 = ewlf_scratch_record(s,s->n_units-2,0);
+  //the last unit of the meta field, the first one a tombstone programs
+  uint8_t*const last_meta_unit = ewlf_raw_meta(&s->l,V3) + s->l.meta_size - write_size;
+  uint8_t original[write_size];
+  ewlf_raw_read(original,last_meta_unit,write_size);
+  //boot 1: flag-a reads erased: aborted, tombstoned, the tombstone cut at once
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_ERASED,0);
+  ewlf_scratch_cut_boot(s,0);
+  EWLF_CHECK(tearing_sim_is_weak(last_meta_unit,write_size));
+  //boot 2: the weak unit reads as written, flag-a reads programmed: half,
+  //copied, numbered 4
+  weak_script_set(last_meta_unit,WEAK_VALUE,original);
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_ZEROS,0);
+  ewlf_scratch_boot(s,d3);
+  uint8_t*const C1 = ewlf_scratch_record(s,s->n_units-2,1);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,C1,4));
+  //boot 3: nothing scripted: the copy stays, whatever v3 reads
+  weak_script_clear();
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+}
+
+//H4: an aborted write whose tombstone was cut reads as no record when the
+//next write is numbered: the write path tombstones it for good as it steps
+//over it, so that the new record, numbered the same, is never confused with
+//it. The new write is cut in flag-b and read back at every boot. On 3 records
+//per unit, so that the aborted record is stepped over rather than erased.
+static void ewlf_h4_test(ewlf_scratch_t*s){
+  DEBUG_PRINTLN(__func__);
+  const bool pinning = s->props.zero_overwrite;
+  const uintptr_t size = s->ctx.data_size;
+  const uint32_t write_size = s->props.write_size;
+  if(s->records_per_unit < 3) throw_exception(INTERNAL_ERROR_CORRUPT); //test assumption
+  uint8_t d2[size], d3[size], d4[size];
+  lftl_format(&s->ctx);
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size); //v2, second position of the last unit
+  stateful_prng_fill(d3,size);
+  ewlf_scratch_cut_write(s,d3,EWLF_CALL_FLAG_A); //v3, third position, flag-a weak
+  uint8_t*const S3 = ewlf_scratch_record(s,s->n_units-1,2);
+  uint8_t*const last_meta_unit = ewlf_raw_meta(&s->l,S3) + s->l.meta_size - write_size;
+  //boot 1: aborted; with zero overwrite the tombstone is cut at once
+  weak_script_set(ewlf_raw_flag_a(&s->l,S3),WEAK_ERASED,0);
+  if(pinning) ewlf_scratch_cut_boot(s,0);
+  //boot 2: the meta field reads garbage, v2 is exposed; the next write steps
+  //over v3 and, with zero overwrite, tombstones it for good; it rolls over
+  if(pinning) weak_script_set(last_meta_unit,WEAK_ERASED,0);
+  ewlf_scratch_boot(s,d2);
+  stateful_prng_fill(d4,size);
+  //with zero overwrite the write first tombstones v3's meta field as it
+  //steps over it, one program per unit that does not read all zeros (its
+  //start marker already reads zeros): the cut is counted past those programs
+  unsigned int pins = 0;
+  if(pinning){
+    uint8_t meta[s->l.meta_size];
+    ewlf_raw_read(meta,ewlf_raw_meta(&s->l,S3),s->l.meta_size);
+    for(uintptr_t u=0;u<s->l.meta_size;u+=write_size){
+      for(uintptr_t i=0;i<write_size;i++) if(meta[u+i]){ pins++; break; }
+    }
+  }
+  ewlf_scratch_cut_write(s,d4,pins+1+EWLF_CALL_FLAG_B);
+  uint8_t*const R = ewlf_scratch_record(s,s->n_units-2,0);
+  if(pinning){
+    EWLF_CHECK(ewlf_raw_is_all(ewlf_raw_meta(&s->l,S3),s->l.meta_size,0));
+    EWLF_CHECK(ewlf_scratch_meta_valid(s,R,3)); //the number reused
+  } else {
+    EWLF_CHECK(ewlf_scratch_meta_valid(s,R,4)); //numbered above the aborted record, still valid
+  }
+  //boot 3: flag-b reads a bit: exposed. boot 4: it reads erased, and v3's
+  //flag-a reads programmed: the new record is the one copied and shown
+  weak_script_set(ewlf_raw_flag_b(&s->l,R),WEAK_INTENDED,0);
+  ewlf_scratch_boot(s,d4);
+  EWLF_CHECK(ewlf_scratch_current(s) == R);
+  weak_script_set(ewlf_raw_flag_b(&s->l,R),WEAK_ERASED,0);
+  weak_script_set(ewlf_raw_flag_a(&s->l,S3),WEAK_ZEROS,0);
+  weak_script_set(last_meta_unit,WEAK_INTENDED,0);
+  ewlf_scratch_boot(s,d4);
+  weak_script_clear();
+  ewlf_scratch_boot(s,d4);
+}
+
+//Two more sequences: a kill (tombstone) and a repair (copy) on the same record
+//never disagree about what is shown, and a weak flag-a that reads all zeros is
+//copied, not trusted in place.
+static void ewlf_counter_examples_test(ewlf_scratch_t*s){
+  DEBUG_PRINTLN(__func__);
+  const uintptr_t size = s->ctx.data_size;
+  uint8_t d2[size], d3[size];
+  //CE1: cut in flag-a; flag-a reads a bit: copied, the copy cut in flag-b;
+  //then flag-a reads erased and the copy's flag-b too: the copy is half with
+  //a solid flag-a, newest, stuck, pinned; the source, aborted, is older than
+  //the copy and left alone
+  lftl_format(&s->ctx);
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size);
+  stateful_prng_fill(d3,size);
+  ewlf_scratch_cut_write(s,d3,1+EWLF_CALL_FLAG_A);
+  uint8_t*const V3 = ewlf_scratch_record(s,s->n_units-2,0);
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_INTENDED,0);
+  ewlf_scratch_cut_boot(s,EWLF_CALL_FLAG_B);
+  uint8_t*const C1 = ewlf_scratch_record(s,s->n_units-2,1);
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_ERASED,0);
+  weak_script_set(ewlf_raw_flag_b(&s->l,C1),WEAK_ERASED,0);
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,V3,3));
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,V3,3));
+  weak_script_clear();
+  ewlf_scratch_boot(s,d3);
+  //CE2: cut in flag-a; flag-a reads all zeros: copied all the same; then it
+  //reads erased: aborted, older than the copy, left alone
+  lftl_format(&s->ctx);
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size);
+  stateful_prng_fill(d3,size);
+  ewlf_scratch_cut_write(s,d3,1+EWLF_CALL_FLAG_A);
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_ZEROS,0);
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  EWLF_CHECK(ewlf_raw_is_all(ewlf_raw_flag_b(&s->l,C1),s->l.flag_size,0));
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_ERASED,0);
+  ewlf_scratch_boot(s,d3);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  EWLF_CHECK(ewlf_scratch_meta_valid(s,V3,3));
+  weak_script_clear();
+  ewlf_scratch_boot(s,d3);
+  //lftl_erase_all cut in flag-a: the copy of the erased record reads erased
+  lftl_format(&s->ctx);
+  stateful_prng_fill(d2,size);
+  lftl_write(&s->ctx,s->area,d2,size);
+  //an erase_all programs no data: erase, start marker, meta field, flag-a
+  tearing_sim_set_call_target(3,true);
+  EXPECT_CUT(lftl_erase_all(&s->ctx));
+  tearing_sim_clear_call_target();
+  weak_script_set(ewlf_raw_flag_a(&s->l,V3),WEAK_INTENDED,0);
+  uint8_t erased[size];
+  memset(erased,0xFF,size);
+  ewlf_scratch_boot(s,erased);
+  EWLF_CHECK(ewlf_scratch_current(s) == C1);
+  weak_script_clear();
+  ewlf_scratch_boot(s,erased);
+}
+
+void ewlf_two_cuts_test(){
+  DEBUG_PRINTLN(__func__);
+  ewlf_scratch_t s;
+  //2 units of 2 records, over nvmd's pages
+  ewlf_scratch_init(&s,&nvmd,&nvm_props3,2);
+  ewlf_h1_test(&s);
+  ewlf_h3_test(&s);
+  ewlf_counter_examples_test(&s);
+  ewlf_scratch_end(&s);
+  //2 units of 3 records
+  ewlf_scratch_init(&s,&nvmd,&nvm_props3,3);
+  ewlf_h4_test(&s);
+  ewlf_scratch_end(&s);
+  //3 units of 2 records, over ewlfa's pages
+  ewlf_scratch_init(&s,&ewlfa,&nvm_props,2);
+  ewlf_h2_test(&s);
+  ewlf_scratch_end(&s);
+  format_func(&nvmd); //resync nvm_ref with the pages used
+  format_func(&ewlfa);
+  SANITY_CHECK();
+}
+
+//Random writes cut at random programs, boots with random weak readings and a
+//second cut at a random program of the scan: after every boot the data read
+//is one of the last writes, never older than one already shown, and never
+//older than the last write that completed. On 2 units of 3 records over
+//nvmd's pages, with the scans cross-checked by the build. Skipped without
+//zero overwrite: the stuck state is then a documented residual.
+void ewlf_weak_stress_test(){
+  DEBUG_PRINTLN(__func__);
+  if(!nvm_props3.zero_overwrite) return;
+  ewlf_scratch_t s;
+  ewlf_scratch_init(&s,&nvmd,&nvm_props3,3);
+  const uintptr_t size = s.ctx.data_size;
+  #define STRESS_HISTORY 8
+  uint8_t history[STRESS_HISTORY][size];
+  unsigned int seq = 0;             //the last write, history[seq % STRESS_HISTORY]
+  unsigned int last_complete = 0;   //the last write that completed
+  unsigned int last_shown = 0;      //the last write a boot showed
+  xs_prng_set_seed(0x57E55);
+  lftl_format(&s.ctx);
+  memset(history[0],0xFF,size); //a formatted area reads erased
+  for(unsigned int it=0;it<300;it++){
+    //a write, cut at a random program with probability 1/2
+    seq++;
+    uint8_t*const d = history[seq % STRESS_HISTORY];
+    stateful_prng_fill(d,size);
+    const uint32_t r = xs_prng_get();
+    if(r & 1){
+      lftl_write(&s.ctx,s.area,d,size);
+      last_complete = seq;
+    } else {
+      tearing_sim_set_call_target((r >> 1) % 6,(r >> 4) & 1);
+      bool cut;
+      MAYBE_CUT(cut,lftl_write(&s.ctx,s.area,d,size));
+      tearing_sim_clear_call_target();
+      if(!cut) last_complete = seq; //the call did not happen: no rollover
+    }
+    //boots, each with its own weak readings, some with a second cut
+    const unsigned int n_boots = 1 + (xs_prng_get() % 3);
+    for(volatile unsigned int boot=0;boot<n_boots;boot++){
+      const uint32_t b = xs_prng_get();
+      tearing_sim_weak_reseed(((uint64_t)it << 8) | boot);
+      tearing_sim_weak_new_boot();
+      s.ctx.data = LFTL_INVALID_POINTER;
+      if(0 == (b & 3)) tearing_sim_set_call_target((b >> 2) % 8,(b >> 5) & 1);
+      uint8_t buf[size];
+      bool cut;
+      MAYBE_CUT(cut,lftl_read(&s.ctx,buf,s.area,size));
+      tearing_sim_clear_call_target();
+      if(cut) continue;
+      unsigned int shown = 0;
+      bool found = false;
+      for(unsigned int back=0;(back<STRESS_HISTORY) && (back<=seq);back++){
+        if(0 == memcmp(buf,history[(seq-back) % STRESS_HISTORY],size)){
+          shown = seq-back;
+          found = true;
+          break;
+        }
+      }
+      if(!found){
+        PRINTF("ERROR: iteration %u boot %u: the data read is none of the last writes\n",it,boot);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      if(shown < last_shown){
+        PRINTF("ERROR: iteration %u boot %u: rollback, write %u shown after write %u\n",it,boot,shown,last_shown);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      if(shown < last_complete){
+        PRINTF("ERROR: iteration %u boot %u: write %u shown, write %u had completed\n",it,boot,shown,last_complete);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      last_shown = shown;
+    }
+    //the next write goes below the record the last boot exposed; a boot that
+    //was cut exposed nothing: boot again, uncut, for it
+    if(LFTL_INVALID_POINTER == s.ctx.data){
+      uint8_t buf[size];
+      tearing_sim_weak_new_boot();
+      lftl_read(&s.ctx,buf,s.area,size);
+    }
+  }
+  ewlf_scratch_end(&s);
+  format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
 #endif
 
 #ifdef HAS_TEARING_SIMULATION
@@ -2865,7 +3392,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 38
+  #define N_TESTS 40
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -2877,6 +3404,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   bool run_test_callbacks=0;
   bool no_pinning=0;
   bool weak_words=0;
+  bool no_weak_words=0;
   uint64_t weak_seed=1;
   for(int i=1;i<argc;i++){
     if(consumed[i]) continue;
@@ -2885,6 +3413,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     ACTION_ARG(run_test_callbacks,"--test-callbacks");
     ACTION_ARG(no_pinning,"--no-pinning");
     ACTION_ARG(weak_words,"--weak-words");
+    ACTION_ARG(no_weak_words,"--no-weak-words");
     U64_ARG(weak_seed,"--weak-seed=",0);
     U64_ARG(tear_at,"--tear-at=",0);
     U64_ARG(test_index,"--test=",0);
@@ -2908,9 +3437,12 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     PRINTLN("NVM without zero overwrite: the scan programs nothing");
   }
   #ifdef HAS_TEARING_SIMULATION
-  if(weak_words){
-    //a word a cut left weak reads differently at every read, all erased
-    //included, for ever (T2 of the flash page without T3), in the EWLF areas
+  //on by default with zero overwrite: a word a cut left weak then reads
+  //differently at every read, all erased included, for ever (T2 of the flash
+  //page without T3), in the EWLF areas. Off without zero overwrite unless
+  //asked: the stuck state of the EWLF scan is then a documented residual,
+  //which the sweep would report as a rollback.
+  if(!no_weak_words && (weak_words || !no_pinning)){
     nvm_weak_model = 1;
     nvm_weak_seed = weak_seed;
     n_check_boots = 2; //a word may read differently at the second boot
@@ -2918,6 +3450,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   }
   #else
   (void)weak_words;
+  (void)no_weak_words;
   (void)weak_seed;
   #endif
   if(report_n_tests){
@@ -3021,6 +3554,16 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(ewlf_many_units_test,0);break;
       case 37:TEAR_COV(100);test_and_simulate_tearing(v010_compat_test     ,tear_cov_log[i]);break;
       case 38:TEAR_COV( 10);test_and_simulate_tearing(crc64_test           ,tear_cov_log[i]);break;
+      case 39:
+      case 40:
+        //Hardcoded 0, ignoring --tear-cov: the tests cut power at chosen
+        //points themselves, under the weak word model, which only exists
+        //where there is a simulator
+        tear_cov_log[i]=TEAR_COV_NA;
+        #ifdef HAS_TEARING_SIMULATION
+        test_and_simulate_tearing((39 == i) ? ewlf_two_cuts_test : ewlf_weak_stress_test,0);
+        #endif
+        break;
       default:
         PRINTLN("ERROR: bad test index %u",i);
         fail_abort();

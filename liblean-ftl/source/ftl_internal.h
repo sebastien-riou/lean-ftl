@@ -940,9 +940,10 @@ static void find_current_slot(lftl_ctx_t*ctx){
 /// Whether the stuck-state pin of ::find_current_record programs a flag that
 /// already reads all zeros. A weak word can read all zeros, so leaving it
 /// alone keeps a residual (the anti-tearing page, "What a power cut can still
-/// do"); programming it needs a flash that accepts all zeros over all zeros,
-/// FLASH.md open point 2, to be measured on the STM32L5 and STM32U5. Off
-/// unless the build says otherwise.
+/// do"); programming it needs a flash that accepts all zeros over all zeros.
+/// The STM32L5 and STM32U5 refuse it with PROGERR and program nothing
+/// (measured on both, FLASH.md), so it stays off for them. Off unless the
+/// build says otherwise.
 #ifndef LFTL_EWLF_PIN_OVER_ZEROS
 #define LFTL_EWLF_PIN_OVER_ZEROS 0
 #endif

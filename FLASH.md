@@ -40,7 +40,8 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
 | Program unit | 16 B quad-word (+9 ECC bits); burst of 8 quad-words (128 B) | 8 B double word (+8 ECC bits) | 4 B word; also 8 B and multi-word (8 to 256 or 512 B, see §2.3) | 1 to 256 B within a 256 B page |
 | Smaller writes | refused (SIZERR, PGAERR) | refused (SIZERR, PGAERR) | — (32 bits is the minimum) | 1 B allowed |
 | Re-programming a programmed unit | refused (PROGERR) unless the data is all zeros | same | — | outside the spec: program is defined for "previously erased (FFh)" locations only |
-| All zeros over a partially programmed unit | doc: allowed | doc: allowed | — | — |
+| All zeros over a partially programmed unit | doc: allowed; measured: accepted | doc: allowed; measured: accepted | — | — |
+| All zeros over a unit that reads all zeros | measured: refused (PROGERR), nothing programmed | same | — | — |
 | ECC | 9 bits per 128 bits: 1-bit correction, 2-bit detection | 8 bits per 64 bits: 1-bit correction, 2-bit detection | none mentioned | none |
 | Double-bit error | NMI (ECCD) | NMI (ECCD, ECCD2) | n/a | n/a |
 | Erased line and ECC | 2-bit detection not supported on an erased line | same | n/a | n/a |
@@ -51,8 +52,8 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
 | Suspend/resume | n/a | n/a | n/a | yes (75h, 7Ah), tSUS 20 µs |
 | Endurance | 10 kcycles; 100 kcycles on at most 32 pages (256 KB) per bank | — (datasheet) | — (datasheet) | min. 100 K program-erase cycles |
 | Retention | — | — | — | more than 20 years |
-| Program time | — | — | — | tPP 0.25 ms typ., 2 ms max (page) |
-| Erase time | — | — | — | tSE 30 ms typ., 240 ms max (4 KB sector) |
+| Program time | measured on one board: 128 µs per quad-word | measured on one board: 85 µs per double word | — | tPP 0.25 ms typ., 2 ms max (page) |
+| Erase time | measured on one board: 0.88 ms per 8 KB page | measured on one board: 22 ms per 2 KB page | — | tSE 30 ms typ., 240 ms max (4 KB sector) |
 | Errata read | ES0553 2.2.12: programming stuck after a sequence error while WDW is set | none in the folder | none in the folder | none |
 | lean-ftl today | `write_size` 16, `erase_size` 8 KB, `target/stm32/stm32u5-accessors.c` | `write_size` 8, `erase_size` 2 KB, `target/stm32/stm32l5-accessors.c` | no accessor yet | no accessor yet |
 
@@ -78,9 +79,9 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
   erased", "already fully programmed to 0", or "already partially programmed (contains 0 and 1)
   and the new value to program is not full zero". Read with 7.3.7: an erased quad-word takes any
   value, a partially programmed one takes all zeros only. The second bullet names a fully zero
-  quad-word as an error without the "unless full zero" exception; whether a second all-zero
-  program of an all-zero quad-word is accepted or flagged is therefore not settled by the manual
-  (§4, point 2). An error aborts the operation and leaves the flags set; the next operation must
+  quad-word as an error without the "unless full zero" exception, and that is what the part does:
+  a second all-zero program of an all-zero quad-word sets PROGERR and programs nothing (measured,
+  §4, point 2). An error aborts the operation and leaves the flags set; the next operation must
   clear them first or gets PGSERR.
 - **ECC (7.3.2).** One corrected bit sets ECCC (interrupt if ECCCIE); two detected bits set ECCD
   "In this case, an NMI is generated." "Caution: When the ECCC flag is set, a further two-errors
@@ -130,8 +131,8 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
   PGAERR otherwise); two 32-bit writes, the second launches the programming; one word alone is
   completed "with the erase value 0xFFFF FFFF"; "ECC is calculated from the double word to
   program." RM0438 has no burst or fast programming mode.
-- **PROGERR (6.3.8).** The same three bullets as the STM32U5, with the same open question on an
-  all-zero target.
+- **PROGERR (6.3.8).** The same three bullets as the STM32U5, with the same measured outcome on an
+  all-zero target: PROGERR, nothing programmed (§4, point 2).
 - **ECC (6.2, 6.3.2).** DBANK=1: per double word, one correction (ECCC) and two detections (ECCD,
   "In this case, a NMI is generated"); DBANK=0: the same per 64-bit half of the 128-bit line,
   with ECCC2 and ECCD2 for the upper half. "For a virgin data: 0xFF FFFF FFFF FFFF FFFF, one error
@@ -236,7 +237,7 @@ The ids are those of the documentation page
 | R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum | 1 B minimum |
 | R3, N3 | Between two erases every write unit is programmed once; the library re-programs a unit only where `zero_overwrite` is declared, and only to all zeros | slot and record layouts; `LFTL_ERROR_TRANSACTION_OVERWRITE` | by construction | by construction | by construction | by construction |
 | N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan, only on an NVM declared with `zero_overwrite`; the Linux simulator | doc; all-zero target open | doc; same | — to measure | — outside the spec |
-| N3 (opt-in) | All zeros can be programmed over a write unit that already reads all zeros | the stuck-state pin of the EWLF scan when `LFTL_EWLF_PIN_OVER_ZEROS` is set; without it a flag that read all zeros is left alone, a residual | open point 2 | open point 2 | — | — |
+| N3 (opt-in) | All zeros can be programmed over a write unit that already reads all zeros | the stuck-state pin of the EWLF scan when `LFTL_EWLF_PIN_OVER_ZEROS` is set; without it a flag that read all zeros is left alone, a residual | no: PROGERR (measured, point 2) | no: PROGERR (measured, point 2) | — | — |
 | R2, R7 | `write_size` is at least the ECC codeword, so an item is one codeword and a torn program spoils only its own unit | `write_size` doc in `lean-ftl.h`; T1.13 | 16 B = codeword | 8 B = codeword | n/a | n/a |
 | R7, T5 | A double-bit ECC error raises an NMI rather than returning a wrong value; a weak word may do so until it is erased or pinned | T1.13; the integrator guide | doc | doc | n/a | n/a |
 | T1 | A cut during a program or erase leaves only the unit being written undefined; other units keep their content | anti-tearing, O1 and O2 of `THREAT-MODEL.md` | "not guaranteed" for the accessed content; others not stated | same | not stated | "may become corrupted" for the unit; others not stated |
@@ -259,12 +260,31 @@ Two consequences of the ECC rows, now T5 on the page:
    then all zeros over a partially programmed word; and whether a page that was being programmed at
    a reset behaves like the STM32 one ("may no longer be writable"). Needed before the M5531 port,
    and before the pinning of the scan ([documentation](https://lean-ftl.readthedocs.io/en/latest/design.html#design-common)) can claim that target.
-2. **STM32: all zeros over all zeros.** 7.3.7/6.3.7 allow it, the PROGERR bullet lists it as an
-   error. Measure once on each board: PROGERR set or not (the accessor's read-back passes either
-   way, so only the flag tells whether the pulse was applied). It decides the stuck-state pin of
-   the EWLF scan: accepted, `LFTL_EWLF_PIN_OVER_ZEROS` can be set for the part and the scan has no
-   residual; refused, a flag that read all zeros is left alone, the residual of the
-   [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual).
+2. **STM32: all zeros over all zeros. Measured on 2026-11-03: refused on both parts.**
+   7.3.7/6.3.7 allow it, the PROGERR bullet lists it as an error, and the error is what the parts
+   do. Measured on a NUCLEO-U5A5ZJ-Q (IDCODE 0x30016481) and a NUCLEO-L552ZE-Q (IDCODE
+   0x20006472) with `test/boards/zeros-over-zeros.c`, on the last two pages of bank 2, nonsecure
+   registers, interrupts masked, ICACHE off. Each program records the status register, the end of
+   operation flag (set only on success, with EOPIE), whether BSY was seen, the time from the last
+   word written to the end, the read-back and the ECC flags:
+
+   | Program | STM32U5 | STM32L5 |
+   |---|---|---|
+   | Any value over an erased unit | 22 of 22 accepted, 110 to 128 µs | 22 of 22 accepted, 85 µs |
+   | All zeros over a partially programmed unit (a pin) | 8 of 8 accepted, 128 µs | 8 of 8 accepted, 85 µs |
+   | All zeros over a unit that reads all zeros, zeroed from erased or by a pin | 48 of 48 refused | 48 of 48 refused |
+   | A non-zero value over a partial or all-zero unit (controls) | 4 of 4 refused, content kept | same |
+   | All zeros over a unit programmed to all ones | 2 of 2 accepted | 2 of 2 accepted |
+   | ECC flag on a read-back | none | none |
+
+   A refusal sets PROGERR and PGSERR, never EOP, never shows BSY, returns at once (31 cycles of
+   the polling loop) and leaves the unit as it was: no programming pulse is applied. So
+   `LFTL_EWLF_PIN_OVER_ZEROS` stays 0 on both parts, and the stuck-state residual of the
+   [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual)
+   stands there: a flag that reads all zeros cannot be pinned again, and the accessors would
+   report the attempt as a failed write. The units measured were solidly programmed; a weak unit
+   that the flash's own check reads as all zeros is the case of the residual, and only a power cut
+   during a program can produce one.
 3. **Endurance and retention of the STM32L5 and M5531.** In their datasheets, not in the folder;
    LFTL-010 and T1.5 use 10 k cycles for every target.
 4. **STM32U5 FLASH_OPSR.** After a system reset it names the interrupted operation and its address.

@@ -99,7 +99,8 @@ zeros so that no later boot decides otherwise about them: in a regular area the 
 cut can leave weak; in an EWLF area the meta field of an aborted record (a tombstone) and, when no
 position is left for the copy that repairs a torn record, its two flags. It never re-programs a
 unit that already reads all zeros, unless the build declares that the flash accepts it
-(``LFTL_EWLF_PIN_OVER_ZEROS``, the stuck state of :ref:`design-ewlf-scan`). Left false, the value
+(``LFTL_EWLF_PIN_OVER_ZEROS``, the stuck state of :ref:`design-ewlf-scan`); the STM32L5 and
+STM32U5 refuse that program with PROGERR and program nothing, measured on both. Left false, the value
 of a zeroed initializer, *lean-ftl* never programs a unit that is not erased, and the scan of a
 regular area writes nothing; the scan of an EWLF area still copies a torn record forward, which
 programs erased units only.

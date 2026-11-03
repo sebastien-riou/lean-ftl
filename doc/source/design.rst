@@ -75,7 +75,8 @@ model says what remains to be measured there). Pinning needs a flash that accept
 program over a partially programmed unit, N3 of the flash page: an opt-in capability, declared
 per NVM with the ``zero_overwrite`` member of :c:type:`lftl_nvm_props_t`. The library never pins a
 unit that already reads all zeros, except where the build says the flash accepts that
-(``LFTL_EWLF_PIN_OVER_ZEROS``, see the stuck state of :ref:`design-ewlf-scan`). A pin or a
+(``LFTL_EWLF_PIN_OVER_ZEROS``, see the stuck state of :ref:`design-ewlf-scan`); the STM32L5 and
+STM32U5 refuse it, measured on both. A pin or a
 tombstone is one word program, made once, since the pinned word then reads zeros for good; a power
 cut during it leaves a word closer to settled, decided again at the next boot. Without
 ``zero_overwrite`` the scan pins nothing and, in a regular area, makes the same choices again at
@@ -609,8 +610,8 @@ or a pin, when the cut came at a boot.
        two-unit area, more in a larger one)
      - Rollback by one version (O2) in the residual case; no loss
      - The half record is pinned in place and complete once the program of flag-b returns. Residual:
-       a flag that read all zeros is left alone on a flash that refuses zeros over zeros
-       (``LFTL_EWLF_PIN_OVER_ZEROS`` unset, FLASH.md open point 2), and if it was weak and later
+       a flag that read all zeros is left alone on a flash that refuses zeros over zeros, as the
+       STM32L5 and STM32U5 do (measured; ``LFTL_EWLF_PIN_OVER_ZEROS`` unset), and if it was weak and later
        reads erased the record can turn aborted after it was shown. None where the flash accepts
        that program
      - The half record is shown as it is; if its flag-a was the weak word and later reads erased,

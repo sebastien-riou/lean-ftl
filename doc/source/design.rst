@@ -609,9 +609,9 @@ or a pin, when the cut came at a boot.
        a half record that is copied: a late new by one version, never a rollback
      - Closed for rollback; an aborted record is left as it is and may come back once, a late new
        by one version
-   * - EWLF area: no position left for a copy (the stuck state: a write cut in a flag at the top of
-       a unit, then one cut inside each repair copy, *records per unit* minus one of them in a
-       two-unit area, more in a larger one; :ref:`design-stuck-state`)
+   * - EWLF area: no position left for a copy (the stuck state: a write cut in a flag at the last
+       free position of a unit, the others filled by cut copies or by torn writes the application
+       retried, with the complete record in another unit; :ref:`design-stuck-state`)
      - Rollback by one version (O2) in the residual case; no loss
      - The half record is pinned in place and complete once the program of flag-b returns. Residual:
        a flag that read all zeros is left alone on a flash that refuses zeros over zeros, as the
@@ -771,18 +771,44 @@ How it is reached
 - *Boot 4.* Every weak flag reads erased: ``J`` and ``J'`` are aborted and get tombstoned, ``I`` is
   the newest complete record, the application reads ``I`` after ``J``: a rollback.
 
+The copy is not what fills the unit in the cheapest history. A cut anywhere in a write before
+its flag-a, in the data below, leaves a torn position that the application's own retry of the
+update steps over, so that the retry lands at the last position of the unit:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="2"><b>U1</b></td><td border="0" width="14"></td><td border="0" colspan="2"><b>U0</b></td></tr><tr><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td></tr><tr><td border="0" align="left"><b>Before</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J  v<br/><font face="Courier" point-size="10">d ~, m ., a ., b .</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="126"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 1</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#dbeafe" width="126"><b>I  v-1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td></tr><tr><td border="0" align="left"><b>Boot 2</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~0, b ~</font><br/><font point-size="9" color="#777777">half, pinned</font></td></tr><tr><td border="0" align="left"><b>Boot 3</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td bgcolor="#dbeafe" width="126"><b>J  v</b><br/><font face="Courier" point-size="10">a ~0, b ~x</font><br/><font point-size="9" color="#777777">complete</font></td></tr><tr><td border="0" align="left"><b>Boot 4</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#dbeafe" width="126"><b>I  v-1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~., b ~.</font><br/><font point-size="9" color="#777777">aborted</font></td></tr></table>>];
+   }
+
+- *Before.* ``I`` is current. The update to ``J`` erases ``U0`` and writes at its top; the cut
+  lands in the data.
+- *Boot 1.* The torn position is no record: ``I`` is shown, and the application writes ``J``
+  again. The write steps over the torn position, tombstoning its meta field, and programs ``J``
+  at the last position of ``U0``; the cut lands in its flag-a.
+- *Boot 2.* Flag-a reads all zeros: ``J`` is half and the newest record, ``U0`` has no position
+  left and ``U1`` holds the complete record: stuck at once. ``J`` is pinned in place, flag-a
+  skipped, flag-b programmed, and the cut lands in that program.
+- *Boot 3.* Flag-b reads some zeros: ``J`` is complete and the application reads ``J``.
+- *Boot 4.* Both weak flags read erased: ``J`` is aborted and gets tombstoned, the application
+  reads ``I`` after ``J``: the same rollback.
+
 What went wrong is the proof. The scan shows a record only with evidence that its flag-a is solid,
 and a bit in flag-b is that evidence, because an update programs flag-b only after the program of
 flag-a returned. The pin breaks that order at boot 2: it programs flag-b after *reading* flag-a,
 not after programming it, so the bit flag-b shows at boot 3 proves nothing. Programming flag-a
 again would settle it, and the flash refuses: ``LFTL_EWLF_PIN_OVER_ZEROS`` stays off on both STM32
-parts. What the residual costs an adversary: two cuts, each inside a flag program of about 128 µs
-on the STM32U5 and 85 µs on the STM32L5, at two different boots; a weak word that reads all zeros
-at the pin boot and erased later; and the pinned flag reading a bit once, then erased. The
-consequence is ``I`` after ``J``, a rollback of data shown at a boot but never acknowledged by a
-returned update; nothing is lost. Without ``zero_overwrite`` there is no pin: at boot 2 the half
-record is shown as it is, and the same drift brings ``I`` back at boot 4, with the first two cuts
-only.
+parts. What the residual costs an adversary: a cut anywhere in a write the application retries,
+which fills the unit, then two cuts inside flag programs of about 128 µs on the STM32U5 and 85 µs
+on the STM32L5, the retry's flag-a and the pin's flag-b; a weak word that reads all zeros at the
+pin boot and erased later; and the pinned flag reading a bit once, then erased. The consequence is
+``I`` after ``J``, a rollback of data shown at a boot but never acknowledged by a returned update;
+nothing is lost. Without ``zero_overwrite`` there is no pin: at boot 2 the half record is shown as
+it is, and the same drift brings ``I`` back at boot 4, with the first two cuts only.
 
 Alternative 1: show the previous version and erase the torn unit
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -930,12 +956,12 @@ to records and tell an entry from the ghost of one after a torn erase.
 Why the design stays as it is
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The residual needs two power cuts placed inside flag programs of a tenth of a millisecond, at two
-different boots, plus a weak word that reads all zeros then erased and another that reads a bit
-then erased; its consequence is a rollback by one update, never a loss. Alternatives 1 and 2 remove
-it by trading it for something worse: a rollback that needs no unusual reading, or the loss of both
-``I`` and ``J``. Alternative 3 raises its price by one cut per field and never reaches zero.
-Alternative 4 reaches zero at the price of two erase units per area and a scan that programs at
-every boot; it is the change to make if a threat model with an attacker in control of the power
-supply ever demands it. Until then the pin in place stays, with its row in the table of
-:ref:`design-residual`.
+The residual needs a cut anywhere in a write the application retries, then two cuts placed inside
+flag programs of a tenth of a millisecond, plus a weak word that reads all zeros then erased and
+another that reads a bit then erased; its consequence is a rollback by one update, never a loss.
+Alternatives 1 and 2 remove it by trading it for something worse: a rollback that needs no unusual
+reading, or the loss of both ``I`` and ``J``. Alternative 3 raises its price by one cut per field
+and never reaches zero. Alternative 4 reaches zero at the price of two erase units per area and a
+scan that programs at every boot; it is the change to make if a threat model with an attacker in
+control of the power supply ever demands it. Until then the pin in place stays, with its row in the
+table of :ref:`design-residual`.

@@ -1,531 +1,640 @@
-# Extreme Wear Leveling Factors
-This outlines the concept to support the EWLF feature.
-
-## Concept
-
-The main idea is to store several versions of the same data into the same erase unit.
-Unlike normal LFTL areas, in EWLF areas we store the data and the meta data packed together.
-If we can store 100 times the data within an erase unit, then the wear leveling factor is 100 times the number of erase units that we allocate to the data.
-
-The main assumptions are:
-- the data is small compared to the erase unit
-- the write unit is equal to or smaller than the data
-- erased bytes read `0xFF`: free record positions are recognized by that value (R6 of the documentation's [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html#flash-required) page)
-
-The memory layout of a record is the following:
-- header
-    - header magic: size is max(sizeof(uint64_t),LFTL_WU_SIZE)
-    - start marker: one write unit, max(sizeof(uint8_t),LFTL_WU_SIZE), programmed to all zeros, and first
-    - meta data (lftl_meta_t)
-        - version
-        - checksum
-        - end marker: one write unit, programmed to all zeros, and last (the `checksum2` item of regular areas)
-- data
-- pad (if needed)
-
-The writes are done from the highest possible address towards lower address, and the erase units are used in write
-order from the highest one down, wrapping back to the highest one.
-
-### Reading
-
-Records can only start at the top of an erase unit minus a multiple of the record size, so only these positions are
-checked: data can never be mistaken for a header, even if it contains a copy of one, and every record checked fits in
-its erase unit. A position holds a *candidate* when its magic matches, its checksum is the one of its data and
-version, and its end marker is not all erased. The current record is the candidate with the highest version over all
-erase units (two candidates sharing a version is an error, `LFTL_ERROR_VERSION_COLLISION`); inside a unit the lowest
-candidate position is the newest.
-
-The scan reads and chooses; it never erases, so that a power cut at every boot costs no erase (ISSUES.md LFTL-010,
-closed). The one word a power cut can leave weak is the end marker of the interrupted write, and the scan decides
-about it on a single reading:
-- end marker programmed in part: its own program had started, so the checksum before it is complete and the record
-  is stable: it is taken;
-- end marker all erased: the cut came during the checksum word at the latest, which may be weakly programmed and
-  read differently at a later boot: the record is not taken, the previous one is current.
-
-On a flash declared with `zero_overwrite` (the STM32L5 and STM32U5, N3 of the flash page) the scan pins the decision
-with one word program: a partially programmed end marker is programmed to all zeros, so that it cannot read all
-erased later and bring the previous version back (LFTL-011, closed); a record not taken is tombstoned, its version
-item programmed to all zeros, so that its checksum can never verify again. Without `zero_overwrite` the scan programs
-nothing, the same choice is made again at every boot on the word as it reads then, and the next write settles it
-(section 7 of READ-ONLY-SCAN.md).
-
-Boot time does not grow with the number of erase units. The units are ordered by the version of their top record,
-their *key*: the top record is the first one written after the unit's erase, so every record of a newer unit has a
-higher version than every record of an older one. The current unit is found by halving on that cyclic order and,
-inside it, with `zero_overwrite`, the last started position by halving on start markers; the result is checked
-against the two neighbouring units, and the linear pass over every unit is the fallback (section 6 of
-READ-ONLY-SCAN.md). The Linux test build runs both at every scan and raises `LFTL_INTERNAL_ERROR` if they disagree.
-
-### Writing
-
-- read the current version
-- find the next free space: the first record position below the current record, in its erase unit, whose start
-  marker reads all erased, or else the top of the next erase unit in write order, which is erased first, whatever it
-  reads
-- write the start marker (all zeros)
-- write the data
-- write the magic, then the version and the checksum (computed from the data meant to be written, not read back)
-- write the end marker (all zeros)
-
-NOTES:
-- A started position on the way to the free one holds a record a power cut tore, or one the scan tombstoned. It is
-  skipped, and the new record is numbered above its version when its checksum is valid, so that two candidates can
-  never share a version whatever that record's end marker reads later. With `zero_overwrite` its start marker is
-  programmed to zeros again when it does not read all zeros, so that a weak start marker cannot later read erased and
-  open a hole in the run of started positions the in-unit halving relies on.
-- A unit is erased exactly once per cycle, right before its first record is programmed, and never when the write
-  order leaves it: the other units keep their stale records until their turn comes. A torn erase is redone by the next
-  attempt to use the unit, and the cells a torn record left behind are never programmed over without an erase
-  (LFTL-013, closed). A rollover is therefore exactly one erase, in every state.
-- Nothing after an erased start marker was ever programmed: the start marker is the first word of a record to be
-  programmed, which is why it, and not the magic, says whether a position is started.
-
-Example with an area spanning 2 erase units, U1 at the higher address and U0 at the lower one:
-- writes start at the top of U1 and proceed downward as records accumulate
-- once U1 has no room left, the next write erases U0 (the unit immediately below) and starts again from U0's highest address; U1 keeps its records
-- once U0 in turn fills up, since it is the lowest unit in the area, the write rolls over back to U1: U1 is erased and the record goes to its top
-- the area cycles between these two states indefinitely; the unit that is not current holds the previous cycle's records until it is erased
-
-Limitations:
-- one area can store only one data of fixed size
-- at least 2 records must fit in an erase unit (a constraint kept from when a torn record was copied forward within its unit)
-- the whole data is written every time
-- no support for transactions
-
-NOTE: Some writes are slow compared to others since they involve an erase while most don't: exactly the writes that roll over to the next erase unit.
-
-## Does each word earn its place?
-
-Taken field by field before the next layout change, on the code of v0.2.0 (`write_ewlf_core()`,
-`ewlf_record_state()`, `ewlf_choose_fast()`, `find_current_record()`). The version and the checksum are not in
-question. Every other field is judged on three points: what the code uses it for, what else could do that job, and
-what breaks without it. EWLF is not in v0.1.0, the format the compatibility test (test 37) guards, so the layout can
-change without a migration.
-
-### What a record costs today
-
-The header is the magic, `max(write unit, 8)` bytes, the start marker, `max(write unit, 1)`, and three items of
-`max(write unit, 4)` each; the data is rounded up to whole write units and the record to a multiple of 8 bytes. For
-16 bytes of data:
-
-| Target | Write unit | Header | Record | Records per erase unit |
-| --- | --- | --- | --- | --- |
-| STM32U5 | 16 | 80 | 96 | 85 (8 KB) |
-| STM32L5 | 8 | 40 | 56 | 36 (2 KB) |
-| M5531 | 4 | 24 | 40 | 204 (8 KB) |
-| CH32V307 | 2 | 22 | 40 | 102 (4 KB) |
-| W25Q32RV | 1 | 21 | 40 | 102 (4 KB) |
-
-On the STM32U5 the header is five times the data, and one write unit less is one record in five. The table at the
-end of this section gives the figures per target for the layouts discussed.
-
-### Magic
-
-**What the code does with it.** `ewlf_record_state()` reads it first and answers "no record" without reading the
-meta-data or checksumming the data when it does not match. `write_ewlf_core()` programs it third, after the start
-marker and the data. The checksum does not cover it. Its value did not change when the start marker and the all-zero
-end marker were introduced, so it has never served as a format tag.
-
-**What it decides.** Nothing on its own. Every decision is taken on the checksum: a unit's key, a candidate, a torn
-record. The design page says it of the key: "the magic and the marker alone would not do". Against hostile content
-(threat model, case 2) it is a constant, forged for free.
-
-**What it buys.** Three things:
-
-- a format tag: an area holding something else, an area registered at the wrong address or a record of an older
-  layout reads as `LFTL_ERROR_NO_VALID_VERSION` instead of being parsed. That works only if the constant changes with
-  the layout;
-- an early out: a position that is erased, torn before its magic or partly erased costs one 8-byte read instead of
-  a checksum over the data;
-- a deterministic rejection of a record torn during its data, where the checksum alone gives 2^-32.
-
-**Without it.** Foreign content becomes the checksum's problem, 2^-32 per position; a formatted area never holds
-foreign content at a position, since every unit is erased right before its first record, and an unformatted one may,
-where one position in four billion would then read as a record. An erased position costs a start marker read, one
-write unit, cheaper than the magic. A record torn during its data has its version and checksum items erased,
-`0xFFFFFFFF` each, and is rejected unless the CRC32C of its partial data is 0; the deterministic rejection then needs
-the rule regular areas already have, "version `0xFFFFFFFF` is no version". Without that rule the 2^-32 case is ugly:
-the torn record is an unmarked record of version `0xFFFFFFFF`, the next write numbers above it and wraps to 0.
-
-**Verdict.** The magic does not earn a write unit. A constant could do the start marker's job, next, but a word of
-zeros does it better, so the magic goes.
-
-### Start marker
-
-**What the code does with it.** `write_ewlf_core()` looks for room at the first position below the current record
-whose start marker reads all erased, steps over the started ones and, on a flash with `zero_overwrite`, programs the
-start marker of each stepped-over position to zeros again unless it already reads zeros. `ewlf_choose_fast()` finds
-the last started position of the current unit by halving on start markers, one write unit per probe, on a flash
-with `zero_overwrite`. It is the first word programmed.
-
-**What the job needs.** A word that says "this position was started", with three properties:
-
-1. programmed first, so that an erased one proves that nothing after it was ever programmed, which is what makes the
-   position safe to program (R3 of the flash page: only erased units are programmed);
-2. one write unit, read alone, so that the search for room and the halving stay cheap;
-3. programmed again without harm after its own program was cut. A cut during the first word leaves it weak; at a
-   later boot it may read erased (T2), the position is then free again, and the word is programmed a second time
-   over the same cells.
-
-The third property is the one that constrains the choice. A word of zeros has it: the second program pushes the same
-cells. A constant has it too: the cells intended at 0 are the same cells each time, and the others were never
-touched. A value does not: the version of the next record differs from the version of the torn attempt, so some of
-its cells intended at 1 are cells the first program half charged, and T2 says they may read 0 at a later boot. The
-record then fails its checksum at some boot after it was taken: a rollback by one version that no pin can close,
-since the weak cells are inside a value. So the version cannot be the first word, and that is the reason the start
-marker exists. That it is all zeros is one of the two ways to satisfy the third property, not the only one.
-
-**Verdict.** The job is needed, and the word stays. Two values satisfy the three properties, zeros and a constant
-such as the magic programmed first instead of third, and zeros win on every count that matters:
-
-- size: a zero marker is one write unit, `max(write unit, 1)`; a 64-bit constant is `max(write unit, 8)`, which is
-  4, 6 and 7 bytes more per record on the M5531, the CH32V307 and the W25Q32RV, and nothing on the STM32L5 and
-  STM32U5;
-- the step-over pin: a stepped-over zero marker already reads zeros unless it is weak, so the write path programs
-  nothing in the common case and a stepped-over record stays readable, as today. A constant would be pinned to zeros
-  at every step-over, which tombstones the record: that works too, but zeros change nothing;
-- weight: every cell of the marker is programmed, where a constant programs about half of them. The "started" test
-  does not lean on T3, so this is margin, not an argument;
-- consistency: regular areas have no magic, and a deployed fleet reads them.
-
-What a constant would add is the format tag and the early out of the magic section, and the paragraphs above put a
-low price on both. With zeros, a position holds a record when its start marker is not all erased and its checksum
-verifies, with the `0xFFFFFFFF` rule; the search for room, the halving and the pins are unchanged. A record of the
-current layout read by the new code has its non-zero magic where the start marker is expected: started, and rejected
-on its checksum. EWLF has no deployed areas, so no migration is needed.
-
-### End marker
-
-**What the code does with it.** Programmed last, to zeros, after the version and the checksum.
-`ewlf_record_state()` turns a valid checksum into a candidate when the marker is not all erased and into an unmarked
-record otherwise; `find_current_record()` pins a partially programmed marker to zeros on a flash with
-`zero_overwrite`.
-
-**What it decides.** The one decision a power cut makes hard: whether the checksum before it is complete. A cut
-during the checksum word leaves a word that may read valid at one boot and not at the next, and the marker behind
-it, all erased, is the one sign of it. The marker's own test is "not all erased", which a partial program satisfies
-for good on a flash that can pin, and which T3 keeps satisfied on any flash once the marker read complete, since its
-32 zero bits are 16 programmed bits on every geometry.
-
-**What else could do it.**
-
-- Nothing, a record whose last word is a value. That is OpenTitan's `boot_data`, an append-only log with a digest
-  and no marker: a cut during its last word leaves an entry valid at some boots and not at others, no word to pin,
-  and no help from T3 since a value must read exactly. The full T2 flip-flop, in both directions, until the next
-  write.
-- A copy of the checksum, `checksum2` as in regular areas: the same test, but its programmed bits are the
-  checksum's, about 16 on average and often fewer. Regular areas get the weight from the zero padding of 8- and
-  16-byte items, which 2- and 1-byte write units do not have. The all-zero marker is the choice that works on every
-  geometry.
-- The first word of the next record: the current record has none.
-
-**Size.** `max(write unit, 4)`. Two bytes would carry T3's 16 bits on the two targets with write units under 4
-bytes and save 2 bytes per record there; not worth a second item size.
-
-**Verdict.** Earns its place as it is.
-
-### Data rounding and the 8-byte pad
-
-The data is rounded up to whole write units because writes cover whole units (R2, R3); an unaligned `lftl_write()`
-extends into that room. Not a field, and not in question.
-
-The pad rounds the record up to a multiple of 8 bytes so that every position, and so every magic, is 8-byte aligned
-(`ewlf_record_phy_size()`). The library never dereferences a record: every read goes through the NVM's read callback
-into a local buffer, and the read callbacks of `target/` are `memcpy()`. The pad is empty on 8- and 16-byte write
-units and costs up to 4, 6 and 7 bytes per record on the M5531, the CH32V307 and the W25Q32RV. Without the magic
-it has no reason left at all.
-
-**Verdict.** Drop it with the layout change. A record is then a multiple of the write unit, which is all a position
-needs.
-
-### A reserved word, if one is added
-
-**What it would be.** An item the writer leaves erased, programmed later from erased: by the scan to record a
-decision, or by the writer to retire a record, as `boot_data` does. A program of an erased word needs R3 only: no
-`zero_overwrite`, and on flash with ECC a fresh codeword instead of a program over an inconsistent one, which is the
-open measurement of T1.13.
-
-**What it would not do.** Replace the end marker: `boot_data` has a retire word and no marker, and gets the
-flip-flop above.
-
-**What it would buy**, decision by decision, against the
-[residual table](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual) of the design page:
-
-- the pin of a partially programmed end marker, row 1: a rollback by one version after the record was shown, closed
-  today on `zero_overwrite` flash only;
-- the tombstone of a torn record newer than the one taken, row 3: a late new by one version. The write path's
-  numbering already prevents the collision, so that is all it closes;
-- one word holds one durable bit, and a partial program blurs any value encoding, so the two decisions need two
-  words, or the first one alone.
-
-**Who gains.** Targets without `zero_overwrite`: the W25Q32RV, the CH32V307, the M5531 until measured. On the
-STM32L5 and STM32U5, only the ECC codeword point.
-
-**Cost.** One item, 16 bytes per record on the STM32U5: the write unit the magic gives back, spent again.
-
-### The record each choice gives
-
-| | Today | Magic and pad dropped | Same, plus one reserved word |
-| --- | --- | --- | --- |
-| Fields, in address order | magic, start marker, version, checksum, end marker, data, pad | start marker, version, checksum, end marker, data | start marker, version, checksum, end marker, taken, data |
-| Order of programming | start marker, data, magic, version and checksum, end marker | start marker, data, version and checksum, end marker | same; `taken` by the scan only |
-| Header, 16-byte write unit | 80 | 64 | 80 |
-| Header, 8-byte write unit | 40 | 32 | 40 |
-| Header, 4-byte write unit | 24 | 16 | 20 |
-| Header, 2-byte write unit | 22 | 14 | 18 |
-| Header, 1-byte write unit | 21 | 13 | 17 |
-| Records of 16 bytes per unit: STM32U5, STM32L5, M5531, CH32V307, W25Q32RV | 85, 36, 204, 102, 102 | 102, 42, 256, 136, 141 | 85, 36, 227, 120, 124 |
-
-Recommendation at the time: the middle column. Superseded by "Two flags, repair by copy, sticky abort" below,
-which takes the third column, with a 64-bit checksum in a single meta field: the second word is what makes the
-scan rollback-free without T3.
-
-## Support for extended transactions
-EWLF could be the base to support extended transactions which can involve data from several areas, including EWLF areas.
-This would be done by allocating a 'system' EWLF area which would be used to track the state of such transaction. Each record
-would contain enough information to let the init function roll back if a tearing happens.
-This would need some adaptation of current functions, to prevent them to erase old version before the extended transaction is marked completed.
-
-
-## EWLF without rollback without T3
-
-Current status: do we have roolback issue ?
-
-- zero_overwrite=true and T3 -> no: a partially programmed end marker is pinned at the first boot that shows V, and a complete one cannot drift to erased. 
-- zero_overwrite=false -> yes, through the partially programmed marker, until the next update. 
-- Without T3 -> yes on every flash, through the complete marker. 
-- With the second end marker -> no on any flash, with the two-cut residual as the only exception. The late-new row is V−1 then V, which your definition does not count.
-
-"no on any flash, with the two-cut residual as the only exception" actually means "yes" ! So here we try to make a design
-that really does not have rollback without T3 and zero_overwrite=true.
-
-Concept:
-- we have the following fields, each as a full programming words:
-  - version
-  - checksum
-  - flag-a (boolean, physically all ones/all zeroes)
-  - flag-b (boolean, physically all ones/all zeroes)
-  - valid (boolean, physically all ones/all zeroes)
-- programming order:
-  - step 0: flag-b of previous page (overwrite)
-  - step 1: data, version, checksum
-  - step 2: flag-a
-  - step 3: valid of previous version (valid=0, so previous page is now invalid)
-  - step 4: flag-b
-
-
-notation: 
-- 1: all bits are 1
-- !1: not all bits are 1, but not all bits are 0
-- 0: all bits are 0
-
-when version is latest and checksum is valid:
-
-    flag-a | flag-b | valid | prev-valid | meaning
-       1   |    1   |   1   |      1     | tearing before flag-a -> invalidate and never exposed to app, read return previous page
-       1   |    1   |  !1   |      1     | tearing during invalidation -> invalidate and never exposed to app, read return previous page
-       1   |    1   |   0   |      1     | invalidated, never exposed to app, read return previous page
-      !1   |    1   |   1   |      1     | tearing on flag-a -> repair before exposing to app
-       0   |    1   |   1   |     !1     | tearing on prev-valid -> repair before exposing to app
-       0   |   !1   |   1   |      0     | tearing on flag-b -> repair before exposing to app
-       0   |    0   |   1   |      0     | page looks good, expose to app
-
-repair operation: step 2,3 and 4
-invalidate operation: program valide of the latest page
-
-### Review of the proposal
-
-Not as written. The shape is right: flag-a says the data is complete, flag-b says flag-a is solid, and nothing
-is exposed before the repair is done. The table is not exhaustive, though, and two of the missing rows hold a
-rollback. The `valid` word and the steps on the previous page are where it breaks.
-
-**Counter-example 1, the kill against the repair.** Two cuts.
-
-1. The write of V is cut during flag-a. Flag-a is weak.
-2. Boot 1: flag-a reads 1. Row 1: the scan programs `valid` of V, and the power is cut during that program.
-   `valid` is weak too.
-3. Boot 2: `valid` reads 1, flag-a reads !1. Row 4: repair, then expose. The application reads V.
-4. Boot 3: `valid` reads !1. The state is flag-a 0, flag-b 0, `valid` !1, prev-valid 0. No row covers it. By
-   row 2, a `valid` word that is not all ones means invalidated, so the scan returns the previous page. The
-   application reads V-1.
-
-If flag-a and flag-b win over `valid` instead, there is no rollback, but a completed kill is then overridden the
-first time flag-a reads !1, so `valid` guarantees nothing. There is no safe kill word programmed in place: a
-word the scan programs to force "dead" can itself be left weak by a cut, it then reads 1 at one boot and !1 at
-another, and the alive path has no way to erase it. "Never exposed to app" in rows 1 to 3 is therefore not
-achievable this way, and the definition of rollback does not need it: V-1 then V is allowed. The next section
-has a kill that is safe, because its alive path does not depend on the killed record's words.
-
-**Counter-example 2, a weak word that reads zeros.** The write of V is cut during flag-a, and flag-a happens to
-read 0. Step 2 of the repair re-programs flag-a only if the code programs a word that already reads all zeros:
-`pin_unit()` deliberately never does, and whether the STM32L5 and STM32U5 accept that program is open point 2 of
-FLASH.md. If the repair skips flag-a and is then cut during flag-b, the next boot can read flag-a 0 and flag-b 0
-with both words weak: row 7, V exposed. A later boot reads both 1, with prev-valid 0: the previous page is
-invalidated and V is gone. An in-place repair therefore needs "all zeros over a word that reads all zeros", and
-a measurement that the program really pulses the cells, since a PROGERR without a pulse passes the accessor's
-read-back and silently reopens the hole.
-
-**prev-valid and step 0** take no part in the decision. prev-valid belongs to another record, so it cannot
-witness anything about this one, and if the positional predecessor was itself killed, its `valid` reads 0 for a
-reason unrelated to this record. Step 0 re-programs a word that is already solid in every case constructed
-here, and is zeros over zeros in the common case. Both go, unless they protect something not seen here.
-
-**What the table gets right**, and what the next section keeps: a flag programmed only once the data is
-complete, a second flag programmed only once the first is complete, exposure only after the repair, and the
-repair done by the scan, before the application runs.
-
-## Two flags, repair by copy, sticky abort
-
-This is the design the branch `ewlf-two-flags` implements. The section was first written as a proposal and
-then reviewed; "What the review found", below, lists the holes it had and the rules that close them. The
-rest of the section is the corrected design.
-
-### Record
-
-A record is: start marker, meta field, flag-a, flag-b, data. The start marker and each flag are one write
-unit. The meta field holds the 32-bit version and a 64-bit checksum, 12 bytes rounded up to whole write
-units, and is programmed in one call. The data is rounded up to whole write units. No magic, no pad.
-
-| write unit | 1 | 2 | 4 | 8 | 16 |
-|---|---|---|---|---|---|
-| header bytes | 15 | 18 | 24 | 40 | 64 |
-| records of 16 B of data per erase unit (W25Q32RV, CH32V307, M5531, L5, U5) | 132 | 120 | 204 | 36 | 102 |
-
-The checksum is CRC-64/NVME (polynomial `0xAD93D23594C93659`, reflected `0x9A6C9329AC4BC9B5`, init and
-final XOR all ones) over the four version bytes then the data, computed from the data meant to be
-written, as today. A version that reads `0xFFFFFFFF` (erased, or torn in the meta field) or `0` (a
-tombstone) is no record, and that test comes before the checksum, so an erased position costs one small
-read. Flag-a is today's end marker, flag-b the reserved word of "Does each word earn its place?"; the
-third column of that section's table is this record, with the smaller header. The model is T1, T2 and R3
-of the flash page. T3 is not used. `zero_overwrite` buys the sticky abort and the stuck-state pin.
-
-Writer, each step completed before the next one starts:
-
-1. start marker, zeros;
-2. data;
-3. meta field, one program;
-4. flag-a, zeros;
-5. flag-b, zeros.
-
-Two facts follow from the order, whatever the cuts, because the scan programs flag-a or flag-b in place
-in one situation only, the stuck state below, where they belong to a record whose data is already solid:
-
-- flag-a has a programmed bit only if step 3 completed: data, version and checksum are solid;
-- flag-b has a programmed bit only if step 4 completed: flag-a is solid zeros.
-
-### States and scan
-
-From one read of the meta field and both flags, a position is one of:
-
-    state    | checksum | flag-a   | flag-b   | how it got there
-    NONE     | invalid  | x        | x        | erased, torn before or during the meta field, tombstoned, foreign
-    ABORTED  | valid    | erased   | erased   | cut before flag-a, or flag-a weak and reading erased
-    HALF     | valid    | has a bit| erased   | cut during flag-a, between the flags, or during flag-b with flag-b reading erased
-    COMPLETE | valid    | x        | has a bit| complete, or cut during flag-b
-
-Notation as in the previous section: `x` is any reading. The scan collects the newest COMPLETE record
-(`complete`), the newest HALF (`half`), the newest ABORTED (`torn`, with which units of its meta field read
-all zeros) and the highest version of every valid record it saw, then loops, at most one pass per record
-position plus two, over:
-
-1. `torn` newer than both `complete` and `half`: with `zero_overwrite`, tombstone it and start over.
-   Without `zero_overwrite`, ignore it.
-2. `half` newer than `complete`: if a position exists for a copy without erasing a protected unit, copy it
-   forward and start over, so that the copy is found as COMPLETE. Otherwise, the stuck state: with
-   `zero_overwrite`, pin flag-a of `half` then flag-b in place and start over; without, expose `half`.
-3. Expose `complete`. None: `LFTL_ERROR_NO_VALID_VERSION`.
-
-`ctx->data` is assigned once, at the end. Every version comparison is strict, and
-`LFTL_ERROR_VERSION_COLLISION` is raised for two COMPLETE records of one version only: that stays
-impossible (COMPLETE implies a solid meta field and the numbering below), while a HALF or ABORTED record
-sharing a version with a COMPLETE one is reachable after a cut tombstone and harmless.
-
-Tombstone: the meta field programmed to zeros, every write unit of it that did not read all zeros in the
-reading the decision was made on, checksum units first. After it the version reads 0 and the record is
-NONE for good. A cut tombstone can leave the meta field weak; the record then reads NONE or ABORTED at
-later boots, and ABORTED is tombstoned again.
-
-Copy: the record's data is written again as a new record through the write path, with the half record as
-the current one (next position below it, stepping over started positions), the physical address of its
-data as the source, the version base taken from the scan's own validated readings and never from a
-re-read meta field, and a rollover allowed only into a unit that holds neither `complete` nor any HALF
-record newer than `complete`. The copy ends with a solid flag-b, since the scan returned from its program.
-If the copy is cut, nothing was exposed at this boot, and the next boot finds the torn copy as the newest
-record and applies the same rules to it.
-
-Stuck state: no position for the copy. It is reached after a cut in a flag of a write at the top of a unit
-followed by r-1 power cuts each landing inside a repair copy, r records per unit, in a two-unit area;
-larger areas offer more positions first. The pin then makes the record COMPLETE for good once it returns,
-and a cut pin is retried at the next boot. Its one residual: a weak flag that reads all zeros is left
-unprogrammed on a flash that refuses zeros over zeros (FLASH.md open point 2), and a later reading of it as
-erased can turn the record ABORTED after it was exposed. Where the flash accepts that program, the
-STM32L5 and U5 to be measured, the pin programs unconditionally and there is no residual at all.
-
-Step-over: the writer, stepping over a started position whose checksum fails, tombstones its meta field
-with `zero_overwrite`, as it already re-pins its start marker. A record whose meta field reads garbage at
-this boot must not come back later with a version the writer is about to reuse.
-
-### Why there is no rollback
-
-A record is exposed either after a program the scan completed in this boot (the copy's flag-b, or the
-stuck-state pin), or on a reading of flag-b with a programmed bit, which proves flag-a solid. A solid
-zero word never reads all ones again, so an exposed record is HALF or COMPLETE at every later boot, it is
-never tombstoned (only ABORTED readings are), its unit is never erased by a copy (protected) nor by the
-application's writer (which erases only the unit below the current record's), and a newer record takes its
-place only when it is exposed under the same rules. The application can read V then V, or V then V+k;
-never V then V-1. Any number of cuts, any flash under T1 and T2, with the stuck-state residual above as
-the only exception. Rows 1 and 2 of the residual table of `design.rst` are closed; row 3, late new, is
-closed by the tombstone when it completes, and is V-1 then V, not counted, when it is cut.
-
-Why the abort sticks where `valid` did not. Both are a word the scan programs over a record it rejects,
-and both can be left weak by a cut. With `valid`, the record came back in place, so its weak kill word
-kept a say at every later boot and a reading of it could take the record away after the application had
-seen it. Here a tombstoned record comes back, if at all, only to be copied, and the copy is a new record
-whose fate no word of the old one decides. A completed tombstone is final.
-
-### What the review found
-
-The first version of this section tombstoned the half record in the stuck state, protected only the copy's
-source from the rollover, let the write path number the copy from a re-read meta field, and let two half
-records share a version. Each was a rollback or a loss:
-
-1. **Tombstoning the half record.** A write cut in flag-b has a solid flag-a and is exposed at a boot where
-   flag-b reads partially programmed. At a later boot flag-b reads erased, the record is HALF and copied,
-   the copy is cut, and when no room is left the stuck state tombstoned the source: V then V-1. A HALF
-   record is never tombstoned; the stuck state pins instead.
-2. **The chain erasing its ancestor.** Copies cut in flag-a are mortal (their flag-a may read erased
-   later); the exposed ancestor is in another unit, and a chain long enough to roll over could erase that
-   unit, then every remaining copy reads ABORTED: loss after V was exposed, or V-1. A copy never erases
-   the unit of `complete` nor one holding a HALF record newer than `complete`.
-3. **The version base.** The write path read the current record's version without a checksum; a half
-   record whose meta field is weak after a cut tombstone can read a smaller value, the copy is numbered
-   below `complete`, and a stale COMPLETE record of that number collides. The scan passes the base.
-4. **Two half records of one version.** A write aborted and tombstoned, the tombstone cut, its meta field
-   reading garbage when the next write is numbered, that write reusing the number and cut in flag-b: at a
-   later boot both read HALF with the same version, and the older write could be copied after the newer
-   was shown. The step-over tombstone and the strict comparisons close it.
-
-Smaller points from the same review, all applied: the fast scan keys a unit on its top record whenever
-the checksum verifies, walks the whole next unit in write order instead of its top record, and falls back
-to the linear pass when the current unit holds no COMPLETE record; the copy bypasses the source
-translation of the application write path; a tombstone on a multi-unit meta field skips units that
-already read zeros; `ctx->data` is never left on a half record when a copy fails; the test harness must not
-take `LFTL_INTERNAL_ERROR` for a simulated cut.
-
-### Costs and bounds
-
-- One position per copy, after a cut during flag-a or between flag-a and flag-b; one word program per
-  tombstone, after a cut before or during flag-a; a flag pin in the stuck state. Nothing is programmed at
-  boot otherwise.
-- A record that was exposed is never lost: not tombstoned, not erased by the scan, and the application's
-  writer erases only the unit below the current record's. The two-page `boot_data` log does worse: 17
-  consecutive torn writes erase its last complete entry.
-- Without `zero_overwrite` (CH32V307, W25Q32RV) there is no tombstone and no pin: an aborted write may come
-  back once through a copy, V-1 then V, and the stuck state exposes the half record directly, which is a
-  rollback only if that record was never exposed and its flag-a later reads erased. Today those flashes
-  roll back after a single cut; with this design after r cuts in a row.
-- The start-marker pin of the step-over is unchanged and plays no part here: it lets the fast scan halve on
-  start markers, and without it the current unit is read bottom-up, as today.
-- EWLF areas written by v0.2.0 are not readable by this layout and must be formatted again; regular areas
-  are untouched. v0.1.0 had no EWLF.
+# EWLF: extreme wear-leveling factor areas, without rollback
+
+This is the design proposal for EWLF areas: areas that pack many versions of a small block of
+data into few erase units, so that the wear-leveling factor is many times the number of erase
+units allocated. The goal, beyond the factor, is an anti-tearing argument with **no residual
+rollback and no residual loss**: after any sequence of power cuts at any instant, a boot shows
+the last version an update acknowledged or a newer one, a version shown at one boot is never
+taken back at a later one, a write that was never acknowledged is never shown after an older
+version was, and the data is never lost. What remains is a *stuck* state, reached only by a
+long run of consecutive boots each cut inside the same short window and sized by a
+configuration constant, in which the area refuses to show a version it cannot prove rather
+than guess. The data is then physically present but not vouched for: a loss of availability,
+discussed under "Residuals". The area reports at every boot how many such cuts it can still
+absorb, and writes nothing at a boot until the application has seen that figure and asked it
+to proceed.
+
+The target is the STM32U5A5: write unit (word) of 16 bytes, erase unit of 8 KB, erased bytes
+read `0xFF`, and the programming rule of RM0456 section 7.3.9 as measured in `FLASH.md`: a
+program is accepted into a word that reads erased, or when the data is all zeros into a word
+that reads partially programmed; everything else, including all zeros over a word that reads
+all zeros, is refused with PROGERR and programs nothing. The tearing model is T1-T5 of the
+[flash page](https://lean-ftl.readthedocs.io/en/latest/flash.html): a cut affects only the
+word or unit being written (T1); a word whose program was cut is *weak* and may read anything,
+differently at every boot (T2); T3 is never assumed; a cut erase leaves cells that may read
+erased at one boot and not at a later one, and a word programmed into them may later read
+wrong (T4); a weak word may fault instead of returning data (T5). The design has been model
+checked against exactly this model (section "Model check").
+
+## The principle: a reading proves nothing, a returned program does
+
+A word a cut left weak may read valid today and erased tomorrow. So no decision that a later
+boot could contradict is ever taken on a reading: what is shown, what is erased, and the order
+of versions rest only on programs that *returned*, either in the current session or, for
+earlier sessions, through a **chain proof**: when the protocol programs word B only after the
+program of word A returned, B reading programmed (all zeros, for a zero word that proves
+something) proves that A is solid and reads its value for ever. The last word of a chain is never proven; the protocol is arranged so that nothing
+depends on it. All zeros is special: a program of all zeros that returns leaves solid zeros
+whatever the word held, so zero words are the only marks that can be renewed; they cannot be
+confirmed once they read all zeros, so no single zero word is ever trusted as a durable mark.
+
+Three consequences shape the layout:
+
+- the data and the decision live apart: records hold data, a **log** of entries says which
+  record is current, and the log is appended to, never decided from a reading;
+- a torn erase is invisible from inside the unit (T4), and a weak entry of the new generation
+  exposed to a torn erase can come back later, above the live content: so content enters a
+  unit only after an erase that returned in the same session and a **certificate** that
+  session saw return, written in the other unit, or above a word that entered that way; a
+  unit without a certificate reading programmed is erased before use, which is safe because
+  nothing entered it;
+- a solid copy of the decision must exist outside a unit before that unit is erased, and
+  above anything that could resurface before a record is erased or a version is shown:
+  **reserved pairs** and the **bury** rule provide it.
+
+## Layout
+
+```
+area = N data units (N >= 2) + 2 log units, all 8 KB on the STM32U5A5
+
++-----------+------  ------+-----------+-----------+-----------+
+|  D(N-1)   |              |    D0     |    L1     |    L0     |
+|  records  |              |  records  |  pairs    |  pairs    |
++-----------+------  ------+-----------+-----------+-----------+
+```
+
+**Record**, in a data unit, positions of fixed size numbered from the top of the unit; the
+highest started number is the newest:
+
+```
++--------------+---------------------------+---------------------+
+| start marker |           data            |        meta         |
+|  all zeros   |      data_size bytes      | version, checksum   |
+|  one word    | rounded up to whole words |  12 B in one word   |
+|  programmed  |                           |                     |
+|  1st         |           2nd             |         3rd         |
++--------------+---------------------------+---------------------+
+```
+
+The meta field holds the 32-bit version and the CRC-64/NVME of version and data. A record has
+no flag: whether it is current is the log's business. A record whose words are weak is never
+elected (no entry names it after a boot, see the bury rule) and never repaired; it is dead in
+place until its unit is erased.
+
+**Log unit** (generation g lives in unit g mod 2): from the top, `P` regular pair positions,
+then `R` reserved pair positions, then `X` certificate words.
+
+```
++---------+---------+-- --+---------+----------+-- --+----------+------+-- --+------+
+| pair 0  | pair 1  |     | pair P-1| reserved |     | reserved | cert |     | cert |
+| regular | regular |     | regular |  pair 0  |     | pair R-1 |  0   |     | X-1  |
++---------+---------+-- --+---------+----------+-- --+----------+------+-- --+------+
+```
+
+**Pair**: three words, programmed in this order, each only after the previous one returned:
+
+```
++--------------+----------------------------------------------+--------------+
+|   marker k   |                   entry e                    |  confirm c   |
+|  all zeros   | generation 2 B, data unit 1 B, position 1 B, |  all zeros   |
+|   one word   | version 4 B, CRC-64/NVME of the above 8 B    |   one word   |
++--------------+----------------------------------------------+--------------+
+```
+
+- *k* first, so that a position whose entry may be weak is visibly started at every boot
+  (zeros never read as anything but zeros or erased, and a program of zeros over a weak
+  marker makes it solid); a valued word is thus never programmed over a weak one;
+- *e* names the record by unit and position (the lookup is one read), carries the version
+  and the generation of its unit, and is *valid* when its CRC verifies and its generation
+  has the parity of its unit. The record's own meta field carries the data checksum, so the
+  entry needs no copy of it;
+- *c* after e returned: c reading all zeros proves e solid (chain proof). An entry whose c
+  reads all zeros is *proven*. All zeros, not any zero bit: T5 says that an erased line with
+  two flipped bits goes undetected, so a few zero bits in a word that should be erased are no
+  evidence; a returned program of zeros always reads all zeros, and a weak one that reads
+  partially programmed only costs a bury.
+
+Regular pairs take the application's updates. Reserved pairs are never taken by an update's
+regular append: they serve the scan's re-commits and the switches, so that a full unit still
+has room to make a decision solid. Certificate words are zero words, and count as programmed only when they read all zeros
+(same reason as c); a certificate of unit L programmed and returned means: *the erase of the
+other unit returned in the session that programmed it, and content of the next generation
+may have entered the other unit since*.
+
+Generations are compared as successors modulo 2^16: the two units always hold adjacent
+generations, so 16 bits never wrap into a wrong order.
+
+`X` is an area parameter, given at registration like the data size, with a build-time default
+(`LFTL_EWLF_CERTIFICATES`, 32) for the areas that leave it at zero; `R` is a build-time
+constant (8). Both are part of the on-flash format of the area: nothing in the area records
+them, the layout follows from them at registration, `P` = (words per unit - `X` - 3 `R`) / 3,
+and an area whose `X` changes must be formatted again. The configuration check requires
+`X` >= 1 and room for the `R` reserved pairs plus two regular ones. The protocol does not
+depend on the value: only the stuck count and `P` move, three certificates per regular pair.
+On the STM32U5A5 with `R` = 8 and `X` = 32: 896 bytes reserved, `P` = 152 regular pairs
+(48 bytes each) per 8 KB log unit; `X` = 16 gives `P` = 157, `X` = 64 gives 141, `X` = 128
+gives 120.
+
+## What a boot derives from one reading of the log
+
+Every word of both log units is read once per session (one memory-mapped pass of 16 KB on
+the STM32U5A5; a reading is never repeated within a session, T2). From these readings:
+
+| name | definition |
+|------|------------|
+| started position | any of its three words reads anything but erased; a garbage or faulting reading (T5) counts |
+| valid entry | e reads valid: CRC verifies, generation parity matches the unit |
+| proven entry | valid, and its c reads all zeros (e is then solid by the chain proof); a faulting c counts as erased |
+| `started(l)` | the last started pair position of unit l, regular or reserved |
+| `closed(l)` | a reserved position of l is started, or any certificate of l reads all zeros; no regular append goes to a closed unit (reserved pairs may still be used) |
+| `certified(l)` | any certificate of l reads all zeros; it speaks about the OTHER unit's erase; a faulting certificate counts as erased |
+| live unit `L` | the unit with the highest generation among units holding a valid entry; `O` the other |
+| decision `D` | the newest valid entry of L: highest position, reserved positions counting as newer than regular ones |
+| `uncertain(O)` | L is certified, O has a started pair position and no valid entry: a carry attempt of generation g+1, possibly weak, may be there |
+| top solid | D is proven, nothing is started above D in L, and O is not uncertain |
+
+The order of consultation: first the valid entries of both units, which decide L by
+generation; then the certificates of L; then, only when L is certified, O's started
+positions. O's own certificate words are never read: they belong to O's previous life and may
+be ghosts of a torn erase. Without a certificate of L, O's started positions and weak words
+are a dead life or a ghost of a lower generation, and are not consulted. A weak word that
+reads programmed may close or certify a unit too; that only costs an earlier switch, never a
+wrong decision.
+
+D is the newest *valid* entry, not the newest proven one, on purpose: with L = [w2 proven,
+w3 with e solid and c weak], a boot that reads c programmed shows w3; a later boot that reads
+it erased must not fall back to w2, it re-commits w3.
+
+## Boot scan
+
+The scan is two calls, so that the application decides before anything is written: a
+read-only first phase, run by the registration call, and a completion call that writes only
+when a repair is pending. Between the two the application is running, not yet fully
+initialised; it can ask for the state of the area and decide.
+
+**Phase 1, read-only** (`lftl_register_area_ewlf`):
+
+1. Read both log units; find L, O and D. No valid entry anywhere: `LFTL_ERROR_NO_VALID_VERSION`
+   (never formatted, a cut format, or foreign flash).
+2. Check that D's record is in place (its meta field reads D's version and the checksum
+   verifies). It always is for an entry this protocol wrote (section "Why there is no
+   rollback"); a mismatch comes from a cut first format (section "Format") or a flash fault,
+   and is reported as no valid version.
+3. Derive the state of the area and keep it in the context for the session: whether the top
+   is solid and, if not, which repair is pending (a bury in L, a carry into O, or a switch
+   with an erase); the *remaining cuts* figure of the "Residuals" section; D's version. A
+   status call returns them. A pending repair that has no room is reported as stuck by that
+   call.
+
+**Phase 2, completion** (`lftl_ewlf_complete_scan`, name to be fixed in the implementation):
+
+4. If the top is solid: show D's record. Programs nothing, erases nothing: this is every boot
+   after a session that was not cut, with the exception stated under residual (f).
+5. Otherwise **bury** D first, then show it. To bury is to re-commit D above every started
+   position, by the first of these that applies: when O is uncertain, carry D into O above O's
+   started positions by switch step 3 (a copy appended in L would leave a possible
+   generation g+1 entry above it); else append the copy at L's first free regular position
+   above the started ones, if L is open and has one; else at a fresh reserved pair of L; else
+   switch with D as the carry. The copy's three programs return before anything is shown.
+   No room anywhere: stuck, nothing is written.
+
+Phase 2 decides from phase 1's readings and never reads the log again (T2). Until it has run,
+`lftl_read` and `lftl_write` on the area are refused with `LFTL_ERROR_EWLF_PENDING`, so that no
+unvouched data reaches the normal path; when the top is solid the completion call is a no-op,
+and the application may call it unconditionally. An explicit **unproven read**
+(`lftl_read_unproven`) is available from phase 1 on, pending or stuck: it returns D's record,
+which is solid in place (its programs returned before D's entry was started, and its unit is
+never erased while D can name it), and within the session it is exactly the version phase 2
+will make solid; what is unproven is that a later boot, if this session ends before phase 2,
+elects the same one. An application that needs this area's content to decide, for instance to
+authenticate the user before proceeding, uses it knowing that; its own state for that
+decision, such as a retry counter written before a check, must live in another area, since
+this one accepts no write before phase 2.
+
+For the argument and the checker the split changes nothing: a session that ends between the
+two phases is a cut before the first program of the bury, a cut point the checker explores,
+and a session that completes later is the uncut scan.
+
+## Update
+
+An update (`lftl_write`, `lftl_basic_write`, `lftl_erase_all`) does, in order, each step
+started only after the previous one returned:
+
+1. *Room for the record*: the first position of the current record's data unit above the last
+   started one (start marker reading programmed). A position whose start marker the flash
+   refuses to program (a weak marker that reads erased this instant) counts as started and is
+   stepped over. If the unit has none left: rollover.
+2. *Rollover*: erase the next data unit (cyclic order, never the unit holding the current
+   record), whatever it reads, right before its first record (T4); use its top position. The
+   implementation checks that the top is solid first and buries D if not; after a scan it
+   always is, since the scan showed D only with a solid top and every program since
+   returned: the check is defensive.
+3. Program the record: start marker, data, meta.
+4. *Commit*: append the pair (k, e, c) at L's first regular position above the started ones,
+   if L is open and has one; otherwise **switch**, with the new entry as the carry. A refused
+   program of k, e or c (a weak word reading erased this instant) counts the position as
+   started; the next position is tried.
+5. Return success. The update is acknowledged only after c returned.
+
+The remaining cuts figure is the application's guard on this path: a write that needs a
+switch is the attempt the certificate reserve counts, every boot shows D meanwhile, and the
+library refuses nothing before stuck itself. After a switch that returned the figure is back
+to `X`; the status call recomputes it from the session's state.
+
+A cut before step 4's last word leaves the next boot free to make either version current: the
+old one if the new entry does not read valid then (the new record is dead in place), the new
+one if it does; whichever it is, the boot leaves it solid above everything started (a bury,
+unless nothing above D is started) before showing it, and that choice is never revisited. A
+cut after c returned leaves the new version current.
+
+## Switch, from L (generation g) to O (generation g+1)
+
+Done by the session that needs room in O, a scan or an update, with the entry to commit as the
+*carry*, the first entry of O's new life (an ordinary entry of generation g+1):
+
+1. If no certificate of L reads programmed and L has no proven entry: program a fresh reserved
+   pair of L copying D, so that a solid decision exists outside O before O is erased (no free
+   reserved pair: stuck). D may then be a weak entry reading valid, a forward choice that
+   this pair makes solid before the only solid entry, in O's previous life, is erased.
+2. If no certificate of L reads programmed, or no pair position of O is started: erase O in
+   this session, whatever it reads; program a fresh certificate of L and see it return (no
+   free certificate: stuck); write the carry at O's top position.
+3. Otherwise (a certificate of L reads programmed and O has a started pair position): write
+   the carry at O's first free position above its started ones, regular or reserved (none:
+   stuck). No erase and no new certificate: the started word was programmed after a
+   certificate returned, by the session that programmed both, so a solid certificate exists
+   and no later boot erases O. When the carry lands on a reserved position, O is live and
+   closed at birth: the next update switches again at once, and that update costs two log
+   erases; when it lands on O's last reserved pair with its confirm cut, the next boot is
+   stuck at once (no room to bury).
+
+Why the certificate: without it a boot cannot tell a carry attempt, whose entry may be weak,
+from a ghost of O's previous life, and must choose between erasing O (a torn erase then leaves
+the weak generation g+1 entry able to come back above the live content, which the checker
+turns into a resurrection then a rollback) and writing into O (into weakly erased cells if it
+was a ghost). The certificate decides it: it reads programmed only if its program started,
+after O's erase returned.
+
+Why step 2 erases a certified O with no started pair position: the certificate that reads
+programmed may be weak, the attempt it belongs to may have died in the carry's marker, and
+the session that reads it cannot know which. Writing the carry on that reading would put a
+generation g+1 entry under a certificate that may read erased at the next boot, which would
+then erase O again, possibly torn: the case above. An erase this session sees return and a
+certificate it sees return re-establish the invariant at the cost of 0.88 ms; O holds nothing
+to lose (no started pair position). The checker confirms the clause is load-bearing (negative
+control "empty" in the model-check table).
+
+## Why there is no rollback and no loss
+
+1. *What is shown is solid.* D is proven (its c reads a zero bit, programmed only after e
+   returned) or was re-committed by three programs that returned this session, and the show
+   comes after the last of them returned. A solid entry reads valid at every later boot until
+   its unit is erased. Its record is solid too: programmed before the entry, into a unit
+   erased in the session of that unit's first record, before it; and a unit holding a record
+   that may still be elected is never erased (points 4 and 5).
+2. *Order is (generation, position), never a reading.* An entry is written only above every
+   started position of its unit, by an update (a newer version) or a bury (a copy of D).
+   Generations advance by one per switch. Nothing can outrank a shown D later: everything
+   started above D at the time, in L or in an uncertain O, was buried under a solid copy of D
+   before D was shown, and later entries are newer by construction. This is also why an
+   aborted write is never shown after an older version was (no resurrection): once a boot
+   showed D, every started position that could hold the aborted write lies below a solid D.
+3. *No ghost of a torn erase is elected or programmed into.* Content enters a unit only after
+   an erase that returned in the same session and a certificate that session saw return, or
+   above a word that entered that way. A unit whose certificate does not read programmed is
+   erased again before use, and that is safe: nothing entered it since its erase. A ghost
+   that reads valid entries holds its unit's previous generation, below the live one.
+4. *Erasing a log unit destroys nothing elected.* O is erased only when nothing entered it
+   (no certificate of L reads programmed, and then only after L holds a proven entry, made if
+   needed by a reserved pair, since O's previous life may hold the only proven decision), or
+   when it has no started pair position (nothing to lose).
+5. *Erasing a data unit destroys nothing elected.* The current record's unit is never erased,
+   and a data unit is erased only in a session whose scan left D solid above everything
+   started, so every entry whose record goes is below a solid D.
+
+What a possibly weak reading may trigger, and what it never decides:
+
+| reading | may trigger | never |
+|---------|-------------|-------|
+| c of the newest valid entry reads erased | a bury (three programs) | choosing an older version |
+| a started position above D, e reading erased or garbage | a bury | electing that position later: it is buried |
+| a started position above D, e reading valid | that entry becomes D and is buried (a forward choice) | taking it back later |
+| a certificate of L reads programmed | an early switch, no erase of O while a pair position of O is started | erasing content that entered O |
+| a certificate of L reads erased | an erase of O | erasing content that entered O: none did |
+| O started, no valid entry, L certified | a carry above O's started positions | electing O's weak attempt later |
+| a start marker, a pair word or a certificate refused | the next position or word | a wrong version |
+
+The classic failure shapes, one by one:
+
+| the cut lands in | the next boot sees | outcome |
+|------------------|--------------------|---------|
+| record (marker, data, meta) | position started, no entry names it | old version; dead record stepped over |
+| entry e, reads invalid | started position above D: bury | old version stands, solid |
+| entry e, reads valid | D unproven: bury (re-commit) | new version stands, never taken back |
+| confirm c | e solid; shown if c reads a bit, else re-committed | new version stands |
+| bury or carry | same state one position higher | repeats, converges |
+| data-unit erase | ghost records, no entry names them | redone before the first record (T4) |
+| log-unit erase, O not certified | ghost of generation g-1 | erased again before use |
+| log-unit erase, O certified with no started pair position | an empty O, or a weak carry marker now reading programmed | erased again, or a carry above it; nothing entered O |
+| certificate | O erased, no started pair position | O erased again, new certificate |
+| certificate returned, then the carry's marker | O started under a certificate, or empty | carry above it, or erase again (one certificate burnt) |
+
+## Residuals
+
+**Stuck.** The one state in which the protocol refuses to proceed, reported as
+`LFTL_ERROR_EWLF_STUCK` (to be added). It has two faces. At an update: the switch finds no
+free certificate, reserved pair or position; the write fails, every boot still shows D (the
+top is solid), and every later write fails the same way. At a boot: phase 1 of the scan finds that
+the bury would have no room; phase 2 refuses to show a version it cannot prove. Both are a
+loss of availability, not of data: the content is physically present, and in the second case
+the version the scan would have chosen is readable but not vouched for. The way out is the
+unproven read of the "Boot scan" section, which salvages that content, then a format, which
+gives the rest up. Stuck is reached only by exhausting a reserve, one word, pair or position
+per cut, each cut inside a specific program of a switch or a bury:
+
+| reserve | what one cut burns | window per cut on the STM32U5A5 | boots to stuck |
+|---------|--------------------|--------------------------------|----------------|
+| certificates `X` of L | a cut in the certificate's program, or in the carry's marker right after it, the marker then reading erased | 256 us | `X` = 32 attempts |
+| positions of O | a cut in a carry program, O then holding a started position | 384 us | `P` + `R` = 160 attempts |
+| reserved pairs `R` of L | reachable only once L holds no proven entry: a cut in every pair of L's life (`P` cuts, each in e or c, 256 us, or k if the program is refused later), then a cut per reserved pair | 256 to 384 us | `P` + `R` = 160 attempts |
+
+Burnt words stay burnt until their unit is erased, two switches later; what ends the count
+is a returned carry. The attempts need not be consecutive boots: a boot that does not switch
+neither burns nor resets, so `X` bounds consecutive attempts at one switch, possibly spread
+over days. The certificates dominate: 32 attempts each cut in the same 256 us window, each
+preceded by the 0.88 ms erase of O. A brown-out that recurs at a fixed point of a switch on
+marginal power is the realistic way there, so `X` should be sized for it: 64 certificates
+cost 1 KB of each log unit. A third log unit does not help here; a larger `X` does.
+
+**Remaining cuts, the figure the application gets.** Phase 1 of the scan, and the status
+call at any time in the session, report one integer: the smallest number of further cuts,
+each at the worst instant, after which the area is stuck. It is the minimum of three counts
+from the session's reading of the log, every word that does not read erased counting as
+burnt, a faulting one included:
+
+- the certificate words of L that read erased: the next switch from L burns one per cut;
+- when L is certified, the pair positions of O above its started ones: one per cut in a
+  carry;
+- when L holds no proven entry, the free positions of L, regular if it is open plus
+  reserved: one per cut in a bury, after which step 1 finds no pair.
+
+The first count is at most `X`, the others at most `P` + `R`, so outside a bad episode the
+figure is the certificate count. It is back to `X` after a switch that returned, since the
+new live unit's certificates are fresh; the application's own writes never move it, nor does
+a cut outside the windows of the table above. The application applies the threshold it
+wants: before a write, from the status call; at a boot, between the two phases of the scan.
+What the figure cannot see is a burnt word that a cut left weak and that reads erased at this
+boot: it is the word the next attempt programs, and zeros that return over it are solid, so
+the figure is right for this session; T2 allows several such words to read programmed at a
+later boot, so across sessions the figure is not monotonic in the strict model. A tally word
+of zeros, programmed and returned before each erase of O, would make it a lower bound at
+every boot (`X` minus the tallies reading programmed) for one word per switch and `X` words
+per log unit, without changing any decision; it is not part of this proposal, pending a
+measurement of whether a word the STM32U5A5 was cut in ever reads erased afterwards.
+
+**Writes at a clean boot (f).** A boot after a session that was not cut programs nothing,
+with one exception inherited from T2: a word left weak by an older cut that reads differently
+than it did at the boot that followed the cut. A weak confirm of D reading all zeros then
+erased, or a weak marker above D (or a weak carry marker in a certified O) reading erased
+then programmed, makes the top not solid at that later boot: one bury or one carry, three
+words, or, when L has no free position left, the switch the next update would have made (one
+erase, one certificate, one carry). The decision does not change. With the two-phase scan
+this write is a pending repair that phase 1 reports and phase 2 performs, not a silent one.
+
+**Availability after a stuck-free cut.** The next boot programs at most one bury (three
+words), or one switch: at most one reserved pair, one erase, one certificate and one carry,
+plus the words it steps over, bounded by the positions of a unit; an update in the same
+session may add a data-unit erase and its own commit.
+
+## Costs on the STM32U5A5
+
+- **Flash**: two log units per area (16 KB) plus `N` data units; two words per record (start
+  marker and meta) and 48 bytes of log per update.
+- **Update**: the record (two words plus the data) and three words of log, 21 word programs
+  for 256-byte data (2.7 ms), 9 for 64-byte data (1.2 ms); one data-unit erase every `K`
+  updates (`K` records per unit) and one log-unit erase every 152 updates of the area, each
+  0.88 ms.
+- **Boot**: one pass over 16 KB of log and one record check in the read-only phase; the
+  completion phase programs nothing after a clean session, but for residual (f), and nothing
+  at all until the application calls it.
+- **Wear**: with 256-byte data, `K` = 28 records per unit and `N` = 2: each data unit erases
+  every 56 updates, each log unit every 304; the area outlives 560 k updates on 32 KB where a
+  regular area of the same size allows 40 k.
+- **Given up**: transactions (every update writes a whole record) and record repair: a dead
+  record stays dead until its unit rolls over.
+
+*Variant: the record inside the pair.* Marker, data, meta, confirm in the log unit itself,
+no data units: two words fewer per update, two units fewer per area, a minimum area of 16 KB.
+Its price: a bury or a carry copies the data; the reserved positions are data-sized (with
+`R` = 8 they take 17 % of a unit at 128-byte data); and the "positions of O" reserve falls to
+the positions of one unit (43 for 128-byte data, 25 for 256-byte). At equal area its wear
+budget is 0.9 to 2.9 times the base's depending on the data size (table below), and only
+through a ring of more than two log units. The two-phase scan, the remaining cuts figure
+and the unproven read apply unchanged. Model checked with the base (`proto_v4p.py`, section
+"Model check"); worth it for data of a few tens of bytes.
+
+### Key figures
+
+Both designs on the STM32U5A5: 16-byte word, 512 words per 8 KB unit, 128 us per word
+program and 0.88 ms per erase (`FLASH.md`), 10 k erase cycles per unit, `R` = 8, `X` = 32,
+core at 160 MHz for the scan estimates. Nominal figures: a session that is cut burns the
+positions and words it started, which the figures do not count. `w` is the data size in
+words.
+
+**Base proposal**, `N` data units and 2 log units, 4 units at least. A record is `w` + 2
+words, `K` = 512 / (`w` + 2) records per data unit, `P` = 152 regular pairs per log unit; the
+area supports 10 k x min(`N` x `K`, 2 x `P`) updates, "log" marking the cells where the log
+factor 2 x `P` = 304 is the smaller one:
+
+| data size | 4 B | 16 B | 64 B | 128 B |
+|-----------|-----|------|------|-------|
+| record, words | 3 | 3 | 6 | 10 |
+| records per data unit `K` | 170 | 170 | 85 | 51 |
+| updates, 4 units (`N` = 2, 32 KB) | 3.04 M, log | 3.04 M, log | 1.7 M | 1.02 M |
+| updates, 8 units (`N` = 6, 64 KB) | 3.04 M, log | 3.04 M, log | 3.04 M, log | 3.04 M, log |
+| updates, 16 units (`N` = 14, 128 KB) | 3.04 M, log | 3.04 M, log | 3.04 M, log | 3.04 M, log |
+| cuts to stuck | 32 | 32 | 32 | 32 |
+| next reserve, positions of O | 160 | 160 | 160 | 160 |
+| scan, clean boot (estimate) | 0.14 ms | 0.15 ms | 0.18 ms | 0.22 ms |
+| boot after a cut, worst, on top of the scan | 1.8 ms | 1.8 ms | 1.8 ms | 1.8 ms |
+| update, typical | 0.77 ms, 6 words | 0.77 ms, 6 words | 1.15 ms, 9 words | 1.66 ms, 13 words |
+| update, worst (rollover and switch) | 2.7 ms | 2.7 ms | 3.0 ms | 3.6 ms |
+| flash programmed per update | 96 B | 96 B | 144 B | 208 B |
+
+**Variant**, record in the pair, 2 log units at least. A pair is `w` + 3 words; a unit holds
+floor(480 / (`w` + 3)) positions after the 32 certificate words, `P'` of them regular after
+the 8 reserved ones; the area supports 10 k x `M` x `P'` updates with `M` log units. The
+4- and 8-unit rows assume a ring of `M` units, generation g in unit g mod `M`, every switch
+targeting the next unit: an extension that `proto_v4.py` does not cover (it asserts two log
+units).
+
+| data size | 4 B | 16 B | 64 B | 128 B |
+|-----------|-----|------|------|-------|
+| pair, words | 4 | 4 | 7 | 11 |
+| regular positions per unit `P'` | 112 | 112 | 60 | 35 |
+| updates, 2 units (16 KB) | 2.24 M | 2.24 M | 1.2 M | 0.7 M |
+| updates, 4 units (32 KB, ring) | 4.48 M | 4.48 M | 2.4 M | 1.4 M |
+| updates, 8 units (64 KB, ring) | 8.96 M | 8.96 M | 4.8 M | 2.8 M |
+| cuts to stuck | 32 | 32 | 32 | 32 |
+| next reserve, positions of O | 120 | 120 | 68 | 43 |
+| scan, clean boot (estimate, 2 units) | 0.14 ms | 0.16 ms | 0.22 ms | 0.30 ms |
+| boot after a cut, worst, on top of the scan | 2.0 ms | 2.0 ms | 2.8 ms | 3.8 ms |
+| update, typical | 0.51 ms, 4 words | 0.51 ms, 4 words | 0.90 ms, 7 words | 1.41 ms, 11 words |
+| update, worst (switch) | 1.5 ms | 1.5 ms | 1.9 ms | 2.4 ms |
+| flash programmed per update | 64 B | 64 B | 112 B | 176 B |
+
+How the lines are computed:
+
+- *Cuts to stuck*: `X` consecutive switch attempts, each cut inside the certificate's program
+  or the carry's marker (the 256 us window of the residual table); cuts anywhere else never
+  lead to stuck. The next reserve is the "positions of O" line of that table, `P` + `R` or
+  `P'` + `R`; the reserved pairs are the third. Every reserve stays above `X`, so `X` sizes
+  the residual in every cell.
+- *Scan, clean boot*: one memory-mapped pass over the log (16 KB, about 0.13 ms with the
+  erased/zeros classification of every word), then the CRC-64 of two entries and of one record
+  (base: data + 4 B) or of the newest position of each unit (variant: data + 6 B), with the
+  bitwise CRC-64 of `ftl_internal.h` at about 0.6 us per byte. A ring adds 8 KB of reading
+  per unit. Estimates, to be measured on the board.
+- *Boot after a cut, worst*: base: a switch with step 1, one reserved pair, one erase, one
+  certificate and one carry, 0.38 + 0.88 + 0.13 + 0.38 ms; a bury alone is 0.38 ms. Variant:
+  the same with data-sized pairs, 2 x (`w` + 3) + 1 words and one erase; a bury alone is
+  `w` + 3 words, 0.5 ms at 16 B and 1.4 ms at 128 B.
+- *Update, typical*: `w` + 5 words in the base, `w` + 3 in the variant. The amortised erases,
+  0.88 / `K` + 1.0 / `P` ms (data unit, log unit with its certificate), add under 0.03 ms
+  everywhere.
+- *Update, worst*: base: a rollover (one erase) and a switch (one erase, one certificate, the
+  carry): `w` + 6 words + 1.76 ms. Variant: a switch, `w` + 4 words + 0.88 ms. Switch step 1
+  adds a reserved pair, three words in the base and `w` + 3 in the variant, only when L holds
+  no proven entry.
+
+What the figures say:
+
+- Below 64 B the base is log-limited at 3.04 M updates whatever `N`: the data units wear at a
+  fraction of the log units' rate, and twice or four times the area buys nothing. The ring of
+  log units that the variant's rows assume would lift it (8 units as 4 data + 4 log: 6.08 M);
+  the other way is the variant. At 128 B, `N` = 6 balances the two (data 3.06 M, log 3.04 M).
+- At equal area the variant gives 1.4 to 1.5 times the base's updates with 4 units, and with
+  8 units from 0.9 (128 B, where the base's six data units are balanced) to 2.9 (4 B, where
+  the base is log-limited). Its clear wins are the 16 KB minimum and the update time; its
+  wear advantage needs the ring, which is not checked.
+- Stuck is identical everywhere, 32 attempts, because `X` is the smallest reserve in every
+  configuration; the variant's second reserve shrinks with the data size (43 at 128 B) but
+  stays above `X`. `X` being an area parameter, each area buys its own count at three
+  certificates per regular pair: `X` = 64 brings the base's log limit from 3.04 M to 2.82 M
+  updates and the variant's 2-unit figures from 2.24 / 1.2 / 0.7 M to 2.08 / 1.12 / 0.64 M.
+- The scan is flat and small. The base never reads a data unit beyond one record, so the boot
+  time does not grow with the area; the variant's ring reads every unit.
+- The 16-byte word makes 4 B and 16 B cost the same; at those sizes the three log words are
+  half of a base update. For data of at most 6 bytes, arithmetic suggests a third shape, not
+  designed here: the data inside the entry word with a CRC-32 (generation 2 B, version 4 B,
+  data 6 B, CRC 4 B), three words per update and 152 positions per unit, 3.04 M updates on
+  two units, at the price of a 32-bit check against foreign ghosts.
+
+## Model check
+
+`test/ewlf-model/ewlf_model.py` explores every weak-word reading, every cut point and every
+number of updates per session, depth first over boots, against the model above (a word
+programmed into weakly erased cells may read garbage for ever; a cut program over a weakly
+erased word may read its old value again; the STM32U5A5 refusal rule, with a weak word
+accepting or refusing a program at the checker's choice), and checks every shown version for
+rollback, lost acknowledgement, loss, stuck, resurrection (`--strict`) and writes at a clean
+boot (`--clean-boot`). `proto_v4.py` is this design, with the geometry `nd,rpu,nl,ppu,nres,nx`
+(data units, records per unit, log units, regular pairs, reserved pairs, certificates); its
+record data stands for the content the record checksum covers. Every run below used
+`--strict`; "stuck ignored" rows pass `--ignore stuck` and explore past stuck states.
+`proto_v4p.py` is the record-in-the-pair variant: the same module without data units, a
+position being marker, data, meta, confirm, with the geometry `nl,ppu,nres,nx`; its results
+are in the second table.
+
+```
+cd test/ewlf-model
+python3 ewlf_model.py --protocol v4 --cuts 3 --boots 6 --geometry 2,2,2,2,2,2 --strict --ignore stuck
+```
+
+| geometry | cuts / boots | options | result |
+|----------|--------------|---------|--------|
+| 2,2,2,2,2,2 | 2 / 5 | stuck ignored | no violation, w5 acknowledged |
+| 2,2,2,2,2,2 | 2 / 5 | stuck ignored, `--app 2` | no violation, w10 |
+| 2,1,2,1,2,2 | 2 / 5 | stuck ignored, `--app 2` (a switch and a rollover at every update) | no violation, w10 |
+| 2,2,2,2,3,3 | 2 / 6 | stuck counted | no violation, w6 |
+| 2,2,2,2,2,2 | 3 / 6 | stuck ignored | no violation (31 k states, 4.1 M sessions, w6) |
+| 2,2,2,2,2,2 | 3 / 6 | stuck ignored, `--app 2` | no violation (145 k states, 25.7 M sessions, w12) |
+| 3,2,2,2,2,2 | 3 / 6 | stuck ignored | no violation (w6) |
+| 2,2,2,2,4,4 | 3 / 8 | stuck counted | no violation (15.3 M sessions, w8): stuck needs more cuts than certificates |
+| 2,2,2,2,4,4 | 4 / 9 | stuck counted | stuck after four cuts in the carry's marker, one per attempt: the residual, as sized |
+| 2,2,2,1,1,1 | 3 / 7 | stuck ignored, `--clean-boot` | boot-write: a weak confirm reading programmed then erased, residual (f) |
+| 2,2,2,2,2,2 | 4 / 8 | stuck ignored | no violation (592 k states, 315 M sessions, w8; 13 h wall clock on a loaded machine, 1.1 GB) |
+
+The variant, `proto_v4p.py`, geometry `nl,ppu,nres,nx`, every run `--strict`:
+
+| geometry | cuts / boots | options | result |
+|----------|--------------|---------|--------|
+| 2,2,2,2 | 2 / 5 | stuck ignored, `--app 2` | no violation (5.6 k states, 5.0 M sessions, w10) |
+| 2,1,2,2 | 2 / 5 | stuck ignored, `--app 2` (a switch at every update) | no violation (w10) |
+| 2,2,3,3 | 2 / 6 | stuck counted | no violation (w6) |
+| 2,2,2,2 | 3 / 6 | stuck ignored | no violation (21.6 k states, 107 M sessions, w6; 53 min, 52 MB) |
+| 2,1,1,1 | 3 / 7 | stuck ignored, `--clean-boot` | boot-write: residual (f), as for the base |
+| 2,2,3,3 | 3 / 7 | stuck counted | stuck after three cuts in the carry's marker, one per attempt, every boot still showing D: the residual, as sized (`X` = 3) |
+| 2,2,4,4 | 3 / 8 | stuck counted | no violation (48.9 k states, 401 M sessions, w8; 13 h, 122 MB): stuck needs more cuts than certificates |
+| 2,2,2,2 | 3 / 6 | stuck ignored, `--app 2` | no violation (96 k states, 533 M sessions, w12; 5.6 h, 218 MB) |
+
+The variant explores about 25 times the base's sessions at equal bounds (four words per
+position instead of three, each a cut point and a weak reading), so the 4-cut runs of the
+base were not repeated on it: its 4-cut, 8-boot run would take days. The two modules differ
+only by the data word in the pair and the absence of data units; the argument is the same.
+
+Negative controls (`V4_KNOCKOUT=` in the environment), 3 cuts, 6 boots, strict, stuck ignored,
+geometry 2,2,2,2,2,2 unless stated: without switch step 1 (`step1`): **loss** at geometry
+2,2,2,1,1,1; without the bury at boot (`bury`): **rollback**; without certificates (`cert`):
+**resurrection**; without the erase of an empty certified O (`empty`): **resurrection**. Each
+rule is load-bearing. The same four knock-outs on the variant (`proto_v4p.py`, geometry
+2,2,2,2, or 2,1,1,1 for `step1`) give the same four violations.
+
+The checker proves the absence of counterexamples within its bounds and under its model; the
+argument above covers the rest. Physics the design relies on beyond the tearing page, both
+worth measuring: a returned program of all zeros over a partially programmed word leaves
+solid zeros (the acceptance is measured, the solidity is an inference); a cut erase of a unit
+whose cells were already erased leaves them erased (the checker assumes it: only programmed
+words become weakly erased). The cut format of the section below is not modelled.
+
+## Implementation notes
+
+- Read every log word once per session and decide from that reading; never re-read a
+  possibly weak word (T2 allows two readings to differ). The derived per-unit state (started,
+  newest valid entry, proven, closed, certified, first free certificate) fits in a few words.
+- A read that faults (ECC double error, T5) counts as *programmed* for a marker, a confirm or
+  a certificate, as *invalid* for an entry or a meta field, and makes its position *started*.
+- Wait for each program or erase to complete before issuing the next: the chain proofs rest
+  on that order. Readback is not a substitute.
+- Never program a valued word over a word that does not read erased. A refused program of a
+  marker, confirm or certificate is stepped over, never retried on the same word in that
+  session.
+- Only the live unit's certificates are read as certificates.
+- The state phase 1 derives lives in the context from phase 1 to phase 2 and for the rest
+  of the session: per unit the last started position, the newest valid entry and whether it
+  is proven, closed, certified and the first free certificate; D; the pending repair; the
+  remaining cuts figure. The update and the status call use it; nothing reads the log again.
+- `X` comes from the context (a trailing field, zero for the build-time default), so that
+  a test can register an area with `X` = 2 on the real geometry and reach stuck in two cuts.
+- API, names to be fixed in the implementation: `lftl_register_area_ewlf` runs phase 1;
+  `lftl_ewlf_status` returns the remaining cuts figure, the pending repair and D's version;
+  `lftl_ewlf_complete_scan` runs phase 2; `lftl_read_unproven` reads D's record while a
+  repair is pending or the area is stuck; `lftl_read` and `lftl_write` return
+  `LFTL_ERROR_EWLF_PENDING` before phase 2 and `LFTL_ERROR_EWLF_STUCK` when stuck.
+
+## Format
+
+`lftl_format` first scans the area. If a decision exists, the format is an ordinary update
+whose record holds the initial data: atomic like any update, nothing else is erased, the log
+goes on. Otherwise (a virgin area, a foreign one, or no valid entry anywhere) it erases every
+unit of the area, writes a record with version 1 and the initial data at the top of the
+highest data unit, then its pair at the top of log unit 1 (generation 1); log unit 0 stays
+erased. This first format is not anti-tearing: a cut in one of its erases leaves ghosts (T4)
+of whatever the area held, which the next boot may show and a later boot may not find; an
+area whose first format was cut must be formatted again before use, and the application has
+to carry that fact itself (a mark outside the area), as it would for any format. A ghost of
+foreign content passes the checks with probability 2^-64 per entry.
+
+`lftl_erase_all` is an ordinary update whose record carries no data and whose meta field
+marks the content erased. The on-flash format is v0.4.0; EWLF areas of earlier formats must
+be formatted again; regular areas are unchanged.

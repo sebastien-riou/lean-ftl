@@ -2232,6 +2232,8 @@ void large_write_unit_test(){
       //over the scratch pages: an EWLF area needs 4 erase units
       scratch_ewlf(&ctx32,&scratch_props,4,64);
       scratch_props.write_size = 32;
+      //32 certificates of 32 bytes would leave a 2 KB log unit 2 regular pairs
+      ctx32.ewlf_certificates = 8;
     } else {
       ctx32.nvm_props = &props32;
       ctx32.data = LFTL_INVALID_POINTER;

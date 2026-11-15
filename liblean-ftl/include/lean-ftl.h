@@ -59,6 +59,10 @@
 #define LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED 0x0B
 /// Error: an area or its NVM is badly configured, see ::lftl_register_area and ::lftl_register_area_ewlf
 #define LFTL_ERROR_BAD_CONFIG 0x0C
+/// Error: an EWLF area is read or written while the repair its scan found is pending, see ::lftl_ewlf_complete_scan
+#define LFTL_ERROR_EWLF_PENDING 0x0D
+/// Error: an EWLF area is stuck: it has no room left to make a decision solid, see ::lftl_ewlf_status
+#define LFTL_ERROR_EWLF_STUCK 0x0E
 /// Base value for errors reported by the erase function. Bits 0 to 7 may give more details.
 #define LFTL_ERROR_LOW_LEVEL_ERASE 0x0100
 /// Base value for error reported by the write function. Bits 0 to 7 may give more details.
@@ -68,6 +72,30 @@
 /// Most likely a bug in LFTL or a hardware level issue
 #define LFTL_INTERNAL_ERROR -1
 /// @}
+
+/// Status the ::nvm_write_t callback returns when the flash refused a program
+/// and programmed nothing, because a target write unit is not erased (PROGERR
+/// on the STM32L5 and STM32U5). An EWLF area steps over the write unit it was
+/// refused; everywhere else, and for any other non-zero status, the error is
+/// fatal (::LFTL_ERROR_LOW_LEVEL_WRITE).
+#define LFTL_NVM_STATUS_REFUSED 6
+
+#ifndef LFTL_EWLF_CERTIFICATES
+  /// Default number of certificate write units in each log unit of an EWLF
+  /// area, for the areas that leave ::lftl_ctx_struct::ewlf_certificates at 0:
+  /// the number of consecutive log switch attempts, each cut inside the same
+  /// two program windows, after which the area is stuck.
+  #define LFTL_EWLF_CERTIFICATES 32
+#endif
+
+/// Number of log units of an EWLF area, on top of its data units.
+#define LFTL_EWLF_LOG_UNITS 2
+
+#ifndef LFTL_EWLF_RESERVED_PAIRS
+  /// Number of reserved pair positions in each log unit of an EWLF area: the
+  /// room a full log unit keeps to make a decision solid.
+  #define LFTL_EWLF_RESERVED_PAIRS 8
+#endif
 
 /**
  * \brief Callback to erase physical NVM
@@ -95,6 +123,11 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
  * between two erases, so it never needs to overwrite programmed cells
  * (R3 and N3 of the "Flash requirements and assumptions" page).
  *
+ * When the flash refuses a program because a target write unit is not erased,
+ * and programs nothing, it shall return ::LFTL_NVM_STATUS_REFUSED: a write
+ * unit that a power cut left weak can read erased and still be refused, and
+ * an EWLF area then steps over it.
+ *
  * The destination range may cross multiple physical page boundaries.
  * 
  * The source may be within the NVM but is guaranteed to not overlap 
@@ -118,6 +151,11 @@ typedef uint8_t (*nvm_write_t)(void*dst_nvm_addr, const void*const src, uintptr_
  * The source range may cross multiple physical page boundaries.
  * 
  * The destination is in a regular RAM.
+ *
+ * On a flash where reading a write unit that a power cut left weak can fault
+ * (an ECC error), an EWLF area needs the callback to survive the fault and
+ * to fill that write unit with a value that is neither all 0xFF nor all
+ * 0x00: the unit then counts as started and proves nothing.
  * 
  * \param dst The start address of the destination
  * \param src_nvm_addr The start address of the source
@@ -153,9 +191,9 @@ typedef void (*error_handler_t)(uint32_t err_code);
 typedef struct lftl_nvm_props_struct {
   void*base;            /**< the base address of the entire NVM */
   uintptr_t size;       /**< the size of the entire NVM (used to select between direct access and nvm_read_t) */
-  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it: a power of two dividing `erase_size`, at most ::LFTL_WU_MAX_SIZE. On flash with ECC, at least the ECC codeword, so that each meta-data item of a regular area, and each flag of an EWLF record, is its own codeword (R2 of the "Flash requirements and assumptions" page) */
+  uint32_t write_size;  /**< at least what the NVM is supporting, or a multiple of it: a power of two dividing `erase_size`, at most ::LFTL_WU_MAX_SIZE. On flash with ECC, at least the ECC codeword, so that each meta-data item of a regular area, and each marker, confirm and certificate of an EWLF area, is its own codeword (R2 of the "Flash requirements and assumptions" page) */
   uint32_t erase_size;  /**< at least what the NVM is supporting, or a multiple of it; an area is whole erase units (R1 of the "Flash requirements and assumptions" page) */
-  bool zero_overwrite;  /**< true if the NVM accepts programming a write unit to all zeros whatever it currently holds, as the STM32L5 and STM32U5 document (N3 of the "Flash requirements and assumptions" page): lean-ftl then pins words at the first access after a reset, in a regular area the one a power cut left weak, in an EWLF area the meta field of a record it rejects and, when no position is left for the copy that repairs a torn record, its flags, instead of leaving the decision to be made again at the next boot. false, the value of a zeroed initializer, when the NVM does not or when it is unknown: lean-ftl then never programs a unit that is not erased. */
+  bool zero_overwrite;  /**< true if the NVM accepts programming a write unit to all zeros whatever it currently holds, as the STM32L5 and STM32U5 document (N3 of the "Flash requirements and assumptions" page): lean-ftl then pins, at the first access to a regular area after a reset, the word a power cut left weak, instead of leaving the decision to be made again at the next boot. false, the value of a zeroed initializer, when the NVM does not or when it is unknown: lean-ftl then never programs a unit that does not read erased. EWLF areas do not use it: they only program write units that read erased, and step over one the flash refuses (::LFTL_NVM_STATUS_REFUSED). */
   nvm_erase_t erase;    /**< Erase function for this area. */
   nvm_write_t write;    /**< Write function for this area. */
   nvm_read_t read;      /**< Read function for this area. */
@@ -168,6 +206,43 @@ typedef enum {
   LFTL_AREA_TYPE_STD = 0,
   LFTL_AREA_TYPE_EWLF = 1,
 } lftl_area_type_t;
+
+/// What the scan of an EWLF area found left to do, see ::lftl_ewlf_status.
+typedef enum {
+  LFTL_EWLF_REPAIR_NONE = 0,   /**< nothing: the area is readable and writable */
+  LFTL_EWLF_REPAIR_BURY = 1,   /**< a copy of the decision in the live log unit: one pair */
+  LFTL_EWLF_REPAIR_CARRY = 2,  /**< a copy of the decision in the other log unit, already erased: one pair */
+  LFTL_EWLF_REPAIR_SWITCH = 3, /**< a log switch: at most one reserved pair, one erase, one certificate, one pair */
+} lftl_ewlf_repair_t;
+
+/// State of an EWLF area, see ::lftl_ewlf_status.
+typedef struct {
+  uint32_t version;        /**< version of the record the area shows, or will show once the pending repair is done */
+  uint16_t remaining_cuts; /**< the smallest number of further power cuts, each at the worst instant, after which the area is stuck; 0 when it is */
+  uint8_t pending;         /**< a ::lftl_ewlf_repair_t: the repair ::lftl_ewlf_complete_scan will do */
+  bool stuck;              /**< the area is stuck: only ::lftl_ewlf_read_unproven and ::lftl_format work */
+} lftl_ewlf_status_t;
+
+/// What one reading of a log unit of an EWLF area gave. Internal.
+typedef struct {
+  int16_t started;      /**< last started pair position, -1 if none */
+  int16_t newest;       /**< position of the newest valid entry, -1 if none */
+  uint16_t gen;         /**< generation of the unit, meaningful when `newest` is not -1 */
+  uint16_t certs_free;  /**< certificate write units reading erased */
+  uint8_t flags;        /**< proven, closed, certified, newest entry confirmed */
+} lftl_ewlf_log_unit_t;
+
+/// What an EWLF area knows about its log since its scan. Internal.
+typedef struct {
+  lftl_ewlf_log_unit_t unit[2];
+  uint32_t version;     /**< version of the decision */
+  int16_t rec_started;  /**< last started record position in the decision's data unit, -2 until read */
+  uint8_t d_unit;       /**< data unit of the decision's record */
+  uint8_t d_pos;        /**< position of the decision's record in its unit */
+  uint8_t live;         /**< index of the live log unit */
+  uint8_t pending;      /**< a ::lftl_ewlf_repair_t */
+  uint8_t stuck;        /**< no room for the pending repair, or a write found none */
+} lftl_ewlf_state_t;
 
 /** @struct lftl_ctx_struct
  *  Structure defining the context for an LFTL area.
@@ -183,6 +258,8 @@ typedef struct lftl_ctx_struct {
   void *transaction_tracker;      /**< Initialize it ::LFTL_INVALID_POINTER. */
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
   lftl_area_type_t area_type;     /**< Set by ::lftl_register_area or ::lftl_register_area_ewlf. Do not set manually. */
+  uint16_t ewlf_certificates;     /**< EWLF areas only: number of certificate write units in each log unit, 0 (the value a zeroed or shorter initializer leaves) for ::LFTL_EWLF_CERTIFICATES. Part of the on-flash format of the area, like `data_size`: an area whose value changes must be formatted again. */
+  lftl_ewlf_state_t ewlf;         /**< EWLF areas only: internal, needs no initialization. */
 } lftl_ctx_t;
 
 /** @name Meta information API
@@ -298,12 +375,20 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx);
 /// and before any other function (except the Meta information API group).
 ///
 /// The configuration is checked first, as for ::lftl_register_area, except
-/// that an EWLF area needs at least 2 erase units, and at least 2 records
-/// (the data plus a header each, see ::LFTL_EWLF_RECORD_SIZE) must fit in
-/// one erase unit. The NVM's erased bytes must read 0xFF (R6 of the "Flash
-/// requirements and assumptions" page). The on-flash format of EWLF areas
-/// changed in v0.3.0: an area written by v0.2.0 is not read and must be
-/// formatted again.
+/// that an EWLF area needs at least 4 erase units, 2 for its log and from 2
+/// to 256 for its data, that at least 2 records (the data, a start marker and
+/// a meta field each, see ::LFTL_EWLF_RECORD_SIZE) must fit in one erase unit,
+/// and that a log unit must hold its certificates
+/// (::lftl_ctx_struct::ewlf_certificates), ::LFTL_EWLF_RESERVED_PAIRS reserved
+/// pairs and at least 2 regular ones. The NVM's erased bytes must read 0xFF
+/// (R6 of the "Flash requirements and assumptions" page). The on-flash format
+/// of EWLF areas changed in v0.4.0: an area written by an earlier version is
+/// not read and must be formatted again.
+///
+/// Nothing is read here. The first call that needs the area's content scans
+/// it, reading only: ::lftl_ewlf_status, ::lftl_ewlf_complete_scan,
+/// ::lftl_ewlf_read_unproven, or a read or a write. After a reset, set
+/// `ctx->data` to ::LFTL_INVALID_POINTER or register again.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////
@@ -374,6 +459,67 @@ lftl_ctx_t*lftl_get_ctx(const void*const addr);
 /// \returns 0 or 1
 ////////////////////////////////////////////////////////////
 bool lftl_is_ewlf(const lftl_ctx_t*const ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief State of an EWLF area: remaining cuts, pending repair
+///
+/// Scans the area if nothing did since the reset: the scan reads the two log
+/// units once and checks one record, and programs or erases nothing. When
+/// the last session was cut, or when a write unit that an older cut left
+/// weak reads differently, the scan may find a repair to do before the area
+/// can be shown: `status->pending` says which, and ::lftl_ewlf_complete_scan
+/// does it. Until then ::lftl_read and the write functions raise
+/// ::LFTL_ERROR_EWLF_PENDING on this area.
+///
+/// `status->remaining_cuts` is the number of further power cuts, each at the
+/// worst instant, that the area can take before it is stuck. It is back to
+/// the number of certificates after a log switch that completed. The
+/// application applies the threshold it wants: before a write, or after a
+/// reset before calling ::lftl_ewlf_complete_scan, for instance to ask the
+/// user to move to a stable power supply first.
+///
+/// Raises ::LFTL_ERROR_NO_VALID_VERSION if the area holds no version.
+/// \param ctx Context of the EWLF area
+/// \param status Output: the state of the area
+////////////////////////////////////////////////////////////
+void lftl_ewlf_status(lftl_ctx_t*ctx, lftl_ewlf_status_t*status);
+
+////////////////////////////////////////////////////////////
+/// \brief Do the repair the scan of an EWLF area found pending
+///
+/// Scans the area if nothing did since the reset. Does nothing more when no
+/// repair is pending: it can be called unconditionally after a reset.
+/// Otherwise programs a copy of the decision above everything a power cut
+/// may have left, from the readings of the scan, and the area is readable
+/// and writable once it returns.
+///
+/// Raises ::LFTL_ERROR_EWLF_STUCK, with nothing programmed, when the area has
+/// no room left for the repair, and ::LFTL_ERROR_NO_VALID_VERSION if the
+/// area holds no version.
+/// \param ctx Context of the EWLF area
+////////////////////////////////////////////////////////////
+void lftl_ewlf_complete_scan(lftl_ctx_t*ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief Read an EWLF area whatever its state: pending repair or stuck
+///
+/// Like ::lftl_read when no repair is pending. With one pending, or with the
+/// area stuck, reads the record the scan chose: the one
+/// ::lftl_ewlf_complete_scan makes current when called in the same session.
+/// Its content is a version the application wrote; what is not proven is
+/// that a later boot chooses the same one, if this session ends before the
+/// repair is done: the other candidate is the version written just before
+/// or just after it.
+///
+/// An application that uses it to decide whether to go on must keep the
+/// state of that decision in another area: this one accepts no write
+/// before the repair.
+/// \param ctx Context of the EWLF area
+/// \param dst Destination address (in volatile memory)
+/// \param src_nvm_addr Source logical address
+/// \param size Size in bytes of the data to read
+////////////////////////////////////////////////////////////
+void lftl_ewlf_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);
 
 ////////////////////////////////////////////////////////////
 /// \brief Erase all the data of an LFTL area
@@ -698,8 +844,8 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
   struct {area_content} _##name##_data;\
   };
 
-/// Size in bytes of an EWLF record's start marker and of each of its two
-/// flags, as laid out at run time: one write unit.
+/// Size in bytes of an EWLF record's start marker, as laid out at run time:
+/// one write unit.
 #define LFTL_EWLF_FLAG_SIZE (LFTL_WU_SIZE)
 
 /// Size in bytes of an EWLF record's meta field (a 32-bit version and a
@@ -709,19 +855,23 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 
 #define LFTL_EWLF_RECORDS_PER_PAGE(record_size) (LFTL_PAGE_SIZE/(record_size))
 /// Size in bytes of one EWLF record of `area_content`, as laid out at run time:
-/// the start marker, the meta field, flag-a, flag-b, then the data rounded up
-/// to whole write units.
+/// the start marker, the data rounded up to whole write units, then the meta
+/// field.
 #define LFTL_EWLF_RECORD_SIZE(area_content) (\
-  3*LFTL_EWLF_FLAG_SIZE + LFTL_EWLF_META_SIZE \
+  LFTL_EWLF_FLAG_SIZE + LFTL_EWLF_META_SIZE \
   + LFTL_ROUND_UP(sizeof(struct {area_content}),LFTL_WU_SIZE))
 
-/// Declare an LFTL area with Extreme Wear Leveling Factor
+/// Declare an LFTL area with Extreme Wear Leveling Factor: the data units
+/// that hold `wear_leveling_factor` records, 2 at least, plus the
+/// ::LFTL_EWLF_LOG_UNITS log units. The log units bound the factor the area
+/// reaches whatever the number of data units: twice the regular pairs of a
+/// log unit.
 /// \param name Name of the LFTL area.
 /// \param area_content Members of the LFTL area.
 /// \param wear_leveling_factor Only integers are supported, minimum is 2.
 #define LFTL_AREA_EWLF(name, area_content, wear_leveling_factor) union {\
   _Static_assert(LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content)) >= 2, "EWLF area " #name ": at least 2 records must fit in a page");\
-  flash_sw_page_t name##_pages[LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
+  flash_sw_page_t name##_pages[LFTL_EWLF_LOG_UNITS + LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
   struct {area_content} name##_data;\
   struct {area_content};\
   struct {area_content} _##name##_data;\

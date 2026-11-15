@@ -18,6 +18,7 @@
  *   gcc -g -fsanitize=address,undefined \
  *       -Iliblean-ftl/include \
  *       -DGIT_VERSION=harness -DVERSION_TIMESTAMP=0 -DBUILD_TYPE=debug \
+ *       -DLFTL_EWLF_RESERVED_PAIRS=2 \
  *       test/asan/asan_harness.c liblean-ftl/source/ftl.c -o asan_harness
  * and run one test:
  *   ./asan_harness <1..13>
@@ -68,7 +69,7 @@ static uint8_t wr(void *d, const void *const s, uintptr_t z) {
   if (n_ops++ == cut_at) { printf("  power cut, write to area%+ld dropped\n", (long)((uintptr_t)d - area_lo)); longjmp(pc, 1); }
   uint8_t *d8 = d; const uint8_t *s8 = s;
   if (mode == NO_REPROGRAM)
-    for (uintptr_t i = 0; i < z; i++) if (d8[i] != 0xFF) return 1; /* PROGERR */
+    for (uintptr_t i = 0; i < z; i++) if (d8[i] != 0xFF) return LFTL_NVM_STATUS_REFUSED; /* PROGERR */
   for (uintptr_t i = 0; i < z; i++) d8[i] = mode == NOR_AND ? d8[i] & s8[i] : s8[i];
   return 0;
 }
@@ -84,7 +85,8 @@ static void init_area(uint32_t write_size, uint8_t *area, unsigned pages, uintpt
   ctx = (lftl_ctx_t){ .nvm_props = &props, .area = area, .area_size = pages * PG,
                       .data = LFTL_INVALID_POINTER, .data_size = data_size,
                       .transaction_tracker = LFTL_INVALID_POINTER,
-                      .next = LFTL_INVALID_POINTER };
+                      .next = LFTL_INVALID_POINTER,
+                      .ewlf_certificates = 2 }; /* what a log unit of 256 bytes has room for */
   lftl_init_lib();
   if (ewlf) lftl_register_area_ewlf(&ctx); else lftl_register_area(&ctx);
 }
@@ -110,12 +112,16 @@ static void dump(const char *name, const uint8_t *b, unsigned n) {
   printf("  %s:", name); for (unsigned i = 0; i < n; i++) printf(" %02x", b[i]); printf("\n");
 }
 
-/* EWLF tests 7 to 11 use 8-byte write units and 64-byte data in 2 pages: a
-   record is 8 (start marker) + 16 (meta field) + 8 (flag-a) + 8 (flag-b) + 64
-   = 104 bytes, 2 per page. format puts v1 at area+408, the next write v2 at
-   area+304, and the one after wraps to the top of page 0, area+152. A write
-   programs the start marker, the data, the meta field, flag-a, then flag-b; a
-   wrap erases the unit it enters first. */
+/* EWLF tests 7 to 11 use 8-byte write units and 64-byte data in 4 pages, 2
+   data units then 2 log units, built with 2 reserved pairs and 2 certificates
+   per log unit: a record is 8 (start marker) + 64 + 16 (meta field) = 88
+   bytes, 2 per page; a log pair is 8 (marker) + 16 (entry) + 8 (confirm) = 32
+   bytes. format puts v1 at the top of page 1, area+424, the next write v2
+   below it at area+336, and the one after wraps to the top of page 0,
+   area+168. A write programs the record's start marker, data and meta field,
+   then the pair's marker, entry and confirm; a wrap erases the unit it
+   enters first. After a reset lftl_ewlf_complete_scan does the repair the
+   scan found, if any, before the area is read. */
 static void ewlf_two_writes_then_torn(const uint8_t *d1, const uint8_t *d2) {
   memset(flash, 0xFF, sizeof(flash));
   lftl_format(&ctx);
@@ -193,7 +199,7 @@ int main(int argc, char **argv) {
   }
   case 7: case 8: { /* LF-9: the write after a torn write programs over the torn cells */
     mode = t == 7 ? NOR_AND : NO_REPROGRAM;
-    init_area(8, flash, 2, 64, 1);
+    init_area(8, flash, 4, 64, 1);
     uint8_t d1[64], d2[64], d3[64];
     memset(d1, 0x11, 64); memset(d2, 0x0F, 64); memset(d3, 0x3C, 64);
     if (setjmp(jb)) {
@@ -205,6 +211,7 @@ int main(int argc, char **argv) {
     printf("T%d/LF-9: EWLF on %s flash: write d1, power cut in d2 before its meta field, reset, write d3\n",
            t, t == 7 ? "NOR (program = AND)" : "STM32U5-like (no reprogramming)");
     ewlf_two_writes_then_torn(d1, d2);
+    lftl_ewlf_complete_scan(&ctx);
     lftl_read(&ctx, buf, flash, 64); dump("after reset ", buf, 8);
     lftl_write(&ctx, flash, d3, 64);
     lftl_read(&ctx, buf, flash, 64); dump("after d3    ", buf, 8);
@@ -213,7 +220,7 @@ int main(int argc, char **argv) {
   }
   case 9: case 10: { /* LF-9: power cut in the wrap from page 0 back to the top page */
     mode = t == 9 ? NOR_AND : NO_REPROGRAM;
-    init_area(8, flash, 2, 64, 1);
+    init_area(8, flash, 4, 64, 1);
     uint8_t d[64];
     if (setjmp(jb)) {
       if (setjmp(jb)) return 0;
@@ -221,17 +228,19 @@ int main(int argc, char **argv) {
       lftl_write(&ctx, flash, d, 64);
       break;
     }
-    printf("T%d/LF-9: EWLF on %s flash: v2..v4, power cut in v5 before its flag-b, reset, write v6\n",
+    printf("T%d/LF-9: EWLF on %s flash: v2..v4, power cut in v5 before its confirm, reset, write v6\n",
            t, t == 9 ? "NOR (program = AND)" : "STM32U5-like (no reprogramming)");
     memset(flash, 0xFF, sizeof(flash));
-    lftl_format(&ctx);                                     /* v1 at area+408 */
-    for (int v = 2; v <= 4; v++) { memset(d, 0x11 * v, 64); lftl_write(&ctx, flash, d, 64); } /* +304, +152, +48 */
+    lftl_format(&ctx);                                     /* v1 at area+424 */
+    for (int v = 2; v <= 4; v++) { memset(d, 0x11 * v, 64); lftl_write(&ctx, flash, d, 64); } /* +336, +168, +80 */
     memset(d, 0x5A, 64);
-    n_ops = 0; cut_at = 5; /* v5 wraps to area+408: erase page 1, start marker, data, meta field, flag-a, then flag-b;
-                               v5 is left half, and the scan after the reset copies it forward to area+304 */
+    n_ops = 0; cut_at = 6; /* v5 wraps to area+424: erase page 1, start marker, data, meta field, then the pair's
+                               marker, entry, and confirm; v5's entry is whole and unconfirmed, and the scan after
+                               the reset has a copy of it to write before v5 is shown */
     if (!setjmp(pc)) lftl_write(&ctx, flash, d, 64);
     cut_at = -1;
     ctx.data = LFTL_INVALID_POINTER; /* reset */
+    lftl_ewlf_complete_scan(&ctx);
     lftl_read(&ctx, buf, flash, 64); dump("after reset ", buf, 8);
     memset(d, 0xA5, 64);
     lftl_write(&ctx, flash, d, 64);
@@ -242,21 +251,24 @@ int main(int argc, char **argv) {
     break;
   }
   case 11: { /* LF-10: attacker data + one power cut forge a record */
-    init_area(8, flash, 2, 64, 1); if (setjmp(jb)) return 0;
+    init_area(8, flash, 4, 64, 1); if (setjmp(jb)) return 0;
     uint8_t d1[64], d2[64];
     memset(d1, 0x11, 64);
-    /* d2 is torn at area+152; its data starts at area+192. A record forged at
-       d2[0] has its header in d2[0..40) and its data at area+232..296, i.e.
-       d2[40..64) followed by 40 bytes of page 1 that are still erased. */
-    uint8_t forged[64];
-    memset(forged, 0xFF, sizeof(forged));
-    memcpy(forged, "attacker-chosen 24 bytes", 24);
-    const uint32_t version = 1000;
-    memset(d2, 0, 64);                               /* start marker, flag-a and flag-b: zeros */
-    ewlf_meta(d2 + 8, 16, version, ewlf_checksum(version, forged, 64));
-    memcpy(d2 + 40, forged, 24);
-    printf("T11/LF-10: EWLF, d2 holds a forged record, power cut in d2 before its meta field, reset\n");
+    /* d2 is torn at area+168. Its data holds a whole forged log pair, marker,
+       entry and confirm, whose entry names d2's own position (data unit 0,
+       position 0) with generation 1 and version 3, then a meta field for that
+       version: nothing in a data unit is ever read as log, and no entry of the
+       log names the torn record. */
+    const uint32_t version = 3;
+    memset(d2, 0, 64);                               /* marker and confirm: zeros */
+    d2[8] = 1; d2[9] = 0; d2[10] = 0; d2[11] = 0;    /* entry: generation, data unit, position */
+    for (int i = 0; i < 4; i++) d2[12 + i] = (uint8_t)(version >> (8 * i));
+    const uint64_t entry_crc = ~crc64(~(uint64_t)0, d2 + 8, 8);
+    for (int i = 0; i < 8; i++) d2[16 + i] = (uint8_t)(entry_crc >> (8 * i));
+    ewlf_meta(d2 + 32, 16, version, ewlf_checksum(version, d2, 64));
+    printf("T11/LF-10: EWLF, d2 holds a forged log pair, power cut in d2 before its meta field, reset\n");
     ewlf_two_writes_then_torn(d1, d2);
+    lftl_ewlf_complete_scan(&ctx);
     lftl_read(&ctx, buf, flash, 64);
     dump("read", buf, 32);
     printf("  matches d1: %s, matches d2: %s, at area%+ld\n", memcmp(buf, d1, 64) ? "no" : "yes",
@@ -264,12 +276,12 @@ int main(int argc, char **argv) {
     break;
   }
   case 12: { /* LF-11: EWLF record larger than a page */
-    /* 16-byte write units: header 16+16+16+16 = 64, data 192 -> 256-byte record
-       on 256-byte pages, one per page: LFTL_AREA_EWLF would refuse this content
-       at compile time, registration refuses it at run time. */
+    /* 16-byte write units: start marker 16, data 224, meta field 16 -> 256-byte
+       record on 256-byte pages, one per page: LFTL_AREA_EWLF would refuse this
+       content at compile time, registration refuses it at run time. */
     if (setjmp(jb)) return 0; /* registration may refuse the configuration */
-    init_area(WU, flash + PG, 3, 192, 1);
-    uint8_t d[192];
+    init_area(WU, flash + PG, 4, 224, 1);
+    uint8_t d[224];
     memset(d, 0x11, sizeof(d));
     memset(flash, 0xA5, PG); /* page 0: whatever precedes the area */
     printf("T12/LF-11: EWLF record of 256 bytes on 256-byte pages, format then one write\n");
@@ -283,18 +295,20 @@ int main(int argc, char **argv) {
   }
   case 13: { /* LF-12: a header near the end of an EWLF area makes the scan read past it */
     if (setjmp(jb)) return 0; /* registration may refuse the configuration */
-    init_area(WU, flash + 6 * PG, 2, 32, 1); /* 96-byte records, 2 per page */
+    init_area(WU, flash + 4 * PG, 4, 32, 1); /* 64-byte records, 4 per page; 48-byte pairs, 4 per log unit */
     memset(flash, 0xFF, sizeof(flash));
-    /* header is 16 + 16 + 16 + 16 = 64 bytes: before LF-12 the scan read the
-       metadata inside the NVM through the read callback, then checksummed 32
-       bytes past its end with memcpy, without a callback line. end - 64 is not
-       a record position, so this header is never read */
-    uint8_t *const header = flash + sizeof(flash) - 64;
-    memset(header, 0, 16);                           /* start marker */
-    ewlf_meta(header + 16, 16, 1, 0x0123456789ABCDEFull);
-    memset(header + 32, 0, 32);                      /* both flags */
-    printf("T13/LF-12: EWLF area holding only a header 64 bytes before its end, then lftl_read\n");
-    lftl_read(&ctx, buf, flash + 6 * PG, 16);
+    /* a whole log pair in the last 48 bytes of the area, which is not a pair
+       position: before LF-12 the scan followed a header found near the end of
+       the area and checksummed past it with memcpy, without a callback line.
+       The pair is never read as one, and the area has no version */
+    uint8_t *const pair = flash + sizeof(flash) - 48;
+    memset(pair, 0, 48);                             /* marker and confirm: zeros */
+    pair[16] = 1; pair[18] = 1;                      /* entry: generation 1, data unit 1, position 0 */
+    pair[20] = 1;                                    /* version 1 */
+    const uint64_t entry_crc = ~crc64(~(uint64_t)0, pair + 16, 8);
+    for (int i = 0; i < 8; i++) pair[24 + i] = (uint8_t)(entry_crc >> (8 * i));
+    printf("T13/LF-12: EWLF area holding only a log pair 48 bytes before its end, then lftl_read\n");
+    lftl_read(&ctx, buf, flash + 4 * PG, 16);
     break;
   }
   default:

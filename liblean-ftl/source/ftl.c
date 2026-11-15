@@ -73,6 +73,35 @@ bool lftl_is_ewlf(const lftl_ctx_t*const ctx){
   return ctx->area_type == LFTL_AREA_TYPE_EWLF;
 }
 
+void lftl_ewlf_status(lftl_ctx_t*ctx, lftl_ewlf_status_t*status){
+  if(!lftl_is_ewlf(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  if(LFTL_INVALID_POINTER == ctx->data) ewlf_scan(ctx);
+  status->version = ctx->ewlf.version;
+  status->remaining_cuts = ewlf_remaining_cuts(ctx);
+  status->pending = (EWLF_PENDING_POINTER == ctx->data) ? ctx->ewlf.pending : LFTL_EWLF_REPAIR_NONE;
+  status->stuck = 0 != ctx->ewlf.stuck;
+}
+
+void lftl_ewlf_complete_scan(lftl_ctx_t*ctx){
+  if(!lftl_is_ewlf(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  ewlf_complete(ctx);
+}
+
+void lftl_ewlf_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
+  if(!lftl_is_ewlf(ctx)){
+    lftl_read(ctx,dst,src_nvm_addr,size);
+    return;
+  }
+  if(0==size) return;
+  check_in_data(ctx, src_nvm_addr, size);
+  if(LFTL_INVALID_POINTER == ctx->data) ewlf_scan(ctx);
+  const uint8_t*base = (const uint8_t*)ctx->data;
+  //a repair is pending: the record the scan chose, the one the repair makes current
+  if(EWLF_PENDING_POINTER == ctx->data) base = ewlf_record_data(ctx,ewlf_record_addr(ctx,ctx->ewlf.d_unit,ctx->ewlf.d_pos));
+  const uintptr_t offset = (uintptr_t)src_nvm_addr - (uintptr_t)ctx->area;
+  nvm_read(ctx,ctx->nvm_props,dst,base + offset,size);
+}
+
 void lftl_erase_all(lftl_ctx_t*ctx){
   if(lftl_is_ewlf(ctx)){
     erase_ewlf(ctx);

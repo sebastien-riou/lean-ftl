@@ -67,6 +67,10 @@ typedef struct data_flash_struct {
     ,LFTL_WEAR_LEVELING_FACTOR(2)
   )
 
+  //Pages for the tests that build their own EWLF area: 2 log units, and up
+  //to 4 data units
+  flash_sw_page_t scratch_pages[6];
+
   union {
   flash_sw_page_t unmanaged_page;
     struct {

@@ -339,7 +339,7 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
     const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr + i;
     const uint8_t*const src8 = (const uint8_t*)src + i;
     const bool erased = is_all(dst8,0xFF,nvm_write_size) && !tearing_sim_is_weak(dst8,nvm_write_size);
-    if(!erased && !(nvm_zero_overwrite && is_all(src8,0x00,nvm_write_size))) return 5;
+    if(!erased && !(nvm_zero_overwrite && is_all(src8,0x00,nvm_write_size))) return 6; //LFTL_NVM_STATUS_REFUSED: nothing is programmed
   }
   const uint32_t tsize = cut_size(size);
   if(tsize && weak_active(dst_nvm_addr)){

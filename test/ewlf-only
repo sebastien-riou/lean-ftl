@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# Builds the test firmware for a Linux toolchain file and runs the tests that
+# involve EWLF areas, one per invocation, on the three flash models of the
+# simulator: with zero overwrite and weak words (the default), without zero
+# overwrite (--no-pinning), and with the older cut model in place of weak
+# words (--no-weak-words). Then test 37, a guard of the regular areas' format,
+# and the ASan tests of EWLF areas. Only the exit status of each run counts.
+#
+# Usage: test/ewlf-only <toolchain file> [preset]
+#   test/ewlf-only on/linux debug       4 KB erase units, 2-byte write units
+#   test/ewlf-only on/linux-u5 debug    8 KB erase units, 16-byte write units (STM32U5)
+
+set -e
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+TOOLCHAIN=${1:?usage: test/ewlf-only <toolchain file> [preset]}
+PRESET=${2:-debug}
+cd "$ROOT"
+./buildit "$TOOLCHAIN" "$PRESET" > /dev/null
+OUTDIR="$ROOT/build/$(basename "$TOOLCHAIN")"
+
+TESTS="9 12 18 22 23 26 27 28 29 30 33 35 36 38 39 40"
+FAILED=0
+for mode in "" "--no-pinning" "--no-weak-words"; do
+  for t in $TESTS; do
+    rc=0
+    "$OUTDIR/lean-ftl-test-fw" --test=$t $mode > "$OUTDIR/ewlf-only-$t.log" 2>&1 || rc=$?
+    if [ $rc -ne 0 ]; then
+      echo "test $t $mode FAILED (exit code $rc), see $OUTDIR/ewlf-only-$t.log"
+      FAILED=1
+    else
+      echo "test $t $mode passed"
+    fi
+  done
+done
+rc=0
+"$OUTDIR/lean-ftl-test-fw" --test=37 > "$OUTDIR/ewlf-only-37.log" 2>&1 || rc=$?
+if [ $rc -ne 0 ]; then
+  echo "test 37 FAILED (exit code $rc), see $OUTDIR/ewlf-only-37.log"
+  FAILED=1
+else
+  echo "test 37 passed"
+fi
+"$ROOT/test/asan/build-and-run" 7 8 9 10 11 12 13 || FAILED=1
+
+if [ $FAILED -ne 0 ]; then
+  echo "EWLF tests FAILED"
+  exit 1
+fi
+echo "EWLF tests PASSED"

@@ -16,7 +16,6 @@ Contents
    getting_started
    using
    design
-   chasing-ghosts
    flash
    api
    tests

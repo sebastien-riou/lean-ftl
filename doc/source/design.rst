@@ -25,9 +25,10 @@ Common ground
 reciprocal form of its polynomial, which leaves its top 5 bits unused, ISSUES.md LFTL-014; the
 format of regular areas is frozen), in an EWLF area the 64-bit CRC-64/NVME of the version then
 the data. :c:func:`lftl_format` writes version 1; every update writes the current version plus
-one. A copy is *valid* when its checksum matches its data and version, and the valid copy with
-the highest version is the current one. The version is not expected to wrap: 4.3 billion updates
-exceed the endurance of any area.
+one. A copy is *valid* when its checksum matches its data and version. In a regular area the
+valid copy with the highest version is the current one; in an EWLF area the current copy is the
+one its log names, and the version only ties the two together. The version is not expected to
+wrap: 4.3 billion updates exceed the endurance of any area.
 
 **Meta-data of a regular area.** The version, the checksum and a third item, the *end marker*
 ``checksum2``, a second copy of the checksum, each occupy one write unit, 4 bytes at least (R2 of
@@ -35,8 +36,8 @@ the flash page): the value is in the first 4 bytes and the bytes next to it are 
 with it. A whole item therefore reads one of three ways: all erased, when it was never
 programmed; a value, with some bits still erased when a power cut interrupted its program; or all
 zeros. An update programs the data first, then the version and the checksum, then the end marker,
-last and in its own write unit: a copy whose end marker is complete is complete. An EWLF record
-has its own header, with two flags after a single meta field: :ref:`design-ewlf`.
+last and in its own write unit: a copy whose end marker is complete is complete. An EWLF area
+keeps what decides apart from the data, in a log of its own: :ref:`design-ewlf`.
 
 **What a power cut leaves.** Of all the words an update programs, only the one being programmed at
 the instant of the cut can be left *weak*: the ones before it are complete, the ones after it
@@ -49,11 +50,12 @@ valid at one boot and not at the next, and the only sign of it is a word after i
 erased.
 
 **The scan reads and chooses; it never erases.** The first access to an area after a reset locates
-its current copy. The scan reads the flash and chooses; what it programs is a word of zeros, on a
-flash that allows it, or in an EWLF area a new record copied from a torn one, and it never
-erases, so that a power cut at every boot never costs an erase: wear stays what the application's
-own updates cost (T1.5 of the threat model). In a regular area the slot with the highest valid
-version is taken, and its end marker, read once, decides the rest:
+its current copy. The scan reads the flash and chooses. In a regular area what it programs is a
+word of zeros, on a flash that allows it; in an EWLF area it programs nothing, and what it finds
+to repair is done by a separate call, when the application asks. It never erases, so that a power
+cut at every boot never costs an erase: wear stays what the application's own updates cost (T1.5
+of the threat model). In a regular area the slot with the highest valid version is taken, and its
+end marker, read once, decides the rest:
 
 - complete, or all zeros: the slot is current. This is every boot in normal operation;
 - programmed in part: the update got to its last word, so the checksum before it is complete and
@@ -65,8 +67,8 @@ version is taken, and its end marker, read once, decides the rest:
   first: its version item is pinned to zeros, so that its checksum can never verify again and the
   slot cannot come back at a later boot as a "new" version once its end marker reads differently.
 
-In an EWLF area the two flags of a record decide, and a record whose last word may be weak is not
-trusted in place but copied: :ref:`design-ewlf-scan`.
+In an EWLF area the log decides, and a decision whose last word may be weak is not trusted in
+place but copied above it before it is shown: :ref:`design-ewlf-scan`.
 
 **Pinning.** To pin a write unit is to program it to all zeros, whatever it holds. Every cell gets
 a full programming pulse, so a pinned unit reads zeros for good, and on flash with ECC it should
@@ -74,9 +76,8 @@ leave a valid codeword in place of the inconsistent one a torn program left (T1.
 model says what remains to be measured there). Pinning needs a flash that accepts an all-zero
 program over a partially programmed unit, N3 of the flash page: an opt-in capability, declared
 per NVM with the ``zero_overwrite`` member of :c:type:`lftl_nvm_props_t`. The library never pins a
-unit that already reads all zeros, except where the build says the flash accepts that
-(``LFTL_EWLF_PIN_OVER_ZEROS``, see the stuck state of :ref:`design-ewlf-scan`); the STM32L5 and
-STM32U5 refuse it, measured on both. A pin or a
+unit that already reads all zeros: the STM32L5 and STM32U5 refuse that program, measured on both.
+Only regular areas pin; EWLF areas program nothing but write units that read erased. A pin or a
 tombstone is one word program, made once, since the pinned word then reads zeros for good; a power
 cut during it leaves a word closer to settled, decided again at the next boot. Without
 ``zero_overwrite`` the scan pins nothing and, in a regular area, makes the same choices again at
@@ -84,7 +85,7 @@ every boot, on the word as it reads then, until the next update settles them:
 :ref:`design-without-pinning` says what that changes.
 
 **Bounded time.** Every loop in the library runs over a quantity fixed by the configuration: the
-number of slots, of pages, of records in a page. Each operation therefore has a worst case that
+number of slots, of pages, of records in a page, of pairs and certificates in a log unit. Each operation therefore has a worst case that
 follows from the configuration alone (O5 of the threat model). Within that bound the scan's time
 depends on what the flash holds; an update's does not, except where noted below.
 
@@ -227,17 +228,35 @@ EWLF areas
 
 An EWLF area, for Extreme Wear Leveling Factor, declared with :c:macro:`LFTL_AREA_EWLF` and
 registered with :c:func:`lftl_register_area_ewlf`, packs many copies of the data, the *records*,
-into each erase unit: the data and its meta-data travel together, and an erase is paid once per
-unit's worth of updates instead of once per update. It is meant for data small compared to the
-page, and it gives up transactions: every update writes a whole record. The area is at least 2
-erase units, at least 2 records must fit in a unit, and the erased bytes of the flash must read
-``0xFF`` (R6 of the flash page): free record positions are recognized by that value.
+into each erase unit, and keeps apart, in a *log*, the word that says which record is current. An
+erase is paid once per unit's worth of updates instead of once per update. It is meant for data
+small compared to the page, and it gives up transactions: every update writes a whole record.
+
+Its anti-tearing argument has no residual against the data: after any sequence of power cuts, at
+any instant, a boot shows the last version an update acknowledged or a newer one, a version shown
+at one boot is never taken back at a later one, a write that was never acknowledged is never shown
+after an older version was, and the data is never lost. What remains is a loss of availability,
+the *stuck* state of :ref:`design-stuck-state`, reached only by a run of power cuts each inside
+the same short window, and which the area reports before it happens.
+
+The area is at least 4 erase units, 2 for the log and from 2 to 256 for the data; at least 2
+records must fit in a unit; the erased bytes of the flash must read ``0xFF`` (R6 of the flash
+page); and the write callback must tell a program the flash refused from any other failure
+(:c:macro:`LFTL_NVM_STATUS_REFUSED`, N3). EWLF areas do not use ``zero_overwrite``: they only
+program write units that read erased.
+
+**The principle: a reading proves nothing, a returned program does.** A word a power cut left
+weak may read valid today and erased tomorrow (T2 of the flash page, without T3). So nothing a
+later boot could contradict is decided on a reading: what is shown, what is erased and the order
+of the versions rest only on programs that *returned*, in the current session or, for earlier
+ones, through a *chain proof*: when word B is programmed only after the program of word A
+returned, B reading programmed proves that A is solid and reads its value for good. The last word
+of a chain is never proven, and the design is arranged so that nothing depends on it.
 
 Layout
 ^^^^^^
 
-A record is a header followed by the data; the second row gives the size of each field, the
-last one the order in which an update programs them:
+The data units come first, then the two log units:
 
 .. graphviz::
    :align: center
@@ -246,32 +265,11 @@ last one the order in which an update programs them:
      graph [pad="0.05" margin="0"];
      node [shape=plaintext fontname="Helvetica" fontsize=11];
      d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="5" align="left"><b>one record</b></td></tr><tr><td width="84" height="42">start marker<br/><font point-size="9">all zeros</font></td><td width="150" height="42">meta field<br/><font point-size="9">32-bit version, 64-bit checksum</font></td><td width="66" height="42">flag-a<br/><font point-size="9">all zeros</font></td><td width="66" height="42">flag-b<br/><font point-size="9">all zeros</font></td><td width="170" height="42">data<br/><font point-size="9">data_size bytes</font></td></tr><tr><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">12 B, rounded up to whole write units</font></td><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">rounded up to whole write units</font></td></tr><tr><td border="0">1</td><td border="0">3</td><td border="0">4</td><td border="0">5</td><td border="0">2</td></tr></table>>];
+       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td colspan="9" align="left"><b>one area</b>, N data units and 2 log units</td></tr><tr><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">D0<br/><font point-size="9">records</font></td></tr></table></td><td border="0" width="16"></td><td>...</td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">D(N-1)<br/><font point-size="9">records</font></td></tr></table></td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">L0<br/><font point-size="9">pairs</font></td></tr></table></td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">L1<br/><font point-size="9">pairs</font></td></tr></table></td></tr><tr><td align="left"><font point-size="9">area base</font></td><td colspan="8"></td></tr></table>>];
    }
 
-- the *start marker*, one write unit, programmed to all zeros, and the first word of the record to
-  be programmed;
-- the *meta field*: the 32-bit version then the 64-bit checksum, little endian, 12 bytes rounded
-  up to whole write units with zeros, programmed in one call. A version that reads ``0xFFFFFFFF``
-  (erased) or ``0`` (a tombstone, below) is no record, and that test comes before the checksum;
-- *flag-a*, one write unit programmed to all zeros once the meta field is complete: a bit at 0 in
-  it proves the data, the version and the checksum solid;
-- *flag-b*, one write unit programmed to all zeros once flag-a is complete: a bit at 0 in it proves
-  flag-a solid;
-- the data, rounded up to whole write units.
-
-The header is 15, 18, 24, 40 and 64 bytes on 1-, 2-, 4-, 8- and 16-byte write units, and the
-record is a multiple of the write unit. There is no magic: with only record positions ever
-examined, below, the checksum alone tells a record from anything else, at 2\ :sup:`-64` per
-position for content that is not one.
-
-Records only ever start at *positions*: the top of an erase unit, which is the unit's end minus
-one record size, and every record size below it. Only positions are ever examined, so the data can
-never be mistaken for a record, even when it holds a copy of a header, and every record lies
-within one erase unit. Positions fill a unit from its top down, and the units are used from the
-highest address down, wrapping from the lowest back to the highest. Three units, four records per
-unit, the data at its 11th update of the current cycle; ``U2`` is the unit at the highest address,
-``p0`` the top position of a unit, and the blue cell is the current record:
+A *record* is a start marker, the data, then a meta field; the second row gives the size of each
+field, the last one the order in which an update programs them:
 
 .. graphviz::
    :align: center
@@ -280,236 +278,338 @@ unit, the data at its 11th update of the current cycle; ``U2`` is the unit at th
      graph [pad="0.05" margin="0"];
      node [shape=plaintext fontname="Helvetica" fontsize=11];
      d [label=<
-       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U2</b> (current)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+9</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+10</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70" bgcolor="#dbeafe"><b>v+11</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U1</b> (oldest)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+1</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+2</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+3</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+4</td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+5</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+6</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+7</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+8</td></tr></table></td></tr></table>>];
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="3" align="left"><b>one record</b></td></tr><tr><td width="90" height="42">start marker<br/><font point-size="9">all zeros</font></td><td width="190" height="42">data<br/><font point-size="9">data_size bytes</font></td><td width="170" height="42">meta field<br/><font point-size="9">32-bit version, 64-bit checksum</font></td></tr><tr><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">rounded up to whole write units</font></td><td border="0"><font point-size="9">12 B, rounded up to whole write units</font></td></tr><tr><td border="0">1</td><td border="0">2</td><td border="0">3</td></tr></table>>];
    }
+
+- the *start marker*, one write unit programmed to all zeros, first: a position is *started* once
+  its start marker does not read erased, and nothing after an erased start marker was ever
+  programmed;
+- the data, rounded up to whole write units;
+- the *meta field*: the 32-bit version then the CRC-64/NVME of the version and the data, little
+  endian, 12 bytes rounded up to whole write units with zeros, programmed in one call.
+
+A record has no flag: whether it is current is the log's business. Records only ever start at
+*positions*: the top of a data unit, which is the unit's end minus one record size, and every
+record size below it, 256 positions per unit at most. Positions fill a unit from its top down, and
+the data units are used from the highest address down, wrapping from the lowest back to the
+highest. A record whose words are weak is never repaired: no entry names it once a boot has run,
+and it stays dead in place until its unit is erased.
+
+The log holds *pairs*. A pair is three words, programmed in this order, each only after the
+previous one returned:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="3" align="left"><b>one pair</b></td></tr><tr><td width="90" height="42">marker<br/><font point-size="9">all zeros</font></td><td width="290" height="42">entry<br/><font point-size="9">generation, data unit, position, version, CRC</font></td><td width="90" height="42">confirm<br/><font point-size="9">all zeros</font></td></tr><tr><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">16 B, rounded up to whole write units</font></td><td border="0"><font point-size="9">one write unit</font></td></tr><tr><td border="0">1</td><td border="0">2</td><td border="0">3</td></tr></table>>];
+   }
+
+- the *marker* first, so that a position whose entry may be weak is visibly started at every
+  boot: a word of zeros never reads as anything but zeros, in part or in full, or erased;
+- the *entry* names a record: the 16-bit generation of its log unit, the data unit and the
+  position of the record, one byte each, the record's 32-bit version, then the CRC-64/NVME of
+  those 8 bytes, little endian. An entry is *valid* when its CRC verifies, its generation has the
+  parity of its log unit, and it names a position that exists;
+- the *confirm*, after the entry returned: a confirm that reads all zeros proves the entry solid,
+  by the chain proof, and the entry is then *proven*. All zeros, not any programmed bit: on flash
+  with ECC an erased line with two flipped bits goes undetected (T5), so a few programmed bits in
+  a word that should be erased prove nothing.
+
+A log unit holds, from its base up, ``P`` regular pair positions, ``R`` reserved pair positions,
+then ``X`` *certificates*, one write unit each, programmed to all zeros:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="9" align="left"><b>one log unit</b></td></tr><tr><td width="64" height="36">pair 0</td><td width="28">...</td><td width="64">pair P-1</td><td width="64" bgcolor="#dbeafe">pair P</td><td width="28" bgcolor="#dbeafe">...</td><td width="72" bgcolor="#dbeafe">pair P+R-1</td><td width="56" bgcolor="#fef3c7">cert 0</td><td width="28" bgcolor="#fef3c7">...</td><td width="64" bgcolor="#fef3c7">cert X-1</td></tr><tr><td border="0" colspan="3"><font point-size="9">regular: the application's updates</font></td><td border="0" colspan="3"><font point-size="9">reserved: the repairs and the switches</font></td><td border="0" colspan="3"><font point-size="9">certificates</font></td></tr><tr><td border="0" align="left" colspan="9"><font point-size="9">unit base</font></td></tr></table>>];
+   }
+
+- generation ``g`` of the log lives in log unit ``g mod 2``. Generations are compared as
+  successors modulo 2\ :sup:`16`: the two units always hold adjacent generations;
+- regular pairs take the application's updates. Reserved pairs are never taken by an update's
+  ordinary commit: they serve the scan's repairs and the switches, so that a full unit still has
+  room to make a decision solid;
+- a certificate of a log unit, once it reads all zeros, means: *the erase of the other log unit
+  returned in the session that programmed this word, and content of the next generation may have
+  entered the other unit since*. An interrupted erase cannot be seen from inside the erased unit
+  (T4), so that information is kept outside it.
+
+``R`` is :c:macro:`LFTL_EWLF_RESERVED_PAIRS`, 8, a build-time constant. ``X`` is a parameter of
+the area, the ``ewlf_certificates`` member of :c:type:`lftl_ctx_t`, with
+:c:macro:`LFTL_EWLF_CERTIFICATES`, 32, for the areas that leave it at zero. Both are part of the
+on-flash format of the area, like the data size: nothing on the flash records them, and an area
+whose value changes must be formatted again. ``P`` follows: what the certificates and the
+reserved pairs leave. On the STM32U5, 16-byte write units and 8 KB erase units, a pair is 48
+bytes and a log unit holds 152 regular pairs with the defaults; 3 certificates cost one regular
+pair.
 
 Format
 ^^^^^^
 
-:c:func:`lftl_format` erases every unit and writes the record of version 1 at the top of the
-highest unit, over erased data. It is not protected against a power cut, as for regular areas.
-
-Update
-^^^^^^
-
-An update, :c:func:`lftl_write`, :c:func:`lftl_basic_write` or :c:func:`lftl_erase_all`, writes a
-whole new record:
-
-1. it looks for room below the current record, in the same unit: the first position whose start
-   marker reads all erased, and whose meta field and flags read erased too. Nothing after an
-   erased start marker was ever programmed, since the start marker is programmed first, unless the
-   marker is weak and the position was stepped over and tombstoned since, which the second test
-   sees. A started position on the way holds a record a power cut tore, one the scan tombstoned, or
-   a copy it made: it is stepped over; when its checksum is valid, the new record is numbered above
-   its version, so that two valid records can never share a version whatever that record's flags
-   read later; and on a flash with ``zero_overwrite`` its start marker is programmed to zeros again,
-   unless it already reads all zeros, so that a weak start marker cannot later read erased and open
-   a hole in the run of started positions, and its meta field is tombstoned when it does not read
-   valid, so that a weak one cannot later read valid with a version the new record is about to
-   take;
-2. with no room left, the update *rolls over*: the unit immediately below, wrapping from the lowest
-   to the highest, is erased, whatever it reads, and the record goes to its top. The unit left
-   behind is not erased: it keeps its records until the write order comes back to it. A unit is
-   therefore erased exactly once per cycle, right before its first record is programmed, and never
-   at boot; an erase a power cut interrupted is redone by the next attempt to use the unit, and
-   cells a torn record left behind are never programmed over without an erase (T4 of the flash
-   page);
-3. the record is programmed in this order, each step completed before the next starts: the start
-   marker; the data, the current data with the written range replaced, or left erased by
-   :c:func:`lftl_erase_all`; the meta field, in one call, its checksum computed from the data meant
-   to be written and not from what reads back, so that a record that did not program as intended
-   fails its check; flag-a; flag-b, last.
-
-In the example above, the update to ``v+13`` finds ``U2`` full after ``v+12`` and rolls over: it
-erases ``U1``, the next unit in write order and always the oldest, then programs ``v+13`` at its
-top:
-
-.. graphviz::
-   :align: center
-
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U2</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+9</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+10</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+11</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+12</td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U1</b> (current)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70" bgcolor="#dbeafe"><b>v+13</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">v+5</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">v+6</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">v+7</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">v+8</td></tr></table></td></tr></table>>];
-   }
-
-A cut during the erase of ``U1`` leaves it partly erased and nothing else changed: the scan finds
-``v+12`` in ``U2``, and the next update erases ``U1`` again before programming it. A cut during the
-programming of ``v+13`` leaves a torn record at the top of ``U1``, and its flags say how far it
-got (:ref:`design-ewlf-scan`): before flag-a, it is not taken and ``v+12`` stays current; in or
-after flag-a, its data is complete and it is taken, through a copy when the cut may have left a
-flag weak. ``U2`` is full, so the next update erases ``U1`` again and starts over. In both cases
-the erase is paid for by an update the application asked for.
-
-An update costs one record's worth of programming, and one page erase every *records per unit*
-updates. The search for room adds, only when torn, tombstoned or copied positions lie below the
-current record, one start marker read and one checksum per such position, and with
-``zero_overwrite`` one or two word programs, at most a unit's worth; a rollover is exactly one
-erase in every state.
+:c:func:`lftl_format` erases every unit of the area, writes the record of version 1 at the top
+of the highest data unit, its data left erased, then the pair that names it at the first position
+of log unit 1, generation 1. Log unit 0 stays erased. It is not protected against a power cut, as
+for regular areas: a cut in its erase leaves cells that a later boot may read differently (T4),
+so an area whose format was cut must be formatted again before use.
 
 .. _design-ewlf-scan:
 
 Scan
 ^^^^
 
-**What a position holds.** From one reading of its meta field and both flags, a position is one
-of four things. *No record*: its version reads erased or 0, or its checksum fails; erased
-positions, writes torn before or during the meta field, tombstones and foreign content. *Aborted*:
-checksum valid, both flags all erased; a write cut before flag-a, or whose flag-a is weak and
-reads erased. *Half*: checksum valid, a bit at 0 in flag-a, flag-b all erased; the data is solid,
-since flag-a was programmed after the meta field completed, but flag-a itself may be the weak word
-of a cut during it, or during flag-b with flag-b reading erased. *Complete*: a bit at 0 in flag-b,
-which was programmed after flag-a completed, so flag-a is solid. Every decision about a position
-is made on that one reading. Inside a unit the newest record is the lowest one, since positions
-fill from the top. Two complete records sharing a version is
-:c:macro:`LFTL_ERROR_VERSION_COLLISION`; a half or aborted record sharing one with a complete
-record is reachable after a cut tombstone and harmless, the complete one wins.
+The scan reads; it programs and erases nothing. It runs once, at the first call that needs the
+area after a reset: :c:func:`lftl_ewlf_status`, :c:func:`lftl_ewlf_complete_scan`,
+:c:func:`lftl_ewlf_read_unproven`, a read or a write. Registration reads nothing: an area is
+registered before it is formatted. Every word of both log units is read once, and from that one
+reading:
 
-**The choice, then the loop.** The scan collects the newest complete record, the newest half one
-and the newest aborted one, with the highest version of every valid record it saw, and then, at
-most once per record position plus two:
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
 
-- an aborted record newer than both others is the abort of a write that never reached flag-a, or
-  whose flag-a is weak and read erased this time. With ``zero_overwrite`` it is *tombstoned*: its
-  meta field is pinned to zeros, so that its version reads 0 and it is no record for good, and
-  the choice runs again. Without, it is ignored: it was never shown, since a record is shown only
-  once a bit at 0 in flag-a is solid, and such a bit never reads erased again;
-- a half record newer than the complete one holds solid data behind a flag-a that may be weak. It
-  is *copied forward*: its data is written again as a new record, through the update path with
-  the half record as the current one, which ends with a flag-b the scan saw programmed, and the
-  choice runs again, finding the copy complete. A half record is never tombstoned: it may be the
-  record a previous boot showed, when its flag-b read a bit. The copy's version is counted from
-  the choice's own readings, never from a meta field read again, and the copy may not erase the
-  unit of the complete record nor one holding a half record newer than it; when no position is
-  left under those rules, the *stuck state*, the half record is pinned in place with
-  ``zero_overwrite``, flag-a then flag-b, which makes it complete for good once the program of
-  flag-b returns, or shown as it is without (:ref:`design-stuck-state`);
-- otherwise the complete record is current, or :c:macro:`LFTL_ERROR_NO_VALID_VERSION` when there is
-  none.
+   * - Name
+     - Definition
+   * - started position
+     - a pair position where any byte reads programmed
+   * - valid entry
+     - its CRC verifies, its generation has the parity of the unit, the position it names exists
+   * - proven entry
+     - valid, and its confirm reads all zeros
+   * - closed unit
+     - a reserved position is started, or a certificate reads all zeros: no ordinary commit goes
+       to it any more
+   * - certified unit
+     - one of its certificates reads all zeros
+   * - live unit ``L``
+     - the unit of the higher generation among those holding a valid entry; ``O`` is the other
+   * - decision ``D``
+     - the newest valid entry of ``L``: the one at the highest position
+   * - ``O`` is uncertain
+     - ``L`` is certified, ``O`` has a started position and no valid entry: a first entry of the
+       next generation, possibly weak, may be there
+   * - the top is solid
+     - ``D`` is proven, nothing is started above it in ``L``, and ``O`` is not uncertain
 
-The scan never erases, programs nothing at a boot that follows no cut, and sets the context once,
-at the end, from the position it found: the content of the flash picks among fixed positions
-inside the area, never where a record starts, and a cut during a copy leaves the context unset.
+The certificates of ``O`` are never read as certificates: they belong to its previous life.
+Without a certificate of ``L`` nothing entered ``O`` since its erase, and what ``O`` reads is not
+consulted. ``D`` is the newest *valid* entry, not the newest proven one, on purpose: a weak
+confirm that read all zeros at one boot may have shown that entry, and a later boot that reads it
+erased must not fall back to the entry before it.
 
-**Why a version shown is never taken back.** A record is shown either after a program the scan
-completed in this very boot, the copy's flag-b or the pin, or on a reading of flag-b with a bit at
-0, which proves flag-a solid. A solid zero never reads all ones again, so a record once shown is
-half or complete at every later boot; it is never tombstoned, its unit is never erased by a copy,
-the application's updates erase only the unit below the current record's, and a newer record
-replaces it only when it is shown under the same rules. The application therefore reads a
-version, then the same or a newer one, never an older one, with any number of power cuts and
-without the flash assumption T3; the one exception is the stuck state on a flash that refuses
-zeros over zeros, in :ref:`design-stuck-state`. An aborted record whose tombstone was cut can come
-back once, as a half record that gets copied: the version before it, then it, which is not a
-rollback.
+Then:
 
-The two moves that look simpler in the stuck state, showing the complete record instead or
-erasing its unit to make room, are rollbacks in disguise; :ref:`design-stuck-state` shows both,
-with the other alternatives considered and why the pin stays.
+1. no valid entry in either unit: :c:macro:`LFTL_ERROR_NO_VALID_VERSION`, the state of an area
+   never formatted or whose format was interrupted;
+2. the record ``D`` names is checked: its meta field holds ``D``'s version and its checksum
+   verifies. It always does for an entry the library wrote; otherwise the area has no valid
+   version;
+3. when the top is solid, ``D``'s record is the current one and the area is readable and
+   writable. This is every boot after a session that was not cut, with one exception, below;
+4. otherwise a *repair* is pending, and nothing is shown until it is done.
 
-Visited unit by unit, every unit costs one pass from its bottom up to its first complete record,
-and an area with many units would pay for all of them at every boot. The scan instead finds the
-current unit, then the newest records inside it, with a number of reads logarithmic in the unit
-and record counts; the pass over every unit, the *linear pass*, is its fallback.
+**The repair** is :c:func:`lftl_ewlf_complete_scan`, a separate call, so that the application
+decides when the flash is written. It *buries* ``D``: it programs a copy of ``D`` above every
+started position, by the first of these that applies:
 
-**The order of the units.** Call a unit's *key* the version of its top record when its checksum
-verifies, whatever its flags, and 0 otherwise. The top record is the first one written into the
-unit after its erase, so every record of a newer unit has a higher version than every record of an
-older one: keys order the units by age. Four units, four records per unit; the first cycle filled
-``U3`` to ``U0`` with versions 1 to 16, the second cycle has reached ``U1``:
+- when ``O`` is uncertain, a pair in ``O`` above its started positions, of the next generation,
+  without erasing: a copy in ``L`` would leave a possible entry of the next generation above it;
+- a regular pair of ``L``, when ``L`` is open and has one;
+- a reserved pair of ``L``;
+- a log switch with ``D`` as its first entry, below.
 
-.. graphviz::
-   :align: center
+The copy's three programs return before anything is shown: ``D`` is then proven and nothing a
+power cut left can outrank it at a later boot. The repair decides from the readings of the scan
+and reads the log no more. When no repair is pending the call does nothing, and an application
+may call it unconditionally after a reset.
 
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U3</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">17</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">18</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">19</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">20</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>17</b></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U2</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">21</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">22</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">23</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">24</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>21</b></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U1</b> (current)</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">25</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70" bgcolor="#dbeafe"><b>26</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70" bgcolor="#eeeeee"><font color="#777777">erased</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>25</b></td></tr></table></td><td border="0" width="18"></td><td border="0"><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" colspan="2" align="left"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="70">13</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="70">14</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="70">15</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="70">16</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>13</b></td></tr></table></td></tr></table>>];
-   }
+**While a repair is pending**, :c:func:`lftl_read` and the write functions raise
+:c:macro:`LFTL_ERROR_EWLF_PENDING` on the area, so that no version that is not vouched for reaches
+the normal path. Two calls work in that state:
 
-Read in write order from the current unit, ``U1``, ``U2``, ``U3``, ``U0``, the keys only decrease:
-25, 21, 17, 13. Read in address order, ``U0`` to ``U3``, that is 13, 25, 21, 17: a decreasing
-sequence with a single jump up, at the current unit. The units without a key, an erased unit of
-the first cycle, a unit whose top record is torn or tombstoned, a unit left partly erased by a
-torn erase, are the oldest of all and sit at the old end of the cycle, so the shape holds. The
-checksum is what makes a key trustworthy: an erase only sets bits to 1, so the top record of a
-unit whose erase was cut early can keep a programmed start marker while a few cells of its version
-word have flipped, which reads as a larger number; the checksum covers the version and rejects
-it. A torn rollover record keys its unit whatever its flags read, so that the copies the scan may
-have placed below it are looked for there. A key is read once per scan: a partly erased unit may
-read differently from one read to the next, and whichever way it reads it sits at the bottom of
-the order.
+- :c:func:`lftl_ewlf_status` gives the pending repair, ``D``'s version, and the number of further
+  power cuts, each at the worst instant, that the area can take before it is stuck
+  (:ref:`design-stuck-state`). An application applies the threshold it wants before it calls the
+  repair, for instance to ask the user for a stable power supply first;
+- :c:func:`lftl_ewlf_read_unproven` reads ``D``'s record. The record itself is solid: its programs
+  returned before its entry was started, and its unit is not erased while an entry can name it.
+  Within the session it is exactly the version the repair makes current. What is not proven is
+  that a later boot chooses the same one, if the session ends before the repair: the other
+  candidate is the version written just before or just after it. An application that uses this
+  read to decide whether to go on must keep the state of that decision, a retry counter for
+  instance, in another area: this one takes no write before the repair.
 
-**The current unit** is the jump in that cyclic sequence, and it is found by halving: keep a range
-of units that contains the jump, probe its middle unit and compare its key with the key of the
-range's last unit; higher means the jump is at the middle or before it, otherwise after. Each
-probe is one header read and one checksum, and the number of probes is the number of times the
-unit count can be halved, plus one for the last unit. Eight units, eight records each, the second
-cycle has reached ``U2``:
+**A write at a boot that follows no cut.** A boot after a session that was not cut finds nothing
+to repair, with one exception inherited from T2: a word that an older cut left weak and that
+reads differently than it did at the boot that followed that cut. A weak confirm of ``D`` that
+read all zeros then reads erased, or a weak marker above ``D`` that read erased then reads
+programmed, makes the top not solid at that later boot: one repair, three words in most cases.
+The decision does not change, and the repair is reported like any other.
 
-.. graphviz::
-   :align: center
+Update
+^^^^^^
 
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0"><b>U7</b></td><td border="0"><b>U6</b></td><td border="0"><b>U5</b></td><td border="0"><b>U4</b></td><td border="0"><b>U3</b></td><td border="0"><b>U2</b> <font point-size="9">(current)</font></td><td border="0"><b>U1</b></td><td border="0"><b>U0</b></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="44">65</td><td width="44">73</td><td width="44">81</td><td width="44">89</td><td width="44">97</td><td width="44">105</td><td width="44">49</td><td width="44">57</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="44">66</td><td width="44">74</td><td width="44">82</td><td width="44">90</td><td width="44">98</td><td width="44" bgcolor="#dbeafe"><b>106</b></td><td width="44">50</td><td width="44">58</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">...</font></td><td width="44">...</td><td width="44">...</td><td width="44">...</td><td width="44">...</td><td width="44">...</td><td width="44" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="44">...</td><td width="44">...</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p7</font></td><td width="44">72</td><td width="44">80</td><td width="44">88</td><td width="44">96</td><td width="44">104</td><td width="44" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="44">56</td><td width="44">64</td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">key</font></td><td border="0"><b>65</b></td><td border="0"><b>73</b></td><td border="0"><b>81</b></td><td border="0"><b>89</b></td><td border="0"><b>97</b></td><td border="0"><b>105</b></td><td border="0"><b>49</b></td><td border="0"><b>57</b></td></tr></table>>];
-   }
+An update, :c:func:`lftl_write`, :c:func:`lftl_basic_write` or :c:func:`lftl_erase_all`, writes a
+whole new record, then the pair that makes it current:
 
-1. the range is ``U0`` to ``U7``; the key of ``U7``, its last unit, is 65;
-2. probe ``U3``: 97 is higher than 65, so the jump is in ``U0`` to ``U3``;
-3. probe ``U1``: 49 is not higher than 97, so the jump is in ``U2`` to ``U3``;
-4. probe ``U2``: 105 is higher than 97, so the jump is in ``U2`` to ``U2``: ``U2`` is the current
-   unit, after 4 reads.
+1. room for the record: the first position of the current record's unit above the last started
+   one. A position whose start marker the flash refuses to program, a weak marker that reads
+   erased at that instant, counts as started and is stepped over;
+2. when the unit has no position left, the *rollover*: the next data unit, never the one of the
+   current record, is erased, whatever it reads, right before its first record (T4);
+3. the record: the start marker, the data, the bytes outside the written range copied from the
+   current record, then the meta field. :c:func:`lftl_erase_all` leaves the data erased. The
+   checksum is computed from the data meant to be written, so a record that did not program as
+   intended fails its check;
+4. the *commit*: a pair at the first regular position of ``L`` above its started ones, when
+   ``L`` is open and has one; otherwise a log switch with the new entry as its first entry. A
+   position where the flash refuses the marker, the entry or the confirm counts as started and
+   the next one is tried: a word is never retried, and nothing valued is programmed over a word
+   that was refused;
+5. the context points at the new record once the confirm returned: only then is the update
+   acknowledged.
 
-**The newest records inside it.** Positions fill from the top, so the newest records of the
-current unit are its lowest started ones: the start markers are read from the bottom up to the
-first one that is not erased, one write unit per read and no checksum, then the records from there
-up to the first complete one. A search by halving on start markers would be cheaper, but it needs
-the started positions to form one run from the top, and a start marker a power cut left weak can
-read all zeros when the next update steps over it, which leaves it alone, and erased at a later
-boot: a hole in the run, above newer records, which a halving would take for the end of the run. A
-search from the bottom cannot be fooled by it. An orange cell is a torn record; the last column
-lists the scan's probes, one read of one write unit each:
+A power cut before the confirm returned leaves the next boot free to make either version current:
+the previous one if the new entry does not read valid then, the new one if it does. Whichever it
+is, that boot buries it before showing it, unless nothing above it is started, and the choice is
+never revisited. A cut after the confirm returned leaves the new version current.
 
-.. graphviz::
-   :align: center
+Log switch
+^^^^^^^^^^
 
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="3" align="left"><b>U2</b> (current)</td></tr><tr><td border="0"></td><td border="0"><font point-size="9">start marker</font></td><td border="0"><font point-size="9">record</font></td><td border="0" align="left"><font point-size="9">the scan's probes, in order</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p0</font></td><td width="56">started</td><td width="170">105</td><td border="0"></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p1</font></td><td width="56">started</td><td width="170">106</td><td border="0"></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p2</font></td><td width="56">started</td><td width="170" bgcolor="#fde7c8">data, no meta field: a torn write</td><td border="0" align="left"><font point-size="9">stepped over by the update to 107, which programmed its start marker again</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p3</font></td><td width="56">started</td><td width="170" bgcolor="#dbeafe"><b>107</b></td><td border="0" align="left"><font point-size="9">probe 5: started, the lowest started position: the records are read from here up</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p4</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0" align="left"><font point-size="9">probe 4: not started</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p5</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0" align="left"><font point-size="9">probe 3: not started</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p6</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0" align="left"><font point-size="9">probe 2: not started</font></td></tr><tr><td border="0" align="right"><font point-size="9" color="#777777">p7</font></td><td width="56" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td width="170" bgcolor="#eeeeee"><font color="#777777">erased</font></td><td border="0" align="left"><font point-size="9">probe 1: not started</font></td></tr></table>>];
-   }
+When the live unit ``L``, of generation ``g``, has no position left for an entry, the session
+that needs one, an update or a repair, opens generation ``g+1`` in ``O``, with that entry as its
+first one:
 
-**The check and the fallback.** The result is checked before it is trusted: the current unit is a
-local maximum in write order, so its two neighbours must have lower keys or none, and the complete
-record found must have a higher version than both. The neighbour below in write order is then read
-whole, from its bottom up to its first complete record: that is where a torn rollover leaves its
-record, and where the copies the scan made of it sit below it. When the check fails, which
-hostile flash content, a bug, or a current unit whose newest records are all half or aborted (a
-rollover write cut in a flag, before the scan repaired it) can cause, the scan falls back to the
-linear pass over every unit, which is right whatever the area holds. Unit indices stay inside the
-area either way. The Linux and sanitizer test builds define ``LFTL_SCAN_CROSS_CHECK``: every
-scan runs both searches and raises :c:macro:`LFTL_INTERNAL_ERROR` if they disagree on the records
-that matter.
+1. when no certificate of ``L`` reads all zeros and ``L`` holds no proven entry: a reserved pair
+   of ``L`` copying ``D`` first, so that a solid decision exists outside ``O`` before ``O`` is
+   erased. The previous life of ``O`` may hold the only proven one;
+2. when no certificate of ``L`` reads all zeros, or ``O`` has no started position: ``O`` is
+   erased, whatever it reads, then a fresh certificate of ``L`` is programmed, both seen
+   returning in this session;
+3. the entry goes to the first position of ``O`` above its started ones.
 
-A boot thus costs a number of header reads and checksums logarithmic in the unit count, one
-start-marker read per free position of the current unit, the walk of the next unit, one pass in
-normal operation, and nothing programmed; after a cut, one tombstone, one record copy or one flag
-pin per torn record, each followed by one more choice.
+Content thus enters a log unit only after an erase that returned in the same session and a
+certificate that session saw return, or above a word that entered that way. Without the
+certificate a boot could not tell a first entry of generation ``g+1``, possibly weak, from what an
+interrupted erase left of the previous life of ``O``, and would have to choose between erasing
+``O``, where an interrupted erase lets that weak entry come back later above the live content,
+and writing into ``O``, into cells an interrupted erase may have left weak. The second case of
+step 2 covers a certificate that reads all zeros but is weak: the session cannot know, and an
+erase and a certificate it sees return cost one erase of a unit that holds nothing.
+
+Why there is no rollback and no loss
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+1. *What is shown is solid.* ``D`` is proven, or was copied by three programs that returned in
+   this session, and it is shown after the last of them. A solid entry reads valid at every later
+   boot until its unit is erased, and its record was whole before the entry was started.
+2. *The order is the generation and the position, never a reading.* An entry is written only
+   above every started position of its unit. Nothing can outrank a ``D`` that was shown:
+   everything started above it at the time was buried under a solid copy of it, and later entries
+   are newer by construction. This is also why a write that was cut is never shown after an older
+   version was.
+3. *What an interrupted erase leaves is neither elected nor written into.* A log unit whose
+   certificate does not read all zeros is erased again before use, which is safe since nothing
+   entered it; what it holds of its previous life is of a lower generation than the live one.
+4. *Erasing a log unit destroys nothing elected.* ``O`` is erased only when nothing entered it,
+   and then only once ``L`` holds a proven entry, or when it has no started position.
+5. *Erasing a data unit destroys nothing elected.* The unit of the current record is never
+   erased, and a data unit is erased only in a session whose scan left ``D`` solid above
+   everything started, so every entry whose record goes is below a solid ``D``.
+
+What the next boot makes of a cut, by the word it lands in:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 34 36
+
+   * - The cut lands in
+     - The next boot sees
+     - Outcome
+   * - the record: start marker, data or meta field
+     - a started record position that no entry names
+     - the previous version; the position is stepped over
+   * - the pair's marker, or the entry, which reads invalid
+     - a started position above ``D``: a repair
+     - the previous version stands, solid
+   * - the entry, which reads valid
+     - a ``D`` that is not proven: a repair
+     - the new version stands, never taken back
+   * - the confirm
+     - the entry is solid: shown when the confirm reads all zeros, else a repair
+     - the new version stands
+   * - a repair or a switch's first entry
+     - the same state one position higher
+     - repeated until one returns
+   * - the erase of a data unit
+     - what is left of its records, which no entry names
+     - erased again before its first record
+   * - the erase of ``O``
+     - what is left of its previous life, of a lower generation
+     - erased again before use
+   * - a certificate, or the entry right after it
+     - ``O`` erased and empty, or started under a certificate
+     - erased again with a new certificate, or the entry above the started position
 
 Wear leveling
 ^^^^^^^^^^^^^
 
-Each unit is erased once per cycle, and a cycle is *records per unit* times *units* updates: that
-product is the wear leveling factor, and :c:macro:`LFTL_AREA_EWLF` sizes the area, at least 2
-units, so that the product reaches the factor asked for. The old records of a unit stay physically
-readable until the write order comes back to it (T1.8 of the threat model); nothing reads them
-through the API.
+Each data unit is erased once per ``N`` x ``K`` updates, ``K`` records per unit and ``N`` data
+units, and each log unit once per 2 x ``P`` updates. The wear leveling factor of the area is the
+smaller of the two, and :c:macro:`LFTL_AREA_EWLF` sizes the data units so that ``N`` x ``K``
+reaches the factor asked for. For small data the log is the limit: on the STM32U5 with the
+defaults, 2 x ``P`` is 304, about 3 million updates at 10 000 erase cycles, whatever the number
+of data units. The old records of a unit stay physically readable until the write order comes
+back to it (T1.8 of the threat model); nothing reads them through the API.
+
+What an update and a boot cost on the STM32U5, 128 us per write unit programmed, an erase of
+1.56 ms for a unit that holds data (``FLASH.md``, section 4):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 15 15 15 15
+
+   * - Data size
+     - 4 B
+     - 16 B
+     - 64 B
+     - 128 B
+   * - Records per data unit
+     - 170
+     - 170
+     - 85
+     - 51
+   * - Updates on 4 erase units, 10 000 cycles
+     - 3.04 M
+     - 3.04 M
+     - 1.7 M
+     - 1.02 M
+   * - Update, usual: the record and its pair
+     - 0.77 ms
+     - 0.77 ms
+     - 1.15 ms
+     - 1.66 ms
+   * - Update, worst: a rollover and a log switch
+     - 4.0 ms
+     - 4.0 ms
+     - 4.4 ms
+     - 4.9 ms
+   * - Repair, worst: a log switch
+     - 2.5 ms
+     - 2.5 ms
+     - 2.5 ms
+     - 2.5 ms
+
+The scan reads the two log units, 16 KB, and checks one record, whatever the size of the area: a
+fraction of a millisecond, estimated, not measured.
 
 Limitations
 ^^^^^^^^^^^
@@ -517,15 +617,18 @@ Limitations
 - one area holds one data of fixed size, and every update writes all of it;
 - no transactions: :c:func:`lftl_transaction_start` raises
   :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`;
-- at least two records must fit in a page: the layout macro checks it at compile time, registration
-  at run time;
-- the update that rolls over costs an erase and the others do not, so the update time is not
-  uniform.
+- two erase units of every area are its log, and the area needs two data units at least;
+- after a reset, an application that reads or writes the area without calling
+  :c:func:`lftl_ewlf_complete_scan` first gets :c:macro:`LFTL_ERROR_EWLF_PENDING` when the last
+  session was cut;
+- the update that rolls over or switches costs one or two erases and the others none, so the
+  update time is not uniform;
+- the design rests on two properties of the flash beyond the tearing model, in
+  :ref:`design-ewlf-checked`.
 
-A possible extension, not implemented: an EWLF area could serve as the journal of transactions
-that span several areas, each record describing the state of such a transaction so that the first
-access after a reset can roll it back. The updates of the areas involved would then have to keep
-the previous version until the journal marks the transaction complete.
+A possible extension, not implemented: for data of a few tens of bytes the record could live in
+the pair itself, without data units, which halves the smallest area. Another: an EWLF area could
+serve as the journal of transactions that span several areas.
 
 .. _design-without-pinning:
 
@@ -534,13 +637,9 @@ Without pinning
 
 On a flash not declared with ``zero_overwrite`` (N3 of the flash page: the STM32L5 and STM32U5
 document the all-zero overwrite, the W25Q32RV specifies programming for erased locations only, the
-M5531 and CH32V307 manuals do not say) the library runs without its pins: in a regular area the
-pin of a partially programmed end marker and the tombstone of a torn slot; in an EWLF area the
-tombstone of an aborted record, the pin of the start markers and meta fields an update steps over,
-and the pin of the stuck state. Everything else stands: the scan never erases, a unit is erased at
-the rollover into it, the words are written in the same order, the newest version wins, the copy
-of a half record needs no pin, and the search for the current unit works unchanged, since it
-only reads keys. What changes:
+M5531 and CH32V307 manuals do not say) the library runs without its pins, which only regular
+areas have: the pin of a partially programmed end marker and the tombstone of a torn slot.
+Everything else stands. What changes:
 
 - **in a regular area, a weak end marker is decided again at every boot, until the next update.**
   Programmed in part: the slot is taken, but nothing makes that durable; if the marker reads all
@@ -548,19 +647,12 @@ only reads keys. What changes:
   erased: the previous version is taken and the torn slot left as it is; if its marker reads
   programmed at a later boot, the torn slot is taken then, a "late new" by one version. Both last
   until the application's next update, which erases the torn slot;
-- **in an EWLF area, an aborted record is left as it is**, and may come back once as a half record
-  that gets copied: a late new by one version, until the next update numbers above it. And when
-  the scan has no position left for a copy, the newest half record is shown as it is: that is the
-  one residual, in :ref:`design-stuck-state`;
-- **a new record is numbered above every record with a valid checksum, taken or not.** With the
-  torn record left in place, "current version plus one" would give the next record the torn
-  record's version, and if the torn marker later read programmed the scan would find two
-  candidates sharing a version. The update reads the torn record's header anyway, on its way to
-  the free position, so it numbers above it. The pinning variant uses the same rule; with
-  tombstoning it is only a simplification.
+- **an EWLF area behaves the same.** It never programs a write unit that does not read erased,
+  so it has no pin to lose. On a flash that refuses zeros over a weak word that reads erased, a
+  marker, a confirm or a certificate is stepped over where the other flash would have taken it:
+  one position or one word, and no change to what is shown.
 
-What the variant gives in exchange is a scan that writes nothing at all: under a power cut at
-every boot the flash is not touched, where the pinning variant programs one word per boot. The two
+What the variant gives in exchange is a scan of regular areas that writes nothing at all. The two
 variants share the layout and the format; which one runs is the NVM's declaration, and the test
 suite runs under both.
 
@@ -575,8 +667,7 @@ version; O3, no bricking; and the wear threat T1.5. "Until the next update" mean
 application's next completed update to the area: from then on the newest version is complete and
 ahead of any weak word, and the weak word goes when its slot or unit is reused. In a regular area
 the weak word is the end marker of the update a power cut interrupted; in an EWLF area it is a
-flag of the record the cut interrupted, or a word of the scan's own program, a tombstone, a copy
-or a pin, when the cut came at a boot.
+word of the record or of the pair the cut interrupted, or a word of a repair or of a switch.
 
 .. list-table::
    :header-rows: 1
@@ -600,72 +691,68 @@ or a pin, when the cut came at a boot.
        was shown; each boot alone reads old or new
      - Closed: the torn slot is tombstoned at the first boot
      - Open until the next update; the numbering rule keeps it from becoming a version collision
-   * - EWLF area: a flag of the torn record read one way at one boot, another way at a later one (T2,
-       T3 not assumed)
-     - None: a record whose flag-b read a bit has a solid flag-a and is half or complete at every
-       later boot; one whose flag-a alone read a bit is copied before it is shown; one whose flags
-       read erased is not shown
-     - Closed. An aborted record is tombstoned; one whose tombstone was cut may come back once, as
-       a half record that is copied: a late new by one version, never a rollback
-     - Closed for rollback; an aborted record is left as it is and may come back once, a late new
-       by one version
-   * - EWLF area: no position left for a copy (the stuck state: a write cut in a flag at the last
-       free position of a unit, the others filled by cut copies or by torn writes the application
-       retried, with the complete record in another unit; :ref:`design-stuck-state`)
-     - Rollback by one version (O2) in the residual case; no loss
-     - The half record is pinned in place and complete once the program of flag-b returns. Residual:
-       a flag that read all zeros is left alone on a flash that refuses zeros over zeros, as the
-       STM32L5 and STM32U5 do (measured; ``LFTL_EWLF_PIN_OVER_ZEROS`` unset), and if it was weak and later
-       reads erased the record can turn aborted after it was shown. None where the flash accepts
-       that program
-     - The half record is shown as it is; if its flag-a was the weak word and later reads erased,
-       the previous version comes back. Open until the next update
+   * - EWLF area: any word of the log or of a record read one way at one boot, another way at a
+       later one (T2, T3 not assumed)
+     - None against the data: what a boot shows is proven or was copied by programs that returned,
+       above everything a cut may have left. One repair at the boot that sees the change
+     - Closed
+     - Same
+   * - EWLF area: a run of log switch attempts, each cut inside its certificate or the marker
+       right after it, as many as the area has certificates; or of repairs each cut, as many as a
+       log unit has positions (:ref:`design-stuck-state`)
+     - The area is stuck: it refuses to write, or to show a version it cannot prove (O3). No
+       rollback, no loss: the content is there, and readable by
+       :c:func:`lftl_ewlf_read_unproven`
+     - Open; the area reports how many such cuts are left before each of them, and
+       :c:func:`lftl_format` brings it back
+     - Same
    * - Power cut at every boot
      - Wear, availability (O3)
      - Regular area: one word program per boot, on the same word, until one completes. EWLF area:
-       one tombstone, one record copy or one flag pin per boot, until one completes; a chain of cut
-       copies takes positions, never the unit of the complete record nor one holding a half record
-       newer than it, then the pin takes over. Never an erase at boot beyond a copy's rollover into
-       a unit it may erase
-     - Regular area: nothing is written at boot. EWLF area: the copies, then nothing
-   * - Power cut during a pin, a tombstone or a copy
+       nothing unless the application asks for the repair; then one pair per boot until one
+       returns, and an erase only when a log unit has no position left
+     - Regular area: nothing is written at boot. EWLF area: same as with pinning
+   * - Power cut during a pin, a tombstone, a repair or a switch
      - None by itself
-     - The word is left weak and decided again at the next boot, on a word closer to settled; a torn
-       copy is a half or aborted record the next boot handles like any other
-     - n/a, or the torn copy
+     - The word is left weak and decided again at the next boot; a cut repair is a started
+       position the next repair goes above
+     - n/a for regular areas; same for EWLF areas
    * - Torn erase, or reuse of cells that merely read erased (T4)
      - Corruption of what is written over them
-     - Closed: a slot is erased right before every update, a unit right before its first record;
-       reading erased is never trusted
+     - Closed: a slot is erased right before every update, a data unit right before its first
+       record, a log unit in the session that first writes to it, under a certificate; reading
+       erased is never trusted. EWLF areas assume that an interrupted erase of cells that were
+       already erased leaves them erased (:ref:`design-ewlf-checked`)
      - Same
    * - Weak word on flash with ECC (T1.13)
      - An NMI on read; a handler that does not return hangs the device (O3)
-     - One NMI at the first boot after the torn update, then the pin or the tombstone programs a
-       valid codeword, or the copy leaves the torn word behind in a record the scan no longer
-       reads past its flags; the handler must return (R7)
-     - No such target; it would be one NMI per boot until the word's unit is erased
+     - Regular area: one NMI at the first boot after the torn update, then the pin or the
+       tombstone programs a valid codeword. EWLF area: the read callback must survive the fault
+       and return a value that is neither all erased nor all zeros (R7); the weak word is read at
+       every boot until its unit is erased
+     - Regular area: no such target. EWLF area: same as with pinning
    * - Hostile flash content (Case 2 of the threat model)
      - A wrong copy chosen, a version collision, memory safety
-     - Slot and record positions stay inside the area; crafted content can make the scan program
-       one word of zeros, once per crafted word, or copy a crafted half record once, into the
-       positions a copy may use
-     - Same, without the words
+     - Slot, record and pair positions stay inside the area; crafted content can make the scan of
+       a regular area program one word of zeros, once per crafted word, and the repair of an EWLF
+       area program one pair or switch its log
+     - Same, without the words of regular areas
    * - Stale data (T1.8)
      - Old versions physically readable until their slot or unit is reused
      - Accepted
      - Same
    * - Update time that depends on the state of the flash (O5)
      - An EWLF update takes longer than usual; bounded
-     - An update steps over torn positions and programs their start markers, at most a unit's
-       worth; a rollover is exactly one erase in every state; a regular-area update costs the same
-       in every state
-     - Same, without the programs
+     - An update steps over started positions, at most a unit's worth; a rollover is one erase and
+       a log switch at most one erase, in every state; a regular-area update costs the same in
+       every state
+     - Same
    * - The model itself
      - T2, T3 and T4 are physics assumptions no vendor documents; N3 is documented on the STM32L5
        and STM32U5 only
      - Regular areas rest on T2, T4, N3, and T3 for their second row. EWLF areas rest on T1, T2,
-       T4 and N3; not on T3
-     - Regular areas rest on T2, T4, and T3 for their second row. EWLF areas rest on T1, T2 and T4
+       T4 and on the two properties of :ref:`design-ewlf-checked`; not on T3
+     - Regular areas rest on T2, T4, and T3 for their second row. EWLF areas: same as with pinning
 
 One case depends on timing in both variants, the second row of regular areas: a marginal marker
 that reads complete at every boot that looks at it, then all erased before the next one. All its
@@ -673,295 +760,110 @@ programmed bits must cross the read threshold between two consecutive boots, wit
 between to see the partial state. Its consequence is a rollback by one version of data the
 application may have acted on, never a loss, since the previous version is complete. Pinning the
 current slot's end marker at every boot would close it, at the price of one word program per boot
-and per area; it is not done. EWLF areas do not have it: a flag-b that read complete proved
-flag-a solid, and a record with a solid flag-a is copied when flag-b reads erased later.
+and per area; it is not done. EWLF areas do not have it: a confirm that read all zeros at one
+boot and reads erased at a later one costs a repair, which keeps the same version.
 
 Unchanged in both variants: wear driven by the application's updates (T1.5), a torn
 :c:func:`lftl_format` (T1.6), and everything in the threat model that is not about the scan.
 
 .. _design-stuck-state:
 
-The stuck state, and the alternatives to the pin
-------------------------------------------------
+The stuck state of EWLF areas
+-----------------------------
 
-The one residual of EWLF areas against O2 is the stuck state of the scan. This section shows how
-it is reached and where it bites, then the four alternatives that were considered and why the
-design stays as it is. The examples use the smallest area, two units of two records, the pinning
-variant, and a flash that refuses to program all zeros over a unit that already reads all zeros,
-as the STM32L5 and STM32U5 do (point 2 of ``FLASH.md``, measured on both). Two terms from the
-scan: a word is *pinned* when the scan programs it to all zeros, whatever it reads, so that it
-reads zeros for good (:ref:`design-common`); a record is *tombstoned* when its meta field is
-pinned, so that its version reads 0 and it is no record for good.
+The one state in which an EWLF area refuses to proceed, :c:macro:`LFTL_ERROR_EWLF_STUCK`. It has
+two faces:
 
-**Notation in the diagrams.** A cell is one record position, in three lines: the content and the
-version of the record, how its words read, and its state. ``I``, ``J``, ``K`` name the content,
-three successive values of the data; a prime marks a copy the scan made of it, ``J'`` the first
-copy of ``J``, ``J''`` the second. The version is the value of the record's version field, which
-every copy counts up, so ``J`` and ``J'`` hold the same content under two versions; a rollback
-is the application reading ``I`` after ``J``, whatever the versions. A blue cell is the record
-shown at that boot, a grey one reads erased. ``U1`` is the unit at the higher address, used
-first; ``p0`` is the top position of a unit. How the words read:
+- *at an update*: the log switch finds no certificate, no reserved pair or no position left. The
+  write fails, and every later write fails the same way; the area keeps showing its current
+  version, at this boot and at the next ones;
+- *at a boot*: the repair has no room. :c:func:`lftl_ewlf_complete_scan` raises the error before
+  programming anything, and reads and writes raise it too.
+
+Both are a loss of availability, not of data. The content is physically present; in the second
+case the version the scan chose is readable with :c:func:`lftl_ewlf_read_unproven`, and
+:c:func:`lftl_format` brings the area back empty.
+
+It is reached only by exhausting a reserve, one word or one position per power cut, each cut
+inside a particular program:
 
 .. list-table::
    :header-rows: 1
-   :widths: 18 82
+   :widths: 22 42 18 18
 
-   * - Symbol
-     - Meaning
-   * - ``a``, ``b``
-     - flag-a, flag-b
-   * - ``m``, ``d``
-     - the meta field, the data; shown only where a cut landed in them, since they read solid
-       everywhere else
-   * - ``0``
-     - reads zeros for good
-   * - ``.``
-     - reads erased
-   * - ``~``
-     - weak: the word a power cut was programming, right after the cut
-   * - ``~0``, ``~x``, ``~.``
-     - a weak word reading all zeros, some zeros, all erased at that boot
-   * - ``~valid``
-     - a weak meta field that passes its checksum at that boot
+   * - Reserve
+     - What one cut burns
+     - Window per cut on the STM32U5
+     - Cuts to stuck
+   * - the certificates of ``L``
+     - a cut in the certificate's program, or in the marker right after it, that marker then
+       reading erased
+     - 256 us
+     - ``X``, 32 by default
+   * - the positions of ``O``
+     - a cut in the first entry of a switch, ``O`` then holding a started position
+     - 384 us
+     - ``P`` + ``R``, 160
+   * - the reserved pairs of ``L``
+     - reachable only once ``L`` holds no proven entry: a cut in every pair of its life, then one
+       per reserved pair
+     - 256 to 384 us
+     - ``P`` + ``R``, 160
 
-The state is what the :ref:`scan <design-ewlf-scan>` makes of one reading of the meta field and
-the flags:
+The certificates are the smallest reserve, and each attempt on them is preceded by an erase of
+``O``. A brown-out that recurs at a fixed point of a switch, on marginal power, is the realistic
+way there, and ``X`` should be sized for it: 64 certificates cost about 1 KB of each log unit on
+the STM32U5. The attempts need not be consecutive boots: a boot that does not switch neither
+burns a word nor gives one back. What ends the count is a switch that returns: the new live unit
+has all its certificates.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 18 82
+**The remaining cuts.** :c:func:`lftl_ewlf_status` reports, at any time, the smallest number of
+further power cuts, each at the worst instant, after which the area is stuck. It is the smallest
+of three counts taken from the scan's reading of the log, every word that does not read erased
+counting as burnt:
 
-   * - State
-     - Reading
-   * - *cut*
-     - none yet: the position a power cut interrupted, before any boot read it
-   * - *no record*
-     - the meta field erased, zero or failing its checksum
-   * - *aborted*
-     - a valid meta field, both flags erased
-   * - *half*
-     - a bit at 0 in flag-a, flag-b erased
-   * - *complete*
-     - a bit at 0 in flag-b
+- the certificates of ``L`` that read erased, when the next switch from ``L`` needs one;
+- when ``L`` is certified, the positions of ``O`` above its started ones;
+- when ``L`` holds no proven entry, the free positions of ``L``.
 
-How it is reached
-^^^^^^^^^^^^^^^^^
+Outside a bad episode it is the number of free certificates, and it is back to ``X`` after a
+switch that returned. Power cuts outside the windows of the table never move it, nor do the
+application's own writes. The library applies no threshold: the application does, before a write,
+or after a reset before it asks for the repair. One thing the figure cannot see is a burnt word
+that a cut left weak and that reads erased at this boot: the figure is right for this session,
+and T2 allows it to drop by more than one at a later boot.
 
-.. graphviz::
-   :align: center
+.. _design-ewlf-checked:
 
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="2"><b>U1</b></td><td border="0" width="14"></td><td border="0" colspan="2"><b>U0</b></td></tr><tr><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td></tr><tr><td border="0" align="left"><b>Before</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="118"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 1</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a ~x, b .</font><br/><font point-size="9" color="#777777">half</font></td><td width="118">J'  v+1<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td></tr><tr><td border="0" align="left"><b>Boot 2</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a ~x, b .</font><br/><font point-size="9" color="#777777">half</font></td><td width="118">J'  v+1<br/><font face="Courier" point-size="10">a ~0, b ~</font><br/><font point-size="9" color="#777777">half, pinned</font></td></tr><tr><td border="0" align="left"><b>Boot 3</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a ~x, b .</font><br/><font point-size="9" color="#777777">half</font></td><td bgcolor="#dbeafe" width="118"><b>J'  v+1</b><br/><font face="Courier" point-size="10">a ~0, b ~x</font><br/><font point-size="9" color="#777777">complete</font></td></tr><tr><td border="0" align="left"><b>Boot 4</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#dbeafe" width="118"><b>I  v-1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a ~., b .</font><br/><font point-size="9" color="#777777">aborted</font></td><td width="118">J'  v+1<br/><font face="Courier" point-size="10">a ~., b ~.</font><br/><font point-size="9" color="#777777">aborted</font></td></tr></table>>];
-   }
+How the design of EWLF areas was checked
+----------------------------------------
 
-- *Before.* ``I`` is current. The update to ``J`` erases ``U0`` and writes it at the top, version
-  v; the cut lands in the program of ``J``'s flag-a. The data and the meta field of ``J`` are
-  solid, its flag-a is weak.
-- *Boot 1.* Flag-a reads some zeros: ``J`` is half and newer than ``I``, so the scan copies it to
-  the next position as ``J'``, version v+1, the same content. The cut lands in the copy's flag-a.
-- *Boot 2.* ``J'``'s flag-a reads all zeros: half, and the newest record. A new copy needs a
-  position, and the scan may not erase ``U1``, which holds the complete record, nor ``U0``, which
-  holds half records newer than it: the stuck state. ``J'`` is pinned in place. Its flag-a is
-  skipped, since it reads all zeros and the flash would refuse the program; its flag-b is
-  programmed, and the cut lands in that program.
-- *Boot 3.* Flag-b reads some zeros: ``J'`` is complete and the application reads ``J``.
-- *Boot 4.* Every weak flag reads erased: ``J`` and ``J'`` are aborted and get tombstoned, ``I`` is
-  the newest complete record, the application reads ``I`` after ``J``: a rollback.
+**A model checker.** ``test/ewlf-model/ewlf_model.py``, in the repository, explores every
+reading of every weak word, every instant of a power cut and every number of updates per session,
+depth first over boots, against the tearing model of the flash page: a weak word reads its value,
+erased or garbage, drawn again at every boot; a word programmed into cells an interrupted erase
+left weak may read garbage for good; the flash refuses a program over a word that is not erased,
+zeros over a partially programmed word excepted. It checks every version a boot shows for
+rollback, lost acknowledgement, loss, a write shown after an older version was, and the stuck
+state. ``proto_v4.py`` is the design of this page, and the library's functions follow it one for
+one. No violation was found up to 4 power cuts and 8 boots; the stuck state shows up after exactly
+as many cuts as the model has certificates; and each rule, removed alone, gives a violation
+within 3 cuts: without the reserved pair of a switch a loss, without the repair before showing a
+rollback, without the certificates or without the erase of an empty certified unit a write shown
+after an older version was. The checker proves the absence of counter-examples within its bounds
+and under its model, nothing more.
 
-The copy is not what fills the unit in the cheapest history. A cut anywhere in a write before
-its flag-a, in the data below, leaves a torn position that the application's own retry of the
-update steps over, so that the retry lands at the last position of the unit:
+**Two properties of the flash the design rests on**, beyond T1 to T5:
 
-.. graphviz::
-   :align: center
+- a program of all zeros that returns over a partially programmed word leaves solid zeros. That
+  the STM32L5 and STM32U5 accept the program is measured; that the result is solid is an
+  inference;
+- an interrupted erase of a unit whose cells were already erased leaves them erased. Without it
+  the checker finds a loss after two power cuts. It was measured on one STM32U5A5, with a system
+  reset as the cut: in 40 interrupted erases of an erased page, at 20 instants, every word read
+  erased at three readings without an ECC flag, and all of them then took a program
+  (``FLASH.md``, section 4, point 5). Not covered: a loss of power in place of the reset, other
+  parts and temperatures, aged cells.
 
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="2"><b>U1</b></td><td border="0" width="14"></td><td border="0" colspan="2"><b>U0</b></td></tr><tr><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td></tr><tr><td border="0" align="left"><b>Before</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J  v<br/><font face="Courier" point-size="10">d ~, m ., a ., b .</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="126"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 1</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#dbeafe" width="126"><b>I  v-1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td></tr><tr><td border="0" align="left"><b>Boot 2</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~0, b ~</font><br/><font point-size="9" color="#777777">half, pinned</font></td></tr><tr><td border="0" align="left"><b>Boot 3</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td bgcolor="#dbeafe" width="126"><b>J  v</b><br/><font face="Courier" point-size="10">a ~0, b ~x</font><br/><font point-size="9" color="#777777">complete</font></td></tr><tr><td border="0" align="left"><b>Boot 4</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#dbeafe" width="126"><b>I  v-1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J<br/><font face="Courier" point-size="10">d ~x, m 0, a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~., b ~.</font><br/><font point-size="9" color="#777777">aborted</font></td></tr></table>>];
-   }
-
-- *Before.* ``I`` is current. The update to ``J`` erases ``U0`` and writes at its top; the cut
-  lands in the data.
-- *Boot 1.* The torn position is no record: ``I`` is shown, and the application writes ``J``
-  again. The write steps over the torn position, tombstoning its meta field, and programs ``J``
-  at the last position of ``U0``; the cut lands in its flag-a.
-- *Boot 2.* Flag-a reads all zeros: ``J`` is half and the newest record, ``U0`` has no position
-  left and ``U1`` holds the complete record: stuck at once. ``J`` is pinned in place, flag-a
-  skipped, flag-b programmed, and the cut lands in that program.
-- *Boot 3.* Flag-b reads some zeros: ``J`` is complete and the application reads ``J``.
-- *Boot 4.* Both weak flags read erased: ``J`` is aborted and gets tombstoned, the application
-  reads ``I`` after ``J``: the same rollback.
-
-What went wrong is the proof. The scan shows a record only with evidence that its flag-a is solid,
-and a bit in flag-b is that evidence, because an update programs flag-b only after the program of
-flag-a returned. The pin breaks that order at boot 2: it programs flag-b after *reading* flag-a,
-not after programming it, so the bit flag-b shows at boot 3 proves nothing. Programming flag-a
-again would settle it, and the flash refuses: ``LFTL_EWLF_PIN_OVER_ZEROS`` stays off on both STM32
-parts. What the residual costs an adversary: a cut anywhere in a write the application retries,
-which fills the unit, then two cuts inside flag programs of about 128 µs on the STM32U5 and 85 µs
-on the STM32L5, the retry's flag-a and the pin's flag-b; a weak word that reads all zeros at the
-pin boot and erased later; and the pinned flag reading a bit once, then erased. The consequence is
-``I`` after ``J``, a rollback of data shown at a boot but never acknowledged by a returned update;
-nothing is lost. Without ``zero_overwrite`` there is no pin: at boot 2 the half record is shown as
-it is, and the same drift brings ``I`` back at boot 4, with the first two cuts only.
-
-Alternative 1: show the previous version and erase the torn unit
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-At boot 2, show ``I`` and erase ``U0``. In the sequence above the application never read ``J``, so
-that would be an abort rather than a rollback. But the flash looks the same in another history,
-and the scan has only the flash:
-
-.. graphviz::
-   :align: center
-
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="2"><b>U1</b></td><td border="0" width="14"></td><td border="0" colspan="2"><b>U0</b></td></tr><tr><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td></tr><tr><td border="0" align="left"><b>Before</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a 0, b ~</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="118"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 1</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td bgcolor="#dbeafe" width="118"><b>J  v</b><br/><font face="Courier" point-size="10">a 0, b ~x</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#eeeeee" width="118"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 2</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a 0, b ~.</font><br/><font point-size="9" color="#777777">half</font></td><td width="118">J'  v+1<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td></tr><tr><td border="0" align="left"><b>Boot 3, the pin</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="118">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="118">J  v<br/><font face="Courier" point-size="10">a 0, b ~.</font><br/><font point-size="9" color="#777777">half</font></td><td bgcolor="#dbeafe" width="118"><b>J'  v+1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td></tr><tr><td border="0" align="left"><b>Boot 3, the revert</b></td><td width="118">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td bgcolor="#dbeafe" width="118"><b>I  v-1</b><br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td bgcolor="#eeeeee" width="118"><font point-size="9" color="#777777">erased</font></td><td bgcolor="#eeeeee" width="118"><font point-size="9" color="#777777">erased</font></td></tr></table>>];
-   }
-
-- *Before.* The update to ``J`` is cut in flag-b: flag-a is solid, flag-b weak.
-- *Boot 1.* Flag-b reads a bit: ``J`` is complete, the application reads ``J``.
-- *Boot 2.* Flag-b reads erased: ``J`` is half and gets copied; the cut lands in the copy's
-  flag-a.
-- *Boot 3.* ``J'`` is half and newest, no position is left: stuck. The pin programs ``J'``'s
-  flag-a, which reads some zeros so the flash accepts it, then its flag-b, and the application
-  reads ``J`` again. The revert would show ``I`` after ``J``, with two cuts and one ordinary weak
-  word, no all-zeros reading needed.
-
-A half record reads the same whether its update was cut in flag-a and it was never shown, or it
-was shown on a weak flag-b that now reads erased. The erase has a second cost. The scan never
-erases a unit holding a record newer than the complete one, and that rule is what keeps the
-numbering monotonic: cut, the erase leaves ``U0`` weakly erased (T4), ``J`` and ``J'`` can come
-back with versions above the ones later updates are numbered from, since the highest version seen
-is kept nowhere, and a ghost newer than the application's own record would be copied forward and
-shown.
-
-Alternative 2: erase the previous version to make room
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The other way round. At boot 2 the half records are good copies of ``J``, their data and meta field
-proven solid by the bit in flag-a, and only their flags are in doubt: erase ``U1`` and copy ``J'``
-into it as a fresh record, whose flags are programmed in the right order. The proof does not
-outlive the boot. A weak flag-a drifts toward erased (T2), and a record whose flags all read
-erased is also what an update cut inside its meta field looks like, whose meta may read valid at
-one boot and erased at the next. That is why the scan never shows an aborted record and never
-builds on one, and the complete record is what makes that refusal safe. Without it:
-
-.. graphviz::
-   :align: center
-
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0"></td><td border="0" colspan="2"><b>U1</b></td><td border="0" width="14"></td><td border="0" colspan="2"><b>U0</b></td></tr><tr><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td><td border="0"></td><td border="0"><font point-size="9" color="#777777">p0</font></td><td border="0"><font point-size="9" color="#777777">p1</font></td></tr><tr><td border="0" align="left"><b>Before</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="126"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 1</b></td><td width="126">older<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td width="126">I  v-1<br/><font face="Courier" point-size="10">a 0, b 0</font><br/><font point-size="9" color="#777777">complete</font></td><td border="0"></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~x, b .</font><br/><font point-size="9" color="#777777">half</font></td><td width="126">J'  v+1<br/><font face="Courier" point-size="10">a ~, b .</font><br/><font point-size="9" color="#777777">cut</font></td></tr><tr><td border="0" align="left"><b>Boot 2</b></td><td width="126">J''  v+2<br/><font face="Courier" point-size="10">m ~, a ., b .</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="126"><font point-size="9" color="#777777">erased</font></td><td border="0"></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~x, b .</font><br/><font point-size="9" color="#777777">half</font></td><td width="126">J'  v+1<br/><font face="Courier" point-size="10">a ~0, b .</font><br/><font point-size="9" color="#777777">half</font></td></tr><tr><td border="0" align="left"><b>Boot 3</b></td><td width="126">J''  v+2<br/><font face="Courier" point-size="10">m ~valid, a ., b .</font><br/><font point-size="9" color="#777777">aborted</font></td><td width="126">J'''  v+3<br/><font face="Courier" point-size="10">m ~, a ., b .</font><br/><font point-size="9" color="#777777">cut</font></td><td border="0"></td><td width="126">J  v<br/><font face="Courier" point-size="10">a ~., b .</font><br/><font point-size="9" color="#777777">aborted</font></td><td width="126">J'  v+1<br/><font face="Courier" point-size="10">a ~., b .</font><br/><font point-size="9" color="#777777">aborted</font></td></tr><tr><td border="0" align="left"><b>Boot 4</b></td><td width="126">J''  v+2<br/><font face="Courier" point-size="10">m ~valid, a ., b .</font><br/><font point-size="9" color="#777777">aborted</font></td><td bgcolor="#dbeafe" width="126"><b>J'''  v+3</b><br/><font face="Courier" point-size="10">m ~valid, a ., b .</font><br/><font point-size="9" color="#777777">aborted</font></td><td border="0"></td><td width="126">K  v+4<br/><font face="Courier" point-size="10">d ~, m ., a ., b .</font><br/><font point-size="9" color="#777777">cut</font></td><td bgcolor="#eeeeee" width="126"><font point-size="9" color="#777777">erased</font></td></tr><tr><td border="0" align="left"><b>Boot 5</b></td><td width="126">J''<br/><font face="Courier" point-size="10">m ~., a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td width="126">J'''<br/><font face="Courier" point-size="10">m ~., a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td border="0"></td><td width="126">K<br/><font face="Courier" point-size="10">d ~x, m ., a ., b .</font><br/><font point-size="9" color="#777777">no record</font></td><td bgcolor="#eeeeee" width="126"><font point-size="9" color="#777777">erased</font></td></tr></table>>];
-   }
-
-- *Before, Boot 1.* The same two cuts as above: in ``J``'s flag-a, then in the flag-a of its copy
-  ``J'``.
-- *Boot 2.* ``J'``'s flag-a reads all zeros: stuck. ``U1`` is erased and ``J'`` copied into it as
-  ``J''``; the cut lands in the copy's meta field.
-- *Boot 3.* The weak flags of ``J`` and ``J'`` read erased: aborted. ``J''`` reads valid, aborted
-  and newest; it is copied to the next position, and the cut lands in that copy's meta field too.
-- *Boot 4.* No record reads half and none is complete. The scan shows the newest valid record,
-  ``J'''``, and the application reads ``J``, then writes ``K``: the update erases the unit below
-  the current record's, ``U0``, where the solid copies were, and the cut lands in the data of
-  ``K``.
-- *Boot 5.* The two weak meta fields read erased and ``K`` has none: nothing valid. ``I`` and ``J``
-  are both lost, O1 broken, where today O1 holds unconditionally.
-
-Five cuts, three of them in meta fields or data, and weak flags doing what they do. The scan has
-no good move at boot 4: showing an aborted record risks this; refusing leaves the data unreadable,
-for good if the flags drifted for good; erasing a unit to make room is a guess, since nothing
-tells a solid copy from one whose meta field is weak. And the pin needs no erase: flag-b reads
-erased, the flash accepts the program, and when it returns the record is complete for good, which
-is all the fresh copy would have given.
-
-Alternative 3: more fields in the record
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Three facts fix the shape of the residual. One reading of a word says nothing about whether it is
-solid: a weak word can read all zeros at one boot and erased at the next. The only proof of
-solidity is a program that returned; an update's order gives it for free, flag-b after flag-a,
-and the scan can only get it by programming a word in this very boot. And the flash refuses the
-one program that would settle a word reading all zeros. Any field added to the record is a word
-the scan programs at boot: a cut inside that program leaves it weak, at the next boot it may read
-all zeros, and the scan is back to trusting a reading. The scan escapes only by programming a unit
-that still reads erased, and a per-record supply of such units runs out, one per cut:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 50 20 30
-
-   * - Scheme
-     - Cuts for the rollback
-     - Extra flash
-   * - Today, the pin in place
-     - 2
-     - none
-   * - One pin mark per record, programmed before flag-b
-     - 3
-     - one write unit per record
-   * - k pin marks per record
-     - k + 2
-     - k write units per record
-   * - Flags programmed to a pattern such as ``0x55`` instead of zeros
-     - 3
-     - none
-   * - More records per unit, or more units
-     - one more per position
-     - the area grows
-
-Each cut must land inside a flag program, with the weak words reading all zeros at the pin boot
-and erased at the last one. The pattern line is the cheap one: a flag written as a pattern keeps
-its one-cells solid at 1 whatever the cut, so a weak flag never reads all zeros and the pin can
-always re-pulse it; the rollback then also needs the pin's own program of flag-a to be cut. It is
-a format change, and it is not done. No finite number of fields brings the count to zero.
-
-Alternative 4: a pin log in its own erase units
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-An unbounded supply of erased units does. Give the area a *pin log*: two erase units outside the
-record units, used alternately, each entry one write unit.
-
-.. graphviz::
-   :align: center
-
-   digraph {
-     graph [pad="0.05" margin="0"];
-     node [shape=plaintext fontname="Helvetica" fontsize=11];
-     d [label=<
-       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td colspan="7" align="left"><b>one EWLF area with a pin log</b></td></tr><tr><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" align="left"><b>U1</b></td></tr><tr><td width="104">record</td></tr><tr><td width="104">record</td></tr></table></td><td width="14"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" align="left"><b>U0</b></td></tr><tr><td width="104">record</td></tr><tr><td width="104">record</td></tr></table></td><td width="30"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" align="left"><b>L1, in use</b></td></tr><tr><td width="104">entry 0</td></tr><tr><td width="104">entry 1</td></tr><tr><td bgcolor="#eeeeee" width="104"><font point-size="9" color="#777777">erased</font></td></tr></table></td><td width="14"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td border="0" align="left"><b>L0</b></td></tr><tr><td bgcolor="#eeeeee" width="104"><font point-size="9" color="#777777">erased</font></td></tr><tr><td bgcolor="#eeeeee" width="104"><font point-size="9" color="#777777">erased</font></td></tr><tr><td bgcolor="#eeeeee" width="104"><font point-size="9" color="#777777">erased</font></td></tr></table></td></tr><tr><td colspan="3" align="left"><font point-size="9" color="#777777">record units</font></td><td width="30"></td><td colspan="3" align="left"><font point-size="9" color="#777777">log units</font></td></tr><tr><td colspan="7" align="left"><font point-size="9" color="#777777">an entry is one write unit: the version and checksum of the pinned record, under a CRC</font></td></tr></table>>];
-   }
-
-In the stuck state the scan writes a fresh entry naming the half record, and shows the record only
-once that program returned. A record with a valid entry is never aborted, whatever its flags read,
-so it is never tombstoned and never shown as old. Every exposure then rests on a program that
-returned, a solid entry reads valid for good, and the log unit not in use is erased only after an
-entry in the other returned, so a solid entry always exists. This closes the residual under T1,
-T2 and T4. The costs are real: two erase units per area, 8 KB each on the STM32U5 and 2 KB on the
-STM32L5; one program at every boot while the pinned record is the current one, since a reading of
-an entry is never trusted, until the application's next update replaces it; an erase at boot when
-a log unit fills, with a cut during it to survive; and the scan logic to parse entries, tie them
-to records and tell an entry from the ghost of one after a torn erase.
-
-Why the design stays as it is
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-The residual needs a cut anywhere in a write the application retries, then two cuts placed inside
-flag programs of a tenth of a millisecond, plus a weak word that reads all zeros then erased and
-another that reads a bit then erased; its consequence is a rollback by one update, never a loss.
-Alternatives 1 and 2 remove it by trading it for something worse: a rollback that needs no unusual
-reading, or the loss of both ``I`` and ``J``. Alternative 3 raises its price by one cut per field
-and never reaches zero. Alternative 4 reaches zero at the price of two erase units per area and a
-scan that programs at every boot; it is the change to make if a threat model with an attacker in
-control of the power supply ever demands it. Until then the pin in place stays, with its row in the
-table of :ref:`design-residual`.
+**The library** is tested on the Linux simulator, where a power cut leaves weak words and every
+program of an update and of a repair is cut in turn, and on the STM32U5A5: :ref:`tests`.

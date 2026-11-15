@@ -1,3 +1,5 @@
+.. _tests:
+
 Tests
 =============
 
@@ -63,32 +65,58 @@ R1 to R5 of :ref:`flash-required`.
 
 ``--no-pinning`` runs the suite as on a flash without the all-zero overwrite (N3 of
 :ref:`flash-not-relied-on`): the simulator refuses it and every test NVM is declared without
-``zero_overwrite``, so the scan never pins; ``testit`` runs the suite both ways. The Linux
-build also defines ``LFTL_SCAN_CROSS_CHECK``: every scan of an EWLF area runs both the fast search
-and the linear pass of :ref:`design-ewlf-scan`, and raises ``LFTL_INTERNAL_ERROR`` if they
-disagree.
+``zero_overwrite``, so the scan of a regular area never pins; ``testit`` runs the suite both ways.
 
 The simulator models a *weak word* in the EWLF areas, T2 of :ref:`flash-tearing` without T3: the
-write unit a cut lands in reads differently at every read, as programmed, all erased, all zeros
+write unit a cut lands in reads differently at every boot, as programmed, all erased, all zeros
 or under a random mask, for ever, until a program or an erase makes it solid again; the units of
-the operation the cut never reached stay as they were. It is on by default when ``zero_overwrite``
-is on and off under ``--no-pinning``, where the stuck state of the EWLF scan is a documented
-residual that the sweep would report as a rollback; ``--weak-words`` and ``--no-weak-words``
-force it, ``--weak-seed=N`` seeds its readings, which are reproducible from the seed and the cut.
+the operation the cut never reached stay as they were, and an interrupted erase leaves every
+write unit of its pages weak. A weak unit is not erased, whatever it reads: the simulator
+refuses a program over it with :c:macro:`LFTL_NVM_STATUS_REFUSED`, zeros excepted where the
+flash has the all-zero overwrite. The model is on in every mode; ``--no-weak-words`` turns it
+off, ``--weak-seed=N`` seeds its readings, which are reproducible from the seed and the cut.
 With it, every cut is followed by two boots, and an area that reads the new state at one boot and
 the old one at a later boot fails the run as a rollback; and when the boots that recover from a cut
-program anything (a tombstone, a copy, a pin), the same cut is run again with a second cut at each
-of those programs, at its first write unit and at its last. ``--tear-at=N`` runs one cut only, to
-reproduce a failure the run names. The regular areas keep the older model, a fixed value past the
-cut, since they rely on T3. Tests 39 and 40 build the sequences of cuts and readings that the
-residual table of :ref:`design-residual` rests on, and a random sequence of writes, cuts and
-boots.
+program anything, a pin of a regular area or the repair of an EWLF area, the same cut is run again
+with a second cut at each of those programs, at its first write unit and at its last.
+``--tear-at=N`` runs one cut only, to reproduce a failure the run names. The regular areas keep
+the older model, a fixed value past the cut, since they rely on T3.
+
+The tests of EWLF areas, beyond the sweeps:
+
+- test 33 builds by hand, with programs of erased units only, an update cut after each of the
+  words it programs, and checks what the scan makes of each: nothing written by the scan, the
+  repair that is pending or not, reads and writes refused while it is, the unproven read, the
+  version shown, and the boots after it;
+- test 39 scripts the readings of weak words: a weak confirm and a weak entry read one way then
+  the other, a first entry of a log switch that a boot can see, the sequence of cuts the
+  certificates exist for, and the stuck state reached after exactly as many cuts as the area has
+  certificates, with the remaining cuts counted down;
+- test 40 is a random sequence of writes, cuts, boots and cut repairs, on two geometries: one
+  that switches its log every few writes, one with a single certificate that gets stuck. After
+  every boot the data read is one of the last writes, never older than one already shown, never
+  older than the last write that completed, and never a write that was cut once an older version
+  was shown.
+
+Tests 35, 39 and 40 need the simulator and are empty on a board. ``test/ewlf-only <toolchain
+file> [preset]`` builds and runs the tests that involve EWLF areas only, on the three flash
+models, then test 37 and the sanitizer tests of EWLF areas; ``on/linux-u5`` is the Linux build
+with the geometry of the STM32U5, 8 KB erase units and 16-byte write units.
+
+The design of EWLF areas is checked apart from its implementation, by an exhaustive model
+checker in ``test/ewlf-model``: :ref:`design-ewlf-checked`. For instance:
+
+.. code-block:: bash
+
+  cd test/ewlf-model
+  python3 ewlf_model.py --protocol v4 --cuts 3 --boots 6 --geometry 2,2,2,2,2,2 --strict --ignore stuck
 
 Compatibility with v0.1.0
 --------------------------
 
 The on-flash format of regular areas has not changed since lean-ftl v0.1.0 (EWLF areas came
-later, and their format changed in v0.3.0: an EWLF area written by v0.2.0 must be formatted again).
+later, and their format changed in v0.3.0 and again in v0.4.0: an EWLF area written by an earlier
+version must be formatted again).
 Test 37 (``v010_compat_test``) checks it on every build: it rebuilds, in one of the test
 areas, images that v0.1.0 formatted and wrote (``liblean-ftl-test/source/v010_images.h``), reads
 each one as after a reset and checks that the scan settles on the slot v0.1.0 had current,

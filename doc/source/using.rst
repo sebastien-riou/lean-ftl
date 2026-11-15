@@ -99,8 +99,8 @@ With :c:macro:`LFTL_AREA`, each unit of wear-leveling-factor costs one full
 page, even if the area content is much smaller than a page. When the desired
 wear-leveling-factor is large, this can waste a lot of NVM space.
 
-:c:macro:`LFTL_AREA_EWLF` addresses this: it packs several slots into a
-single page whenever the area content is small enough, so a large
+:c:macro:`LFTL_AREA_EWLF` addresses this: it packs several copies of the content,
+the *records*, into each page whenever the content is small enough, so a large
 wear-leveling-factor no longer means one page per unit. It is declared the
 same way as :c:macro:`LFTL_AREA`, just replace the macro name:
 
@@ -118,16 +118,79 @@ same way as :c:macro:`LFTL_AREA`, just replace the macro name:
   } __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
   data_flash_t nvm;
 
+The macro reserves the pages that hold the records, 2 at least, plus 2 pages for the log that
+says which record is current: an EWLF area is 4 pages at least. The log also bounds the factor
+an area reaches, whatever the number of its other pages: about 300 on the STM32U5 with the
+defaults (:ref:`design-ewlf`).
+
 An area declared with :c:macro:`LFTL_AREA_EWLF` must be registered with
 :c:func:`lftl_register_area_ewlf` instead of :c:func:`lftl_register_area`.
-Formatting, reading and writing work the same way as for a regular area,
-but EWLF areas do not support transactions: :c:func:`lftl_transaction_start`
-raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`. At least two records,
-the area content plus a header each (:c:macro:`LFTL_EWLF_RECORD_SIZE`), must fit
-in one page, and the NVM's erased bytes must read ``0xFF`` (R6 of :ref:`flash-required`). Use
-:c:func:`lftl_is_ewlf` if you need to tell, given a context, whether it refers to an EWLF area or
-a regular one. How EWLF areas work is described in :ref:`design-ewlf`. Their on-flash format
-changed in v0.3.0: an EWLF area written by v0.2.0 is not read by later versions and must be
+Formatting, reading and writing work the same way as for a regular area, with three differences:
+
+- EWLF areas do not support transactions: :c:func:`lftl_transaction_start`
+  raises :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`;
+- at least two records, the area content plus a start marker and a meta field each
+  (:c:macro:`LFTL_EWLF_RECORD_SIZE`), must fit in one page, the NVM's erased bytes must read
+  ``0xFF`` and its write callback must report a refused program as such (R6 and R9 of
+  :ref:`flash-required`);
+- after a reset, the area may have a *repair* to do before it can be read or written, when the
+  last session was cut by a power loss. Nothing is written until the application asks for it.
+
+After a reset, set the context's ``data`` to :c:macro:`LFTL_INVALID_POINTER`, as for a regular
+area, then call :c:func:`lftl_ewlf_complete_scan` before the first read or write. It does the
+repair if there is one and nothing otherwise, so it can be called unconditionally:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: An EWLF area after a reset
+  :name: Example: An EWLF area after a reset
+
+  lftl_register_area_ewlf(&ewlf_c);
+  lftl_ewlf_complete_scan(&ewlf_c); //does the repair a power cut left to do, if any
+  lftl_read(&ewlf_c, &counter, &nvm.counter, sizeof(counter));
+
+Without that call, :c:func:`lftl_read` and the write functions raise
+:c:macro:`LFTL_ERROR_EWLF_PENDING` when a repair is pending, and work as usual when none is. On
+an area that was never formatted the call raises :c:macro:`LFTL_ERROR_NO_VALID_VERSION`, as a
+read does.
+
+An application that wants to decide before the flash is written asks first.
+:c:func:`lftl_ewlf_status` reads the area without writing it and reports the pending repair and
+``remaining_cuts``: the number of further power cuts, each at the worst instant, that the area
+can take before it is *stuck* (:ref:`design-stuck-state`). That number is the number of
+certificates of the area, 32 by default, in normal operation, and goes down by one for each log
+switch a power cut interrupts in a particular 256 us window:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: Deciding before the repair
+  :name: Example: Deciding before the repair
+
+  lftl_ewlf_status_t status;
+  lftl_ewlf_status(&ewlf_c, &status);
+  if(status.stuck){
+    //no room left for the repair: salvage what the scan chose, then format
+    lftl_ewlf_read_unproven(&ewlf_c, &counter, &nvm.counter, sizeof(counter));
+    lftl_format(&ewlf_c);
+  } else {
+    if(status.remaining_cuts < 8){
+      //the power supply keeps failing at the wrong time: ask the user before going on
+    }
+    lftl_ewlf_complete_scan(&ewlf_c);
+  }
+
+The same number is worth a look before a write, since most of the cuts that count are cuts of a
+write: a write that finds no certificate left raises :c:macro:`LFTL_ERROR_EWLF_STUCK` and the
+area keeps showing its current content. :c:func:`lftl_ewlf_read_unproven` reads the area in any
+state; while a repair is pending it returns the version the repair then makes current.
+
+The number of certificates is the ``ewlf_certificates`` member of :c:type:`lftl_ctx_t`; left at
+zero, it is :c:macro:`LFTL_EWLF_CERTIFICATES`. It is part of the on-flash format of the area: an
+area whose value changes must be formatted again.
+
+Use :c:func:`lftl_is_ewlf` if you need to tell, given a context, whether it refers to an EWLF
+area or a regular one. How EWLF areas work is described in :ref:`design-ewlf`. Their on-flash
+format changed in v0.4.0: an EWLF area written by an earlier version is not read and must be
 formatted again (regular areas are unchanged since v0.1.0).
 
 Single LFTL area vs many
@@ -187,9 +250,9 @@ The integrator shall declare one :c:type:`lftl_nvm_props_t` for each targeted NV
 What ``write_size`` and ``erase_size`` may be, and what the NVM behind them must provide, is on
 the :ref:`flash` page (R1, R2). ``zero_overwrite`` says whether the flash accepts programming a
 write unit to all zeros whatever it currently holds (N3 there; the STM32L5 and STM32U5 document
-it): *lean-ftl* then pins, at the first access after a reset, the words a power cut left weak in
-a regular area, and in an EWLF area the records it rejects, instead of deciding about them again
-at every boot. Leave it false when the manual does not say. :ref:`design` describes the pins, and
+it): *lean-ftl* then pins, at the first access after a reset, the word a power cut left weak in
+a regular area, instead of deciding about it again at every boot. Leave it false when the manual
+does not say. EWLF areas do not use it. :ref:`design` describes the pins, and
 :ref:`design-without-pinning` what changes without them.
 
 Implementing the callbacks
@@ -209,13 +272,17 @@ one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/lin
 
 What the callbacks must guarantee is R3 to R5 of :ref:`flash-required`, and what they need not
 provide is in :ref:`flash-not-relied-on`: *lean-ftl* programs each write unit at most once between
-two erases, whole units only, and never overwrites.
+two erases, whole units only, and never overwrites. For EWLF areas the write callback returns
+:c:macro:`LFTL_NVM_STATUS_REFUSED` when the flash refused a program and programmed nothing (R9):
+the STM32 callbacks above do.
 
 .. note:: On flash with ECC that raises an NMI on a double-bit error (STM32L5, STM32U5),
   a program or erase interrupted by a power cut can leave a word that faults when read,
   and *lean-ftl* must read such words before it can skip them. The NMI handler must clear
   the ECC error flag and return, so that the read completes; the STM32 callbacks above do
   nothing about it, and a handler that loops or resets hangs the device at every boot.
+  For an EWLF area the read must also come back with a value that is neither all ``0xFF``
+  nor all ``0x00`` in the word that faulted.
   See the integrator section of ``THREAT-MODEL.md`` in the repository, and R7 and T5 of
   the :ref:`flash` page.
 

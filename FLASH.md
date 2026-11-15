@@ -220,9 +220,11 @@ the same writes so that tests only build states a real flash can hold. The geome
 `on/linux` and `testit`, today the CH32V307 values (4 KB pages, 2-byte write units; the STM32 values
 are there, commented out). It models no ECC. In the regular areas a simulated cut lands the whole
 write, then corrupts the bytes past a write-unit boundary (XOR 0x55) and reports the tear; in the
-EWLF areas it leaves the write unit it lands in *weak*, reading differently at every read (as
+EWLF areas it leaves the write unit it lands in *weak*, reading differently at every boot (as
 programmed, all erased, all zeros, or under a random mask: T2 without T3), the units after it
-untouched, until a program or an erase makes it solid again. The partially programmed words of the
+untouched, until a program or an erase makes it solid again; an interrupted erase leaves every
+write unit of its pages weak, and a program over a weak unit is refused with the status the
+library steps over, zeros excepted where the all-zero overwrite is on. The partially programmed words of the
 tear tests (24, 33, 34) are built by the tests themselves.
 
 ## 3. Status per target of the requirements and assumptions
@@ -233,11 +235,14 @@ The ids are those of the documentation page
 
 | Id | Statement | Relied on by | STM32U5 | STM32L5 | M5531 | W25Q32RV |
 |---|---|---|---|---|---|---|
-| R6, N1 | An erase sets the whole erase unit to 0xFF: needed by EWLF areas (R6); regular areas only need a stable erased value (N1) | formatted records read 0xFF; `is_erased()` | doc | doc | doc | doc |
+| R6, N1 | An erase sets the whole erase unit to 0xFF: needed by EWLF areas (R6); regular areas only need a stable erased value (N1) | formatted records read 0xFF; free positions and certificates of EWLF areas | doc | doc | doc | doc |
 | R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum | 1 B minimum |
 | R3, N3 | Between two erases every write unit is programmed once; the library re-programs a unit only where `zero_overwrite` is declared, and only to all zeros | slot and record layouts; `LFTL_ERROR_TRANSACTION_OVERWRITE` | by construction | by construction | by construction | by construction |
-| N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan, only on an NVM declared with `zero_overwrite`; the Linux simulator | doc; all-zero target open | doc; same | — to measure | — outside the spec |
-| N3 (opt-in) | All zeros can be programmed over a write unit that already reads all zeros | the stuck-state pin of the EWLF scan when `LFTL_EWLF_PIN_OVER_ZEROS` is set; without it a flag that read all zeros is left alone, a residual | no: PROGERR (measured, point 2) | no: PROGERR (measured, point 2) | — | — |
+| N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan of regular areas, only on an NVM declared with `zero_overwrite`; the Linux simulator. EWLF areas program zeros only over units that read erased, and assume that such a program, when it returns over a weak unit, leaves solid zeros | doc; all-zero target open | doc; same | — to measure | — outside the spec |
+| N3 (not used) | All zeros can be programmed over a write unit that already reads all zeros | nothing: the library never programs a unit that reads all zeros. The design of EWLF areas takes the refusal into account: no single word of zeros is trusted as a durable mark | no: PROGERR (measured, point 2) | no: PROGERR (measured, point 2) | — | — |
+| R9 | A program the flash refuses is reported as such by the write callback, nothing programmed | EWLF areas, which step over the refused unit (`LFTL_NVM_STATUS_REFUSED`) | yes: PROGERR, the accessor returns the status | same | — to measure | no check: the program lands over the weak word |
+| EWLF | An interrupted erase of a unit whose cells were already erased leaves them erased | the certificates of EWLF areas: without it the model checker finds a loss in two power cuts | measured with a system reset as the cut, 40 of 40 (point 5) | — to measure | — to measure | — to measure |
+| EWLF | All zeros programmed over a partially programmed unit, once the program returns, are solid | markers, confirms and certificates of EWLF areas programmed over a weak unit that read erased | accepted (point 2); solidity inferred | same | — | — |
 | R2, R7 | `write_size` is at least the ECC codeword, so an item is one codeword and a torn program spoils only its own unit | `write_size` doc in `lean-ftl.h`; T1.13 | 16 B = codeword | 8 B = codeword | n/a | n/a |
 | R7, T5 | A double-bit ECC error raises an NMI rather than returning a wrong value; a weak word may do so until it is erased or pinned | T1.13; the integrator guide | doc | doc | n/a | n/a |
 | T1 | A cut during a program or erase leaves only the unit being written undefined; other units keep their content | anti-tearing, O1 and O2 of `THREAT-MODEL.md` | "not guaranteed" for the accessed content; others not stated | same | not stated | "may become corrupted" for the unit; others not stated |
@@ -278,12 +283,13 @@ Two consequences of the ECC rows, now T5 on the page:
    | ECC flag on a read-back | none | none |
 
    A refusal sets PROGERR and PGSERR, never EOP, never shows BSY, returns at once (31 cycles of
-   the polling loop) and leaves the unit as it was: no programming pulse is applied. So
-   `LFTL_EWLF_PIN_OVER_ZEROS` stays 0 on both parts, and the stuck-state residual of the
-   [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual)
-   stands there: a flag that reads all zeros cannot be pinned again, and the accessors would
-   report the attempt as a failed write. The units measured were solidly programmed; a weak unit
-   that the flash's own check reads as all zeros is the case of the residual, and only a power cut
+   the polling loop) and leaves the unit as it was: no programming pulse is applied. So a word of zeros cannot be
+   programmed a second time to make it solid, and the accessors report the attempt as a refused
+   write. The design of EWLF areas since v0.4.0 is built on that: no single word of zeros is
+   trusted as a durable mark, and a refused program is stepped over
+   ([EWLF areas](https://lean-ftl.readthedocs.io/en/latest/design.html#design-ewlf)). The units
+   measured were solidly programmed; a weak unit that the flash's own check reads as all zeros
+   while the library read it erased is the case where a program is refused, and only a power cut
    during a program can produce one.
 3. **Endurance and retention of the STM32L5 and M5531.** In their datasheets, not in the folder;
    LFTL-010 and T1.5 use 10 k cycles for every target.

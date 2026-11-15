@@ -33,15 +33,16 @@ value matches the hardware is not checkable (R8).
 ``write_size`` is the write unit of the whole area: a power of two, dividing ``erase_size``, at
 most :c:macro:`LFTL_WU_MAX_SIZE` (128 bytes). The data of a regular area is whole write units. On
 flash with ECC, ``write_size`` is at least the ECC codeword, so that each meta-data item of a
-regular area, and each flag of an EWLF record, is one codeword; the meta field of an EWLF record
-may span two, and is validated as a whole. Enforced by registration (:c:macro:`LFTL_ERROR_BAD_CONFIG`,
+regular area, and each marker, confirm and certificate of an EWLF area, is one codeword; the meta
+field of an EWLF record and the entry of a log pair may span several, and are validated as a
+whole. Enforced by registration (:c:macro:`LFTL_ERROR_BAD_CONFIG`,
 :c:macro:`LFTL_ERROR_WU_SIZE_TOO_LARGE`), except the ECC part.
 
 **R3. An erased write unit accepts one program of any value.**
 *lean-ftl* programs each write unit at most once between two erases, whole units only, aligned,
 possibly several units per call, with one exception that only a flash declared with
-``zero_overwrite`` gets: a program of all zeros over a word a power cut left weak, or over a
-programmed meta field the scan tombstones (N3). The source may be unaligned RAM, or NVM that does
+``zero_overwrite`` gets, in regular areas: a program of all zeros over a word a power cut left
+weak, or over the version of a slot the scan tombstones (N3). The source may be unaligned RAM, or NVM that does
 not overlap the destination (:c:type:`nvm_write_t`).
 
 **R4. Reads of any byte range.**
@@ -57,7 +58,7 @@ operation, clearing them before it so that a refused one cannot poison the next,
 what they programmed).
 
 **R6. EWLF areas only: erased bytes read 0xFF.**
-Free record positions (an erased start marker) and the erased-data checksum of
+Free positions, of records and of log pairs, free certificates and the erased-data checksum of
 :c:func:`lftl_erase_all` are recognised by that value. Regular areas do not need it (N1).
 
 **R7. Flash with ECC.**
@@ -65,11 +66,20 @@ The write unit is at least the ECC codeword (R2). A double-bit error raises an N
 and STM32U5: the handler clears the flag and returns, so that the read completes and *lean-ftl*
 rejects the content; a handler that loops or resets hangs the device at every boot. On the STM32U5
 a pending single-bit correction flag masks the next NMI and must be cleared promptly. See T5.
+For an EWLF area the read callback must also leave, in the write unit that faulted, a value that
+is neither all ``0xFF`` nor all ``0x00``: the unit then counts as started and proves nothing.
 
 **R8. The configuration is static and matches the hardware.**
 ``write_size``, ``erase_size``, the area and its data size are compile-time constants, never read
 from the NVM. Registration checks that they are consistent with each other, not that they are
 true.
+
+**R9. EWLF areas only: a refused program is reported as such.**
+A write unit a power cut left weak can read erased and still be refused by a flash that checks
+before it programs (PROGERR on the STM32L5 and STM32U5). The write callback then returns
+:c:macro:`LFTL_NVM_STATUS_REFUSED`, having programmed nothing, and the area steps over that unit.
+Any other failure is fatal, as everywhere. A flash that does not check programs over the weak
+word, which for the words of zeros an EWLF area writes there is harmless.
 
 .. _flash-not-relied-on:
 
@@ -94,16 +104,16 @@ which is what makes flash that refuses to program a non-erased word (STM32L5, ST
 One exception is opt-in. A flash whose manual documents the program of all zeros over a programmed
 word (the STM32L5 and STM32U5 do; the M5531's does not say; the W25Q32RV's specifies programming
 for erased locations only) can be declared with ``zero_overwrite`` in :c:type:`lftl_nvm_props_t`:
-*lean-ftl* then *pins* words at the first access after a reset, programming their write unit to
-zeros so that no later boot decides otherwise about them: in a regular area the one word a power
-cut can leave weak; in an EWLF area the meta field of an aborted record (a tombstone) and, when no
-position is left for the copy that repairs a torn record, its two flags. It never re-programs a
-unit that already reads all zeros, unless the build declares that the flash accepts it
-(``LFTL_EWLF_PIN_OVER_ZEROS``, the stuck state of :ref:`design-ewlf-scan`); the STM32L5 and
-STM32U5 refuse that program with PROGERR and program nothing, measured on both. Left false, the value
-of a zeroed initializer, *lean-ftl* never programs a unit that is not erased, and the scan of a
-regular area writes nothing; the scan of an EWLF area still copies a torn record forward, which
-programs erased units only.
+*lean-ftl* then *pins*, at the first access to a regular area after a reset, the one word a power
+cut can leave weak, programming its write unit to zeros so that no later boot decides otherwise
+about it. It never re-programs a unit that already reads all zeros: the STM32L5 and STM32U5 refuse
+that program with PROGERR and program nothing, measured on both. Left false, the value of a zeroed
+initializer, *lean-ftl* never programs a unit that is not erased, and the scan of a regular area
+writes nothing. EWLF areas do not use ``zero_overwrite``: they only program write units that read
+erased, their scan writes nothing, and the repair it may leave to do programs erased units only
+(:ref:`design-ewlf-scan`). They rely on one thing about zeros that is an inference, not a
+measurement: a program of all zeros that returns over a partially programmed unit, one that read
+erased, leaves solid zeros (:ref:`design-ewlf-checked`).
 
 **N4. Advanced features and figures.**
 Read-while-write, suspend and resume, hardware verify, CRC or all-one checks, program and erase
@@ -153,7 +163,10 @@ erased at one boot may show programmed bits at a later one, especially once word
 around them. *lean-ftl* therefore never trusts a unit because it reads erased: a regular area
 erases the next slot before every write, and an EWLF rollover erases the unit it enters right
 before its first record is programmed, whatever that unit reads, and never on the strength of a
-flag written earlier.
+flag written earlier. A log unit of an EWLF area is written only in the session that erased it,
+or under a certificate that session left in the other log unit. EWLF areas assume one thing that
+T4 does not say: an interrupted erase of cells that were already erased leaves them erased. It
+held in 40 interrupted erases out of 40 on one STM32U5A5 (:ref:`design-ewlf-checked`).
 
 **T5. Flash with ECC.**
 A weak unit may fault (NMI) instead of returning a value (R7). An erased line with two flipped

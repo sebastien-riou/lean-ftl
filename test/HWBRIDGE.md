@@ -227,6 +227,6 @@ plan", and measurements in [FLASH.md](../FLASH.md), section 4:
 | 2026-11-03 | `boards/zeros-over-zeros.c` | all zeros over all zeros refused with PROGERR on both boards, 48 of 48 |
 | 2026-11-14 | `boards/torn-erase.c` | NUCLEO-U5A5ZJ-Q: an erased page stays erased through an interrupted erase, 40 of 40 |
 | 2026-11-14 | `boards/erase-time.c` | NUCLEO-U5A5ZJ-Q: an erase takes 881 us plus 0 to 4 steps of 226 us, set by the content, not by how much of the page is programmed |
-| 2026-11-15 | EWLF format of v0.4.0, branch `ewlf-no-rollback`, uncommitted on 562e19e | tests 1 to 40 pass on the NUCLEO-U5A5ZJ-Q; not run on the NUCLEO-L552ZE-Q |
+| 2026-11-15 | EWLF format of v0.4.0, branch `ewlf-no-rollback`, commit 006f085 and the sources before it | tests 1 to 40 pass on the NUCLEO-U5A5ZJ-Q and on the NUCLEO-L552ZE-Q |
 
 Tests 35, 39 and 40 need the tearing simulator and are empty on a board.

@@ -36,5 +36,5 @@ rate of garbage, which stays small.
 
 **Why it stays.** v0.1.0 has the same code, the pqkey fleet holds areas in that format, and test 37
 reads them on every build: changing the polynomial is a format change for regular areas, which are
-frozen. EWLF areas, whose format changed in v0.3.0, use a CRC-64/NVME instead. A second regular-area
+frozen. EWLF areas, whose format changed in v0.3.0 and in v0.4.0, use a CRC-64/NVME instead. A second regular-area
 format, with a reader for the first, would fix it; not planned.

@@ -32,7 +32,8 @@ first over boots, and checks each shown version against the oracle:
   differently is the usual cause).
 
 Usage: ewlf_model.py --protocol NAME [--cuts N] [--boots N] [--app N] [--strict]
-       [--geometry nd,rpu,nl,ppu] [--ignore stuck,...] [--clean-boot] [--mem-mb N]
+       [--geometry nd,rpu,nl,ppu] [--ignore stuck,...] [--clean-boot] [--weak-erased]
+       [--mem-mb N]
        (NAME loads proto_NAME.py; the last line prints the highest acknowledged write;
        the process is capped at --mem-mb, 1500 by default: run one check at a time)
 """
@@ -87,10 +88,18 @@ def _valid(val):
     return (Z,) if val == 'Z' else (V, val)
 
 
+# --weak-erased: a cut erase also leaves the words that were erased weakly erased (they may
+# read garbage, and a word programmed into them may later read garbage). Off by default: the
+# design assumes that a cut erase of erased cells leaves them erased (EWLF.md, "Model check").
+WEAK_ERASED_CELLS = False
+
+
 def reading_options(ws):
     kind, val = ws
     if kind == SOLID:
         return [(E,)] if val is None else [_valid(val)]
+    if kind == WERASED and val is None:
+        return [(E,), (G,)]
     if kind in (WEAK, WERASED):
         return [_valid(val), (E,)] if val == 'Z' else [_valid(val), (E,), (G,)]
     if kind == WEAKGHOST:
@@ -195,7 +204,7 @@ class IO:
         if self._cut(f'erase {kind}{unit}'):
             for i in idxs:
                 k, v = self.flash[i]
-                if not (k == SOLID and v is None):
+                if WEAK_ERASED_CELLS or not (k == SOLID and v is None):
                     self.flash[i] = (WERASED, v)
             raise PowerCut()
         for i in idxs:
@@ -359,9 +368,13 @@ def main():
                     help='data units, records per unit, log units, pairs per unit')
     ap.add_argument('--clean-boot', action='store_true',
                     help='a scan after an uncut session must not program nor erase')
+    ap.add_argument('--weak-erased', action='store_true',
+                    help='a cut erase leaves the erased words weak too (off: they stay erased)')
     ap.add_argument('--mem-mb', type=int, default=1500,
                     help='address-space limit of this process in MB (0: none)')
     a = ap.parse_args()
+    global WEAK_ERASED_CELLS
+    WEAK_ERASED_CELLS = a.weak_erased
     if a.mem_mb:
         import resource
         resource.setrlimit(resource.RLIMIT_AS, (a.mem_mb << 20, a.mem_mb << 20))

@@ -168,6 +168,33 @@ hwbridge flash nucleo-u5a5 build/boards/op2-u5a5.elf --cat --until "OP2 DONE" --
 It erases the last two pages of bank 2 before measuring, so `hwbridge reset nucleo-u5a5 --cat
 --until "OP2 DONE"` runs it again. Its last lines are a summary per kind of program.
 
+## Measure an interrupted erase
+
+[torn-erase.c](boards/torn-erase.c) measures what a page erase interrupted by a system reset
+leaves on an STM32U5A5, on a programmed page and on a page that was already erased (EWLF.md,
+"Physics the design relies on"). Build it as the printing test firmware above, steps 1 and 2,
+with three more changes to the copy of the testbench: paste the file into `Core/Src/main.c` just
+before `/* USER CODE END 0 */`; replace the lines `test_callbacks();` and
+`test_main(0,NULL,NULL);` with `te_measure();`; and in `Core/Src/stm32u5xx_it.c` replace the
+endless loop of `NMI_Handler` with `void te_nmi(void); te_nmi();`, since a read of a weak cell may
+raise the ECC NMI. Then:
+
+```
+hwbridge serial open nucleo-u5a5 --baud 115200
+hwbridge flash nucleo-u5a5 build/boards/torn-erase-u5a5.elf --cat --until "TORN-ERASE DONE" --timeout 600
+```
+
+The run resets the board about 160 times by itself and takes under two minutes. It prints one
+line per trial, a table (`TE ROW`), a summary and a verdict (`TE VERDICT`), then `TORN-ERASE
+DONE`. It uses the last two pages of bank 2, about 330 erases of the last one per run. The
+flash erases the whole chip, which is what starts a fresh run: once a run is complete a reset
+only prints its summary again.
+
+[erase-time.c](boards/erase-time.c) times a page erase against what the page holds. It is built
+the same way, without the change to the NMI handler, with `et_measure();` as the call, and run
+with `--until "ERASE-TIME DONE"`. It uses about 85 erases of the last page of bank 2 and runs
+again at every reset.
+
 ## When a flash hangs
 
 The STM32 flash power-cycles the board and then waits, without a timeout, for the board's serial
@@ -198,5 +225,8 @@ plan", and measurements in [FLASH.md](../FLASH.md), section 4:
 | 2026-10-31 | v0.2.0 | tests 1 to 37 pass on both boards |
 | 2026-11-03 | EWLF format of v0.3.0, commit 760da0c | tests 1 to 40 pass on both boards |
 | 2026-11-03 | `boards/zeros-over-zeros.c` | all zeros over all zeros refused with PROGERR on both boards, 48 of 48 |
+| 2026-11-14 | `boards/torn-erase.c` | NUCLEO-U5A5ZJ-Q: an erased page stays erased through an interrupted erase, 40 of 40 |
+| 2026-11-14 | `boards/erase-time.c` | NUCLEO-U5A5ZJ-Q: an erase takes 881 us plus 0 to 4 steps of 226 us, set by the content, not by how much of the page is programmed |
+| 2026-11-15 | EWLF format of v0.4.0, branch `ewlf-no-rollback`, uncommitted on 562e19e | tests 1 to 40 pass on the NUCLEO-U5A5ZJ-Q; not run on the NUCLEO-L552ZE-Q |
 
 Tests 35, 39 and 40 need the tearing simulator and are empty on a board.

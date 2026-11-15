@@ -53,7 +53,7 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
 | Endurance | 10 kcycles; 100 kcycles on at most 32 pages (256 KB) per bank | — (datasheet) | — (datasheet) | min. 100 K program-erase cycles |
 | Retention | — | — | — | more than 20 years |
 | Program time | measured on one board: 128 µs per quad-word | measured on one board: 85 µs per double word | — | tPP 0.25 ms typ., 2 ms max (page) |
-| Erase time | measured on one board: 0.88 ms per 8 KB page | measured on one board: 22 ms per 2 KB page | — | tSE 30 ms typ., 240 ms max (4 KB sector) |
+| Erase time | measured on one board: 0.88 ms for an 8 KB page already erased, 1.56 ms (sometimes 1.79 ms) once 8 write units or more are programmed, in steps of 0.23 ms between | measured on one board: 22 ms per 2 KB page | — | tSE 30 ms typ., 240 ms max (4 KB sector) |
 | Errata read | ES0553 2.2.12: programming stuck after a sequence error while WDW is set | none in the folder | none in the folder | none |
 | lean-ftl today | `write_size` 16, `erase_size` 8 KB, `target/stm32/stm32u5-accessors.c` | `write_size` 8, `erase_size` 2 KB, `target/stm32/stm32l5-accessors.c` | no accessor yet | no accessor yet |
 
@@ -290,5 +290,43 @@ Two consequences of the ECC rows, now T5 on the page:
 4. **STM32U5 FLASH_OPSR.** After a system reset it names the interrupted operation and its address.
    lean-ftl does not use it (its scan must also cover the power-on case, where it reads 0), but an
    integrator's reset handler could log it, and a test could read it to confirm what a tear left.
-5. **Documents to add.** The CH32V307 reference manual and the RP2350 datasheet, so that the two
+5. **STM32U5: a page erase interrupted on an already erased page. Measured on 2026-11-14: the
+   page stays erased.** The EWLF design of the branch `ewlf-no-rollback` relies on it (EWLF.md,
+   "Physics the design relies on"). Measured on a NUCLEO-U5A5ZJ-Q (IDCODE 0x30016481) with
+   `test/boards/torn-erase.c`, on the last page of bank 2, core at 4 MHz, ICACHE off. The cut is
+   a system reset requested from a routine in RAM a chosen time after STRT; FLASH_OPSR read
+   after each reset confirms the interrupted page erase (code 3, the page's address). 40 delays
+   from 0 to 1796 us, two rounds:
+
+   | Page before the interrupted erase | Result |
+   |---|---|
+   | Programmed with a pattern (control) | intact at 0 us; all 512 words garbage from 46 us to 230 us, about half of them with an ECC double error (NMI) and a third reading differently from one read to the next; words turn erased from 276 us, all of them read erased from 736 us in one round and 782 us in the other, with corrected ECC errors on a few words up to 874 us; no ECC flag from 921 us; the erase ends at 1561 us |
+   | Already erased | 40 of 40 interrupted erases (0 to 874 us): 512 of 512 words read erased at three readings, no ECC flag, then 512 of 512 programs accepted and read back right; the erase ends at 881 us |
+
+   So an erase takes 1.56 ms on a programmed page and 0.88 ms on an erased one, and the figure
+   of 0.88 ms used so far was that of an erased page. Two things seen on the control are T4 as
+   the flash page states it: between about 740 and 870 us the page reads all erased while some of
+   its cells are still marginal (corrected ECC errors), and before that a word can read
+   differently at each read. Not covered: a loss of power instead of a reset, other parts, temperature,
+   aged cells. The log of the run is kept beside the firmware, under `build/boards/`.
+
+   **The erase time against the content of the page**, same board and day, with
+   `test/boards/erase-time.c`, three erases per case, timed from STRT to the end of BSY. Every
+   time measured is one of five values, 226 us apart:
+
+   | Page before the erase | Erase time |
+   |---|---|
+   | Erased | 881 us, 6 of 6 |
+   | One bit programmed, in the last write unit | 881 us, 3 of 3 |
+   | One bit programmed, or one write unit, in the first write unit | 1109 us, 6 of 6 |
+   | One write unit, in the middle or at the end; the first 2 or 4 write units | 1334 us, 12 of 12 |
+   | The first 8 write units and more, up to all 512, pattern or all zeros | 1561 us, 50 of 57; 1786 us, 7 of 57 |
+
+   So the time does not grow with the number of programmed write units: it is 881 us plus a
+   whole number of steps of 226 us, none for an erased page and three as soon as 8 write units
+   are programmed, sometimes four. That is what an erase made of pulses each followed by a
+   check would give, the number of pulses being set by the slowest cells: a guess, the manual
+   does not describe the algorithm. A worst case has to come from the datasheet, not from these
+   figures.
+6. **Documents to add.** The CH32V307 reference manual and the RP2350 datasheet, so that the two
    remaining targets get their rows.

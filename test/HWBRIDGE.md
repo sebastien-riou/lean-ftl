@@ -54,7 +54,7 @@ hwbridge serial cat nucleo-u5a5 --from GEN:0 --until PASSED --timeout 600
 - `flash` prints the `serial cat ... --from GEN:OFFSET` that starts at the boot; the same text is
   in `/home/sru/repos/lean-hwbridge/run/serial/<board>/<GEN>.log`.
 - The firmware runs the suite once, in the pinning variant its accessors declare, without a
-  command line, and prints `Tests 1 to N PASSED` at the end. About 5 minutes on the U5.
+  command line, and prints `Tests 1 to N PASSED` at the end. About 7 minutes on the U5, 1 minute on the L5.
 - Without `HAS_PRINTF` the firmware prints nothing: the green LED blinks at about 1 Hz on a pass
   and fast on an error. Build with `HAS_PRINTF` as below for a readable run.
 - A board run has no tearing simulation. It checks the layout, the pins, the tombstones and the
@@ -228,5 +228,6 @@ plan", and measurements in [FLASH.md](../FLASH.md), section 4:
 | 2026-11-14 | `boards/torn-erase.c` | NUCLEO-U5A5ZJ-Q: an erased page stays erased through an interrupted erase, 40 of 40 |
 | 2026-11-14 | `boards/erase-time.c` | NUCLEO-U5A5ZJ-Q: an erase takes 881 us plus 0 to 4 steps of 226 us, set by the content, not by how much of the page is programmed |
 | 2026-11-15 | EWLF format of v0.4.0, branch `ewlf-no-rollback`, commit 006f085 and the sources before it | tests 1 to 40 pass on the NUCLEO-U5A5ZJ-Q and on the NUCLEO-L552ZE-Q |
+| 2026-11-22 | large areas and the table form of the CRC-64, branch `chunked-area`, commit cd3d0fa | tests 1 to 45 pass on the NUCLEO-U5A5ZJ-Q, in 6 min 47 s, and on the NUCLEO-L552ZE-Q, in about 1 min |
 
-Tests 35, 39 and 40 need the tearing simulator and are empty on a board.
+Tests 35, 39, 40 and 45 need the tearing simulator and are empty on a board.

@@ -40,19 +40,23 @@ the bridge is not running. Boards are named by their usbman nickname: `nucleo-u5
 This repository is also a [lean-bsp](https://github.com/sebastien-riou/lean-bsp) application
 (`app.toml`, `lean-bsp/lftl_lean_bsp.c`): it builds the library and the test suite from source,
 with `HAS_PRINTF`, for any lean-bsp BSP offering an NVM region (contract 1.2), today
-[`lean-bsp-nucleo-u5a5`](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5) and
-[`lean-bsp-nucleo-l552`](https://github.com/sebastien-riou/lean-bsp-nucleo-l552). The tests run in
-the BSP's region 0, flash bank 2 on both. With the BSPs cloned next to this repository, from it:
+[`lean-bsp-nucleo-u5a5`](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5),
+[`lean-bsp-nucleo-l552`](https://github.com/sebastien-riou/lean-bsp-nucleo-l552) and
+[`lean-bsp-pico2`](https://github.com/sebastien-riou/lean-bsp-pico2) (its `cortex-m33` target). The
+tests run in the BSP's region 0: flash bank 2 on the Nucleo boards, the upper 2 MB of the QSPI flash
+on the Pico 2 (8-byte write units, no zero overwrite: the no-pinning variant). With the BSPs cloned
+next to this repository, from it:
 
 ```
 lbsp build-load-run --bsp nucleo-u5a5 --until PASSED --timeout 600
 lbsp build-load-run --bsp nucleo-l552 --until PASSED --timeout 600
+lbsp build-load-run --bsp pico2 --target cortex-m33 --until PASSED --timeout 900
 ```
 
 From a sandboxed session, run `lbsp` as `python3 -m leanbsp` with lean-bsp and lean-hwbridge on
 `PYTHONPATH` and `HWBRIDGE="python3 -m hwbridge"`. Each prints `Callbacks test PASS`, then
-`Tests 1 to 45 PASSED`: in about 30 s on the U5A5 (lean-bsp runs it at 160 MHz) and 1 minute on the
-L552. The sections below are the testbench-repo route this replaces.
+`Tests 1 to 45 PASSED`: in about 30 s on the U5A5 (lean-bsp runs it at 160 MHz), 1 minute on the
+L552 and under 3 minutes on the Pico 2. The sections below are the testbench-repo route this replaces.
 
 ## Run the test firmware on a board
 

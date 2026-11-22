@@ -1,0 +1,25 @@
+[app]
+name = "lean-ftl-test"
+lean_bsp_contract_version = "1.2"
+version = "0.2.0"
+default_bsp = "nucleo-u5a5"          # the board lean-ftl is tested on, with nucleo-l552
+
+[app.requires]                       # subset of bsp.primitives the test firmware cannot do without
+uart = true                          # the results, with HAS_PRINTF
+led = true                           # the pass/fail blink
+button = true                        # ui_wait_button() after an error
+flash_read = true                    # NVM region 0, where the tests run
+flash_erase = true
+flash_write = true
+
+[app.sources]
+# the library and its test suite, as the CMake build compiles them; lean-bsp/lftl_lean_bsp.c is the
+# board glue the testbench repos used to provide
+files = [
+    "liblean-ftl/source/ftl.c",
+    "liblean-ftl-test/source/test.c",
+    "lean-bsp/lftl_lean_bsp.c",
+]
+include_dirs = ["liblean-ftl/include", "liblean-ftl-test/include"]
+# GIT_VERSION, VERSION_TIMESTAMP and BUILD_TYPE come from cmake/git_version.cmake in the CMake build
+defines = ["HAS_PRINTF", "GIT_VERSION=lean-bsp", "VERSION_TIMESTAMP=0", "BUILD_TYPE=lean-bsp"]

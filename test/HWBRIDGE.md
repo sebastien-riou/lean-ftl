@@ -35,6 +35,25 @@ Options go after the subcommand (`status --dir ...`, not `--dir ... status`). Ex
 the bridge is not running. Boards are named by their usbman nickname: `nucleo-u5a5` and
 `nucleo-l552` for lean-ftl; `nucleo-f207`, `numaker-m5531` and `pico2` are on the same bench.
 
+## Run the test suite with lean-bsp
+
+This repository is also a [lean-bsp](https://github.com/sebastien-riou/lean-bsp) application
+(`app.toml`, `lean-bsp/lftl_lean_bsp.c`): it builds the library and the test suite from source,
+with `HAS_PRINTF`, for any lean-bsp BSP offering an NVM region (contract 1.2), today
+[`lean-bsp-nucleo-u5a5`](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5) and
+[`lean-bsp-nucleo-l552`](https://github.com/sebastien-riou/lean-bsp-nucleo-l552). The tests run in
+the BSP's region 0, flash bank 2 on both. With the BSPs cloned next to this repository, from it:
+
+```
+lbsp build-load-run --bsp nucleo-u5a5 --until PASSED --timeout 600
+lbsp build-load-run --bsp nucleo-l552 --until PASSED --timeout 600
+```
+
+From a sandboxed session, run `lbsp` as `python3 -m leanbsp` with lean-bsp and lean-hwbridge on
+`PYTHONPATH` and `HWBRIDGE="python3 -m hwbridge"`. Each prints `Callbacks test PASS`, then
+`Tests 1 to 45 PASSED`: in about 30 s on the U5A5 (lean-bsp runs it at 160 MHz) and 1 minute on the
+L552. The sections below are the testbench-repo route this replaces.
+
 ## Run the test firmware on a board
 
 With the prefix above:

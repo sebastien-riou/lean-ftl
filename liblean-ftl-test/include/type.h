@@ -3,6 +3,13 @@
 #include "util.h"
 
 #define LFTL_DEFINE_HELPERS
+#if defined(LEAN_BSP_NVM_REGIONS) && !defined(LFTL_PAGE_SIZE)
+//a lean-bsp build (lean-bsp/): the geometry of the BSP's NVM region 0, which
+//lean-bsp passes to the compilation
+#define LFTL_PAGE_SIZE LEAN_BSP_NVM0_PAGE_SIZE
+#define LFTL_WU_SIZE LEAN_BSP_NVM0_WRITE_SIZE
+#define LFTL_ZERO_OVERWRITE LEAN_BSP_NVM0_ZERO_OVERWRITE
+#endif
 #ifdef LFTL_STM32U5
 #define LFTL_PAGE_SIZE (8*1024)
 #define LFTL_WU_SIZE 16

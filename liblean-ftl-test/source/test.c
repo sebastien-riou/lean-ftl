@@ -60,6 +60,7 @@ extern lftl_nvm_props_t nvm_props2;
 extern lftl_ctx_t nvmc;
 extern lftl_nvm_props_t nvm_props3;
 extern lftl_ctx_t nvmd;
+extern lftl_ctx_t largea;
 
 const char*version = xstr(GIT_VERSION);
 
@@ -148,6 +149,10 @@ void (*transaction_abort_func)(lftl_ctx_t*ctx);
 //the one cut --tear-at= runs, 0 for all of them: parsed on every build, read
 //by the tearing simulation
 static uint64_t tear_at;
+//--shard=K --shards=N: a sweep runs only the cuts whose index is K modulo N,
+//so that N processes share it (test/run-suite); --tear-at= has priority
+static uint64_t shard_index;
+static uint64_t shard_count = 1;
 
 #ifdef HAS_TEARING_SIMULATION
 #include <stdio.h>
@@ -162,6 +167,7 @@ void tearing_sim_weak_scope_clear();
 void tearing_sim_weak_scope_add(const void*lo, uintptr_t size);
 void tearing_sim_weak_scope_pop();
 void tearing_sim_weak_clear_range(const void*addr, uintptr_t size);
+void tearing_sim_weak_clear();
 bool tearing_sim_is_weak(const void*addr, uintptr_t size);
 void tearing_sim_weak_reseed(uint64_t seed);
 void tearing_sim_weak_new_boot();
@@ -173,7 +179,12 @@ uint64_t tearing_sim_get_call_count();
 //cut (-1: none)
 static uint64_t current_cut_target;
 static int64_t current_secondary_target = -1;
+static bool sweep_active; //false during the run without a cut that precedes a sweep
 static void print_cut_context(){
+  if(!sweep_active){
+    PRINTF("  no cut: the run that precedes the sweep\n");
+    return;
+  }
   PRINTF("  cut %llu, second cut %lld, weak words %s, weak seed %llu\n",
     (unsigned long long)current_cut_target,(long long)current_secondary_target,
     nvm_weak_model ? "on" : "off",(unsigned long long)nvm_weak_seed);
@@ -186,12 +197,29 @@ data_flash_t transaction_buf_ref;
 //seen reading the new state since the reference last moved: a rollback is an
 //area that reads the new state at one boot and the old one at a later boot,
 //with no write in between
-#define N_CHECKED_AREAS 4
+#define N_CHECKED_AREAS 5
 static bool area_seen_new[N_CHECKED_AREAS];
 //Every modelled operation moves the reference: the state it is to produce
 //becomes the new one, the previous new state the old one
+//The old state is the new one but where the new one changed since the last
+//advance: ref_touch records that range, so that an advance copies it and not
+//the whole flash
+static uintptr_t ref_touched_lo = 0;
+static uintptr_t ref_touched_hi = sizeof(data_flash_t);
+static void ref_touch(uintptr_t offset, uintptr_t size){
+  if(offset < ref_touched_lo) ref_touched_lo = offset;
+  if(offset + size > ref_touched_hi) ref_touched_hi = offset + size;
+}
+static void ref_touch_all(){
+  ref_touched_lo = 0;
+  ref_touched_hi = sizeof(data_flash_t);
+}
 static void ref_advance(){
-  nvm_ref_previous_state = nvm_ref;
+  if(ref_touched_hi > ref_touched_lo){
+    memcpy(((uint8_t*)&nvm_ref_previous_state) + ref_touched_lo,((const uint8_t*)&nvm_ref) + ref_touched_lo,ref_touched_hi - ref_touched_lo);
+  }
+  ref_touched_lo = sizeof(data_flash_t);
+  ref_touched_hi = 0;
   memset(area_seen_new,0,sizeof(area_seen_new));
 }
 
@@ -245,6 +273,7 @@ void tearing_sim_lftl_format(lftl_ctx_t*ctx){
   uintptr_t size = ctx->data_size;
   uint8_t*dst = (uint8_t*)&nvm_ref;
   memcpy(dst+offset,base,size);
+  ref_touch(offset,size);
 }
 uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   //refuse what nvm_write refuses, so that tests only build states real flash can hold
@@ -266,6 +295,7 @@ uint8_t tearing_sim_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
   memcpy(dst+offset,src,size);
+  ref_touch(offset,size);
   //emulate call to nvm_write rather than calling it, to make sure we do not trigger tearing here
   memcpy(dst_nvm_addr,src,size);
   tearing_sim_weak_clear_range(dst_nvm_addr,size);
@@ -278,6 +308,7 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
   uint8_t*dst = (uint8_t*)&nvm_ref;
   uintptr_t size = n_pages*LFTL_PAGE_SIZE;
   memset(dst+offset,0xFF,size);
+  ref_touch(offset,size);
   //emulate call to nvm_erase rather than calling it, to make sure we do not trigger tearing here
   memset(base_address,0xFF,size);
   tearing_sim_weak_clear_range(base_address,size);
@@ -288,9 +319,11 @@ uint8_t tearing_sim_nvm_erase(void*base_address, unsigned int n_pages){
 }
 void tearing_sim_lftl_erase_all(lftl_ctx_t*ctx){
   ref_advance();
-  //compute new state
+  //compute new state, at the area's place in the reference
+  uintptr_t offset = (uintptr_t)ctx->area - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
-  memset(dst,0xFF,ctx->data_size);
+  memset(dst+offset,0xFF,ctx->data_size);
+  ref_touch(offset,ctx->data_size);
   //call LFTL
   lftl_erase_all(ctx);
 }
@@ -300,6 +333,7 @@ void tearing_sim_lftl_write(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*const s
   uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)&nvm;
   uint8_t*dst = (uint8_t*)&nvm_ref;
   lftl_memread(dst+offset,src,size);
+  ref_touch(offset,size);
   //call LFTL
   lftl_write(ctx,dst_nvm_addr,src,size);
 }
@@ -314,6 +348,7 @@ void tearing_sim_lftl_write_any(lftl_ctx_t*ctx,void*dst_nvm_addr, const void*con
     //compute new state
     uint8_t*dst = (uint8_t*)&nvm_ref;
     lftl_memread(dst+offset,src,size);
+    ref_touch(offset,size);
   } else {
     //write into transaction buffer
     uint8_t*dst = (uint8_t*)&transaction_buf_ref;
@@ -354,6 +389,7 @@ void tearing_sim_lftl_transaction_commit(lftl_ctx_t*ctx){
   uint8_t*src = (uint8_t*)&transaction_buf_ref;
   uint8_t*dst = (uint8_t*)&nvm_ref;
   memcpy(dst+offset,src+offset,ctx->area_size);
+  ref_touch(offset,ctx->area_size);
   //call LFTL
   lftl_transaction_commit(ctx);
 }
@@ -364,7 +400,7 @@ void tearing_sim_lftl_transaction_abort(lftl_ctx_t*ctx){
 //What an application does with its EWLF areas after a reset, before it reads
 //or writes them: the repair the scan found pending, if any
 static void boot_ewlf(lftl_ctx_t*ctx){
-  lftl_ewlf_complete_scan(ctx);
+  lftl_complete_scan(ctx);
 }
 bool nvm_is_equal(data_flash_t*expected){
   data_flash_t read_val;
@@ -378,8 +414,72 @@ bool nvm_is_equal(data_flash_t*expected){
   if(memcmp(&read_val.ewlfa_data,&expected->ewlfa_data,sizeof(nvm.ewlfa_data))) return 0;
   lftl_read(&ewlfb,&read_val.ewlfb_data,&nvm.ewlfb_data,sizeof(nvm.ewlfb_data));
   if(memcmp(&read_val.ewlfb_data,&expected->ewlfb_data,sizeof(nvm.ewlfb_data))) return 0;
+  boot_ewlf(&largea);
+  lftl_read(&largea,&read_val.largea_data,&nvm.largea_data,sizeof(nvm.largea_data));
+  if(memcmp(&read_val.largea_data,&expected->largea_data,sizeof(nvm.largea_data))) return 0;
   return 1;
 }
+//--- The state every cut of a sweep starts from. A sweep runs its test once
+//per cut, from the same state: all the areas formatted. Formatting seven
+//areas after each cut, and checking and writing each of them, costs far more
+//than most cuts need, so the sweep takes a snapshot of that state once (the
+//flash, the reference model, what a format leaves in the contexts) and:
+//- after a cut, restores it instead of formatting. One cut in
+//  SWEEP_FORMAT_PERIOD still formats for real, over what the cut left, and
+//  checks the result;
+//- after a cut, checks and writes only the areas whose flash differs from
+//  the snapshot or holds a weak word: any other area is exactly as the
+//  snapshot has it, and behaves as it did when the sweep started. One cut in
+//  SWEEP_FULL_PERIOD checks and writes them all.
+//A single cut run with --tear-at= does everything in full.
+#define SWEEP_FORMAT_PERIOD 256
+#define SWEEP_FULL_PERIOD 64
+#define N_SWEEP_AREAS 7
+static lftl_ctx_t*const sweep_areas[N_SWEEP_AREAS] = {&nvma,&nvmb,&ewlfa,&ewlfb,&nvmc,&nvmd,&largea};
+static data_flash_t sweep_nvm;
+static data_flash_t sweep_ref;
+static data_flash_t sweep_ref_previous;
+static struct {
+  void*data;
+  lftl_ewlf_state_t ewlf;
+} sweep_ctx[N_SWEEP_AREAS];
+static bool sweep_snapshot_valid; //inside the loop of a sweep
+static bool sweep_full;           //this cut checks and writes every area
+static void format_all(){
+  for(unsigned int i=0;i<N_SWEEP_AREAS;i++) format_func(sweep_areas[i]);
+}
+static void sweep_snapshot(){
+  memcpy(&sweep_nvm,&nvm,sizeof(nvm));
+  sweep_ref = nvm_ref;
+  sweep_ref_previous = nvm_ref_previous_state;
+  for(unsigned int i=0;i<N_SWEEP_AREAS;i++){
+    sweep_ctx[i].data = sweep_areas[i]->data;
+    sweep_ctx[i].ewlf = sweep_areas[i]->ewlf;
+  }
+  sweep_snapshot_valid = 1;
+}
+static void sweep_restore(){
+  memcpy(&nvm,&sweep_nvm,sizeof(nvm));
+  tearing_sim_weak_clear();
+  nvm_ref = sweep_ref;
+  nvm_ref_previous_state = sweep_ref_previous;
+  ref_touch_all();
+  memset(area_seen_new,0,sizeof(area_seen_new));
+  for(unsigned int i=0;i<N_SWEEP_AREAS;i++){
+    sweep_areas[i]->data = sweep_ctx[i].data;
+    sweep_areas[i]->ewlf = sweep_ctx[i].ewlf;
+    sweep_areas[i]->transaction_tracker = LFTL_INVALID_POINTER;
+  }
+}
+//whether an area is to be checked and written after this cut: always outside
+//a sweep, and inside one unless its flash is the snapshot's, with no weak word
+static bool sweep_examines(const lftl_ctx_t*ctx){
+  if(!sweep_snapshot_valid || sweep_full) return 1;
+  const uintptr_t offset = (uintptr_t)ctx->area - (uintptr_t)&nvm;
+  if(memcmp(ctx->area,((const uint8_t*)&sweep_nvm) + offset,ctx->area_size)) return 1;
+  return tearing_sim_is_weak(ctx->area,ctx->area_size);
+}
+
 //What an area reads after a simulated cut, against the reference model: the
 //state the interrupted operation was to produce, the one before it, or
 //neither. The operation touched one area, so the two references agree on the
@@ -387,26 +487,32 @@ bool nvm_is_equal(data_flash_t*expected){
 typedef enum { AREA_NEW, AREA_OLD, AREA_CORRUPT } area_state_t;
 static area_state_t area_state(lftl_ctx_t*ctx, void*data, const void*ref, const void*prev, uintptr_t size){
   uint8_t read_val[size];
-  if(lftl_is_ewlf(ctx)) boot_ewlf(ctx);
+  if(lftl_is_ewlf(ctx) || lftl_is_large(ctx)) boot_ewlf(ctx);
   lftl_read(ctx,read_val,data,size);
   if(0 == memcmp(read_val,ref,size)) return AREA_NEW;
   if(0 == memcmp(read_val,prev,size)) return AREA_OLD;
   return AREA_CORRUPT;
 }
-static const char*const checked_area_names[N_CHECKED_AREAS] = {"a","b","ewlfa","ewlfb"};
-static void nvm_states(area_state_t states[N_CHECKED_AREAS]){
-  states[0] = area_state(&nvma,&nvm.a_data,&nvm_ref.a_data,&nvm_ref_previous_state.a_data,sizeof(nvm.a_data));
-  states[1] = area_state(&nvmb,&nvm.b_data,&nvm_ref.b_data,&nvm_ref_previous_state.b_data,sizeof(nvm.b_data));
-  states[2] = area_state(&ewlfa,&nvm.ewlfa_data,&nvm_ref.ewlfa_data,&nvm_ref_previous_state.ewlfa_data,sizeof(nvm.ewlfa_data));
-  states[3] = area_state(&ewlfb,&nvm.ewlfb_data,&nvm_ref.ewlfb_data,&nvm_ref_previous_state.ewlfb_data,sizeof(nvm.ewlfb_data));
+static const char*const checked_area_names[N_CHECKED_AREAS] = {"a","b","ewlfa","ewlfb","largea"};
+static lftl_ctx_t*const checked_areas[N_CHECKED_AREAS] = {&nvma,&nvmb,&ewlfa,&ewlfb,&largea};
+//`examined` says which areas were looked at, see sweep_examines
+static void nvm_states(area_state_t states[N_CHECKED_AREAS], bool examined[N_CHECKED_AREAS]){
+  for(unsigned int i=0;i<N_CHECKED_AREAS;i++) examined[i] = sweep_examines(checked_areas[i]);
+  if(examined[0]) states[0] = area_state(&nvma,&nvm.a_data,&nvm_ref.a_data,&nvm_ref_previous_state.a_data,sizeof(nvm.a_data));
+  if(examined[1]) states[1] = area_state(&nvmb,&nvm.b_data,&nvm_ref.b_data,&nvm_ref_previous_state.b_data,sizeof(nvm.b_data));
+  if(examined[2]) states[2] = area_state(&ewlfa,&nvm.ewlfa_data,&nvm_ref.ewlfa_data,&nvm_ref_previous_state.ewlfa_data,sizeof(nvm.ewlfa_data));
+  if(examined[3]) states[3] = area_state(&ewlfb,&nvm.ewlfb_data,&nvm_ref.ewlfb_data,&nvm_ref_previous_state.ewlfb_data,sizeof(nvm.ewlfb_data));
+  if(examined[4]) states[4] = area_state(&largea,&nvm.largea_data,&nvm_ref.largea_data,&nvm_ref_previous_state.largea_data,sizeof(nvm.largea_data));
 }
 //One boot: every checked area reads the new state or the old one, and none
 //that read the new state since the reference last moved falls back to the old
 //one (the anti-tearing page's definition of a rollback)
 void check_nvm(){
   area_state_t states[N_CHECKED_AREAS];
-  nvm_states(states);
+  bool examined[N_CHECKED_AREAS];
+  nvm_states(states,examined);
   for(unsigned int i=0;i<N_CHECKED_AREAS;i++){
+    if(!examined[i]) continue;
     if(AREA_CORRUPT == states[i]){
       PRINTF("NVM corrupted: area %s reads neither the new state nor the old one\n",checked_area_names[i]);
       print_cut_context();
@@ -435,6 +541,8 @@ static void simulate_reboot(){
   nvmc.transaction_tracker = LFTL_INVALID_POINTER;
   nvmd.data = LFTL_INVALID_POINTER;
   nvmd.transaction_tracker = LFTL_INVALID_POINTER;
+  largea.data = LFTL_INVALID_POINTER;
+  largea.transaction_tracker = LFTL_INVALID_POINTER;
 }
 //Boots in a row with no write in between: what a boot decides about the state
 //a cut left must hold at the next ones. With the simulator's fixed cut model
@@ -456,12 +564,17 @@ void tearing_sim_write_area(lftl_ctx_t*ctx, void*area_data, uintptr_t size){
 //The first write after recovering from a tearing lands on the state the
 //tearing left behind: write new data to every area check_nvm verifies, then
 //check them again after another simulated reboot. nvmc and nvmd are left
-//out: some tests use them as scratch for hand-built states.
+//out: some tests use them as scratch for hand-built states. Inside a sweep,
+//an area the test and the cut left as the snapshot has it is left out too,
+//see sweep_examines.
 void tearing_sim_write_after_recovery(){
-  tearing_sim_write_area(&nvma,&nvm.a_data,sizeof(nvm.a_data));
-  tearing_sim_write_area(&nvmb,&nvm.b_data,sizeof(nvm.b_data));
-  tearing_sim_write_area(&ewlfa,&nvm.ewlfa_data,sizeof(nvm.ewlfa_data));
-  tearing_sim_write_area(&ewlfb,&nvm.ewlfb_data,sizeof(nvm.ewlfb_data));
+  bool examined[N_CHECKED_AREAS];
+  for(unsigned int i=0;i<N_CHECKED_AREAS;i++) examined[i] = sweep_examines(checked_areas[i]);
+  if(examined[0]) tearing_sim_write_area(&nvma,&nvm.a_data,sizeof(nvm.a_data));
+  if(examined[1]) tearing_sim_write_area(&nvmb,&nvm.b_data,sizeof(nvm.b_data));
+  if(examined[2]) tearing_sim_write_area(&ewlfa,&nvm.ewlfa_data,sizeof(nvm.ewlfa_data));
+  if(examined[3]) tearing_sim_write_area(&ewlfb,&nvm.ewlfb_data,sizeof(nvm.ewlfb_data));
+  if(examined[4]) tearing_sim_write_area(&largea,&nvm.largea_data,sizeof(nvm.largea_data));
   tearing_sim_check_nvm();
 }
 void tearing_sim_init();
@@ -1181,7 +1294,7 @@ void out_of_range_test(){
   EXPECT_ERROR(LFTL_ERROR_LAST_NOT_IN_DATA, lftl_write(&ewlfa,((uint8_t*)ewlfa.area)+1,buf,(uintptr_t)0-1));
   //a transaction write outside the area must not touch the tracker: its bit
   //for the write unit at beyond would be in the first guard byte
-  const uintptr_t tracker_size = LFTL_TRANSACTION_TRACKER_SIZE(&nvma);
+  volatile uintptr_t tracker_size = LFTL_TRANSACTION_TRACKER_SIZE(&nvma);
   uint8_t guarded_tracker[tracker_size+16];
   memset(guarded_tracker,0,sizeof(guarded_tracker));
   uint8_t*const beyond = ((uint8_t*)nvma.area) + tracker_size*BITS_PER_BYTE*write_size;
@@ -1293,7 +1406,9 @@ void bad_config_test(){
   SANITY_CHECK();
 }
 
-//Same CRC core as ftl_internal.h: CRC-64/NVME, reflected, all ones in and out.
+//CRC-64/NVME, reflected, all ones in and out, bit by bit: the result of the
+//CRC core of ftl_internal.h, which goes through a table unless the library is
+//built with LFTL_CRC64_BITWISE.
 //An EWLF record's checksum covers its version (little endian) then its data.
 static uint64_t test_crc64(uint64_t crc, const uint8_t*buf, uintptr_t len){
   while(len--){
@@ -1529,21 +1644,21 @@ static void ewlf_log_states_test_core(ewlf_raw_state_t state){
   ewlf_reset(&ewlf);
   counted_writes = 0;
   counted_erases = 0;
-  lftl_ewlf_status_t status;
-  lftl_ewlf_status(&ewlf,&status);
-  EWLF_CHECK(status.pending == (pending ? LFTL_EWLF_REPAIR_BURY : LFTL_EWLF_REPAIR_NONE));
+  lftl_scan_status_t status;
+  lftl_scan_status(&ewlf,&status);
+  EWLF_CHECK(status.pending == (pending ? LFTL_REPAIR_BURY : LFTL_REPAIR_NONE));
   EWLF_CHECK(!status.stuck);
   EWLF_CHECK(status.version == version);
   EWLF_CHECK(status.remaining_cuts == l.n_certs);
   if(pending){
-    EXPECT_ERROR(LFTL_ERROR_EWLF_PENDING, lftl_read(&ewlf,buf,area,size));
-    EXPECT_ERROR(LFTL_ERROR_EWLF_PENDING, lftl_write(&ewlf,area,d1,size));
-    EXPECT_ERROR(LFTL_ERROR_EWLF_PENDING, lftl_erase_all(&ewlf));
+    EXPECT_ERROR(LFTL_ERROR_SCAN_PENDING, lftl_read(&ewlf,buf,area,size));
+    EXPECT_ERROR(LFTL_ERROR_SCAN_PENDING, lftl_write(&ewlf,area,d1,size));
+    EXPECT_ERROR(LFTL_ERROR_SCAN_PENDING, lftl_erase_all(&ewlf));
   }
-  lftl_ewlf_read_unproven(&ewlf,buf,area,size);
+  lftl_read_unproven(&ewlf,buf,area,size);
   EWLF_CHECK(0 == memcmp(buf,expected,size));
   EWLF_CHECK((0 == counted_writes) && (0 == counted_erases));
-  lftl_ewlf_complete_scan(&ewlf);
+  lftl_complete_scan(&ewlf);
   EWLF_CHECK(counted_writes == (pending ? 3u : 0u));
   EWLF_CHECK(0 == counted_erases);
   read_and_check(&ewlf,area,expected,size);
@@ -1551,8 +1666,8 @@ static void ewlf_log_states_test_core(ewlf_raw_state_t state){
   for(unsigned int boot=0;boot<2;boot++){
     ewlf_reset(&ewlf);
     counted_writes = 0;
-    lftl_ewlf_status(&ewlf,&status);
-    EWLF_CHECK(LFTL_EWLF_REPAIR_NONE == status.pending);
+    lftl_scan_status(&ewlf,&status);
+    EWLF_CHECK(LFTL_REPAIR_NONE == status.pending);
     EWLF_CHECK(status.version == version);
     read_and_check(&ewlf,area,expected,size);
     EWLF_CHECK(0 == counted_writes);
@@ -1610,9 +1725,9 @@ void ewlf_grid_test(){
   memset(d2+l.flag_size+l.entry_size,0,l.flag_size);
   ewlf_raw_update(&ewlf,d2,EWLF_RAW_DATA,false,false);
   ewlf_reset(&ewlf);
-  lftl_ewlf_status_t status;
-  lftl_ewlf_status(&ewlf,&status);
-  EWLF_CHECK(LFTL_EWLF_REPAIR_NONE == status.pending);
+  lftl_scan_status_t status;
+  lftl_scan_status(&ewlf,&status);
+  EWLF_CHECK(LFTL_REPAIR_NONE == status.pending);
   read_and_check(&ewlf,area,d1,data_size);
 
   //LF-12: an area without any valid entry, holding a whole pair in log unit
@@ -1628,9 +1743,9 @@ void ewlf_grid_test(){
   out_of_area_read = 0;
   uint8_t buf[data_size];
   EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&ewlf,buf,area,sizeof(buf)));
-  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_ewlf_complete_scan(&ewlf));
-  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_ewlf_status(&ewlf,&status));
-  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_ewlf_read_unproven(&ewlf,buf,area,sizeof(buf)));
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_complete_scan(&ewlf));
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_scan_status(&ewlf,&status));
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read_unproven(&ewlf,buf,area,sizeof(buf)));
   if(out_of_area_read) throw_exception(ERROR_VERIFICATION_FAIL);
   SANITY_CHECK();
 }
@@ -1748,10 +1863,10 @@ void ewlf_tearing_test(){
     write_calls_before_failure = stage;
     EXPECT_ERROR(LFTL_ERROR_LOW_LEVEL_WRITE | 1, lftl_write(&ewlf,area,d,sizeof(d)));
     write_calls_before_failure = -1;
-    lftl_ewlf_status_t status;
-    lftl_ewlf_status(&ewlf,&status);
-    EWLF_CHECK(status.pending == ((stage >= 4) ? LFTL_EWLF_REPAIR_BURY : LFTL_EWLF_REPAIR_NONE));
-    lftl_ewlf_complete_scan(&ewlf);
+    lftl_scan_status_t status;
+    lftl_scan_status(&ewlf,&status);
+    EWLF_CHECK(status.pending == ((stage >= 4) ? LFTL_REPAIR_BURY : LFTL_REPAIR_NONE));
+    lftl_complete_scan(&ewlf);
     read_and_check(&ewlf,area,(5 == stage) ? d : d_prev,sizeof(d));
     stateful_prng_fill(d,sizeof(d));
     lftl_write(&ewlf,area,d,sizeof(d));
@@ -2254,7 +2369,7 @@ void large_write_unit_test(){
       stateful_prng_fill(buf,sizeof(buf));
       ewlf_raw_update(&ctx32,buf,EWLF_RAW_ENTRY,false,false);
       ewlf_reset(&ctx32);
-      lftl_ewlf_complete_scan(&ctx32);
+      lftl_complete_scan(&ctx32);
       read_and_check(&ctx32,ctx32.area,buf,sizeof(buf));
     }
   }
@@ -2301,7 +2416,7 @@ void ewlf_many_units_test(){
   for(unsigned int i=0;i<n_writes;i++){
     stateful_prng_fill(d,data_size);
     //whether this write rolls over: no position is left in the current record's unit
-    lftl_ewlf_complete_scan(&ewlf);
+    lftl_complete_scan(&ewlf);
     unsigned int started = ewlf.ewlf.d_pos;
     for(unsigned int p=started+1;p<l.records_per_unit;p++){
       if(!raw_reads_erased(ewlf_raw_record(&ewlf,&l,ewlf.ewlf.d_unit,p),l.flag_size)) started = p;
@@ -2329,7 +2444,7 @@ void ewlf_many_units_test(){
       memcpy(expected,d,data_size);
     }
     ewlf_reset(&ewlf);
-    lftl_ewlf_complete_scan(&ewlf);
+    lftl_complete_scan(&ewlf);
     read_and_check(&ewlf,area,expected,data_size);
     if(live != ewlf.ewlf.live){
       live = ewlf.ewlf.live;
@@ -2344,6 +2459,7 @@ void ewlf_many_units_test(){
   format_func(&ewlfb);
   format_func(&nvmc);
   format_func(&nvmd);
+  format_func(&largea);
   SANITY_CHECK();
 }
 
@@ -2502,7 +2618,7 @@ void crc64_test(){
     if(1 == wrong){
       EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&ewlf,buf,area,sizeof(buf)));
     } else {
-      lftl_ewlf_complete_scan(&ewlf);
+      lftl_complete_scan(&ewlf);
       read_and_check(&ewlf,area,wrong ? d1 : d2,sizeof(d2));
     }
   }
@@ -2562,6 +2678,365 @@ void v010_compat_test(){
     randomized_test_write(&nvmd,nvm.data7,nvmd.data_size);
   }
   format_func(&nvmd); //resync nvm_ref with nvmd's pages
+  SANITY_CHECK();
+}
+
+
+//--- large areas (LARGE.md)
+
+#define LARGE_CHECK(cond) EWLF_CHECK(cond)
+
+//a large area over the scratch pages, as scratch_ewlf builds an EWLF one
+static void scratch_large(lftl_ctx_t*ctx, lftl_nvm_props_t*props, unsigned int n_units, uintptr_t data_size){
+  scratch_ewlf(ctx,props,n_units,data_size);
+  ctx->area_type = LFTL_AREA_TYPE_LARGE; //not registered, so set here
+}
+
+//the expected content of the area under test, kept by the tests beside it
+static uint8_t large_expected[LARGE_DATA_SIZE + LFTL_PAGE_SIZE];
+static uint8_t large_buf[LARGE_DATA_SIZE + LFTL_PAGE_SIZE];
+static uint8_t large_src[LARGE_DATA_SIZE + LFTL_PAGE_SIZE];
+
+//the whole data reads as expected
+static void large_check_whole(lftl_ctx_t*ctx){
+  lftl_read(ctx,large_buf,ctx->area,ctx->data_size);
+  LARGE_CHECK(0 == memcmp(large_buf,large_expected,ctx->data_size));
+}
+
+//Writes of every shape on the large area of the global sweep, which cuts
+//power at every write unit they read, program or erase, and checks after
+//each cut, at two boots, that the area reads the old data or the new:
+//within a chunk, across two chunks, the end of the last chunk, the whole
+//data, every chunk but not the whole data, from and into other areas, from
+//one chunk to another of the area, and an erase of all of it.
+void large_basic_test(){
+  DEBUG_PRINTLN(__func__);
+  uint8_t*const base = (uint8_t*)&nvm.largea_data;
+  const uintptr_t size = sizeof(nvm.largea_data);
+  const uintptr_t page = LFTL_PAGE_SIZE;
+  randomized_test_write(&largea,base+3,5);
+  randomized_test_write(&largea,base+page-7,20);
+  randomized_test_write(&largea,base+size-9,9);
+  randomized_test_write(&largea,base,size);
+  randomized_test_write(&largea,base+1,size-2);
+  //from a regular area into the large one
+  lftl_read(&nvma,large_src,&nvm.a_data,sizeof(nvm.a_data));
+  test_write2(&largea,base+page+5,&nvm.a_data,sizeof(nvm.a_data),large_src);
+  //from the large one, across two chunks, into a regular area and an EWLF area
+  lftl_read(&largea,large_src,base+page-3,sizeof(nvm.a_data));
+  test_write2(&nvma,&nvm.a_data,base+page-3,sizeof(nvm.a_data),large_src);
+  lftl_read(&largea,large_src,base+2*page-100,sizeof(nvm.ewlfa_data));
+  test_write2(&ewlfa,&nvm.ewlfa_data,base+2*page-100,sizeof(nvm.ewlfa_data),large_src);
+  //from one chunk to another of the same area
+  lftl_read(&largea,large_src,base+100,50);
+  test_write2(&largea,base+2*page+10,base+100,50,large_src);
+  erase_all_func(&largea);
+  memset(large_expected,0xFF,size);
+  large_check_whole(&largea);
+  SANITY_CHECK();
+}
+
+//Transactions on the large area of the global sweep: two chunks with an
+//untouched one between them, an abort, every chunk in one transaction, a
+//transaction that touches nothing. The newer data reads while the
+//transaction is open, the committed data after.
+void large_transaction_test(){
+  DEBUG_PRINTLN(__func__);
+  uint8_t*const base = (uint8_t*)&nvm.largea_data;
+  const uintptr_t size = sizeof(nvm.largea_data);
+  const uintptr_t page = LFTL_PAGE_SIZE;
+  const uintptr_t wu = sizeof(lftl_wu_t);
+  uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE_LARGE(sizeof(nvm.largea_data),LFTL_WU_SIZE,LFTL_PAGE_SIZE)];
+  LARGE_CHECK(sizeof(tracker) == LFTL_TRANSACTION_TRACKER_SIZE(&largea));
+  uint8_t d[3*sizeof(lftl_wu_t)];
+  uint8_t d2[7];
+  lftl_read(&largea,large_expected,base,size);
+  //chunks 0 and 2
+  stateful_prng_fill(d,sizeof(d));
+  stateful_prng_fill(d2,sizeof(d2));
+  transaction_start_func(&largea,tracker);
+  transaction_write_func(&largea,base+wu,d,sizeof(d));
+  transaction_write_any_func(&largea,base+2*page+3,d2,sizeof(d2));
+  read_newer_and_check(&largea,base+wu,d,sizeof(d));
+  read_newer_and_check(&largea,base+2*page+3,d2,sizeof(d2));
+  read_and_check(&largea,base+wu,large_expected+wu,sizeof(d));
+  transaction_commit_func(&largea);
+  memcpy(large_expected+wu,d,sizeof(d));
+  memcpy(large_expected+2*page+3,d2,sizeof(d2));
+  large_check_whole(&largea);
+  //an abort changes nothing
+  transaction_start_func(&largea,tracker);
+  transaction_write_any_func(&largea,base+page+1,d2,sizeof(d2));
+  transaction_abort_func(&largea);
+  large_check_whole(&largea);
+  //every chunk, in two writes: the checksum is computed afresh
+  stateful_prng_fill(large_src,size);
+  transaction_start_func(&largea,tracker);
+  transaction_write_any_func(&largea,base,large_src,page+5);
+  transaction_write_any_func(&largea,base+2*page-1,large_src+2*page-1,size-2*page+1);
+  transaction_commit_func(&largea);
+  memcpy(large_expected,large_src,page+5);
+  memcpy(large_expected+2*page-1,large_src+2*page-1,size-2*page+1);
+  large_check_whole(&largea);
+  largea.data = LFTL_INVALID_POINTER;
+  large_check_whole(&largea);
+  //nothing touched
+  transaction_start_func(&largea,tracker);
+  transaction_commit_func(&largea);
+  large_check_whole(&largea);
+  SANITY_CHECK();
+}
+
+//erases counted per unit of the scratch pages
+static unsigned int scratch_unit_erases[sizeof(((data_flash_t*)0)->scratch_pages)/LFTL_PAGE_SIZE];
+static uint8_t unit_counting_nvm_erase(void*base_address, unsigned int n_pages){
+  const uintptr_t first = ((uintptr_t)base_address - (uintptr_t)nvm.scratch_pages) / LFTL_PAGE_SIZE;
+  for(unsigned int i=0;i<n_pages;i++) if(first + i < SCRATCH_UNITS) scratch_unit_erases[first + i]++;
+  counted_erases++;
+  return nvm_erase(base_address,n_pages);
+}
+
+//The rules a large area adds: its configuration, the calls of the
+//checksum on other types and those of the scan on regular areas, the
+//registry, the room of the pool (a write or a transaction that needs more
+//units than are free changes nothing), the head going round the free units
+//(the erases spread evenly, a unit whose chunk never changes is never
+//erased), a scan that programs nothing, the misuses of a transaction, and
+//the checksum of the data following random writes and transactions.
+void large_api_test(){
+  DEBUG_PRINTLN(__func__);
+  const uintptr_t page = LFTL_PAGE_SIZE;
+  const uintptr_t wu = sizeof(lftl_wu_t);
+  lftl_nvm_props_t props;
+  lftl_ctx_t ctx;
+  uint8_t buf[DATA_SIZE];
+  uint8_t buf2[DATA_SIZE];
+  lftl_scan_status_t status;
+  //configuration
+  scratch_large(&ctx,&props,2+2,page+1); //2 chunks in a pool of 2 units
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_large(&ctx));
+  scratch_large(&ctx,&props,3+2,0);
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_large(&ctx));
+  scratch_large(&ctx,&props,3+2,page+1);
+  ctx.ewlf_certificates = (page / props.write_size) - 1; //no room for 2 regular pairs
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_register_area_large(&ctx));
+  //the calls of the checksum apply to large areas only
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_check_data(&nvma));
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_read_unchecked(&ewlfa,buf,ewlfa.area,4));
+  EXPECT_ERROR(LFTL_ERROR_BAD_CONFIG, lftl_repair_checksum(&nvmb));
+  //the calls of the scan apply to every type: nothing is pending on a regular area
+  nvma.data = LFTL_INVALID_POINTER;
+  lftl_scan_status(&nvma,&status);
+  LARGE_CHECK((LFTL_REPAIR_NONE == status.pending) && !status.stuck && (0xFFFF == status.remaining_cuts));
+  lftl_complete_scan(&nvma);
+  lftl_read_unproven(&nvma,buf,nvm.data0,sizeof(nvm.data0));
+  lftl_read(&nvma,buf2,nvm.data0,sizeof(nvm.data0));
+  LARGE_CHECK(0 == memcmp(buf,buf2,sizeof(nvm.data0)));
+  //registry
+  LARGE_CHECK(lftl_is_large(&largea) && !lftl_is_ewlf(&largea) && !lftl_is_large(&ewlfa) && !lftl_is_large(&nvma));
+  LARGE_CHECK(&largea == lftl_get_ctx(&nvm.data8[1]));
+  LARGE_CHECK(&largea == lftl_get_ctx_large(&nvm.data8[1]));
+  LARGE_CHECK(LFTL_INVALID_POINTER == lftl_get_ctx_large(&nvm.data0[0]));
+  LARGE_CHECK(LFTL_INVALID_POINTER == lftl_get_ctx_ewlf(&nvm.data8[0]));
+  LARGE_CHECK(LFTL_TRANSACTION_TRACKER_SIZE(&largea) == LFTL_TRANSACTION_TRACKER_SIZE_LL(sizeof(nvm.largea_data),LFTL_WU_SIZE) + 2*3);
+  //room: 2 chunks in a pool of 3 units
+  scratch_large(&ctx,&props,3+2,page+page/2);
+  props.erase = unit_counting_nvm_erase;
+  props.write = counting_nvm_write;
+  uint8_t*const area = (uint8_t*)ctx.area;
+  const uintptr_t size = ctx.data_size;
+  lftl_format(&ctx);
+  stateful_prng_fill(large_expected,size);
+  lftl_write(&ctx,area,large_expected,size);
+  large_check_whole(&ctx);
+  stateful_prng_fill(large_src,size);
+  counted_writes = 0;
+  counted_erases = 0;
+  EXPECT_ERROR(LFTL_ERROR_LARGE_NO_SPACE, lftl_write(&ctx,area,large_src,size));
+  LARGE_CHECK((0 == counted_writes) && (0 == counted_erases));
+  large_check_whole(&ctx);
+  lftl_write(&ctx,area+page,large_src,wu);
+  memcpy(large_expected+page,large_src,wu);
+  large_check_whole(&ctx);
+  {
+    uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&ctx)];
+    lftl_transaction_start(&ctx,tracker);
+    lftl_transaction_write(&ctx,area,large_src,wu);
+    EXPECT_ERROR(LFTL_ERROR_LARGE_NO_SPACE, lftl_transaction_write(&ctx,area+page,large_src,wu));
+    LARGE_CHECK(LFTL_INVALID_POINTER == ctx.transaction_tracker);
+    large_check_whole(&ctx);
+    //the units the aborted transaction took are free again
+    lftl_write(&ctx,area+page+wu,large_src,wu);
+    memcpy(large_expected+page+wu,large_src,wu);
+    large_check_whole(&ctx);
+  }
+  //the head goes round the free units: 2 chunks in a pool of 6, chunk 0
+  //never rewritten, chunk 1 written 4 rounds of the 5 other units
+  scratch_large(&ctx,&props,6+2,page+page/2);
+  props.erase = unit_counting_nvm_erase;
+  props.write = counting_nvm_write;
+  lftl_format(&ctx);
+  stateful_prng_fill(large_expected,size);
+  lftl_write(&ctx,area,large_expected,size);
+  memset(scratch_unit_erases,0,sizeof(scratch_unit_erases));
+  for(unsigned int k=0;k<4*5;k++){
+    stateful_prng_fill(large_src,wu);
+    lftl_write(&ctx,area+page+wu*(k%4),large_src,wu);
+    memcpy(large_expected+page+wu*(k%4),large_src,wu);
+  }
+  large_check_whole(&ctx);
+  LARGE_CHECK(0 == scratch_unit_erases[0]);
+  for(unsigned int u=1;u<6;u++) LARGE_CHECK(4 == scratch_unit_erases[u]);
+  //a scan, and the lazy check of the data, program nothing
+  ctx.data = LFTL_INVALID_POINTER;
+  counted_writes = 0;
+  counted_erases = 0;
+  lftl_scan_status(&ctx,&status);
+  LARGE_CHECK((LFTL_REPAIR_NONE == status.pending) && !status.stuck && (status.remaining_cuts > 0));
+  large_check_whole(&ctx);
+  LARGE_CHECK((0 == counted_writes) && (0 == counted_erases));
+  //misuses of a transaction: each error aborts it
+  {
+    uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&ctx)];
+    lftl_transaction_start(&ctx,tracker);
+    EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_transaction_start(&ctx,tracker));
+    LARGE_CHECK(LFTL_INVALID_POINTER == ctx.transaction_tracker);
+    lftl_transaction_start(&ctx,tracker);
+    EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_basic_write(&ctx,area,large_src,wu));
+    lftl_transaction_start(&ctx,tracker);
+    EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_erase_all(&ctx));
+    lftl_transaction_start(&ctx,tracker);
+    EXPECT_ERROR(LFTL_ERROR_TRANSACTION_ONGOING, lftl_repair_checksum(&ctx));
+    lftl_transaction_start(&ctx,tracker);
+    lftl_transaction_write(&ctx,area,large_src,wu);
+    EXPECT_ERROR(LFTL_ERROR_TRANSACTION_OVERWRITE, lftl_transaction_write_any(&ctx,area+1,large_src,1));
+    LARGE_CHECK(LFTL_INVALID_POINTER == ctx.transaction_tracker);
+    EXPECT_ERROR(LFTL_ERROR_NO_TRANSACTION, lftl_transaction_commit(&ctx));
+    EXPECT_ERROR(LFTL_ERROR_BASE_MISALIGNED, (lftl_transaction_start(&ctx,tracker), lftl_transaction_write(&ctx,area+1,large_src,wu)));
+    large_check_whole(&ctx);
+  }
+  //the checksum of the data follows random writes and transactions, of
+  //chunks next to each other or not: 4 chunks, the last in part, in a pool
+  //of 8 units. The area is checked after each of them, now and then after
+  //a reset
+  scratch_large(&ctx,&props,8+2,3*page+page/2);
+  const uintptr_t size4 = ctx.data_size;
+  lftl_format(&ctx);
+  memset(large_expected,0xFF,size4);
+  xs_prng_set_seed(0x1A26E);
+  for(unsigned int it=0;it<64;it++){
+    const uint32_t r = xs_prng_get();
+    if(0 == (r % 16)){
+      lftl_erase_all(&ctx);
+      memset(large_expected,0xFF,size4);
+    } else if(r & 1){
+      const uintptr_t offset = xs_prng_get() % size4;
+      const uintptr_t len = 1 + xs_prng_get() % ((r & 2) ? (size4 - offset) : (size4 - offset < 64 ? size4 - offset : 64));
+      xs_prng_fill(large_src,len);
+      lftl_write_any(&ctx,area+offset,large_src,len);
+      memcpy(large_expected+offset,large_src,len);
+    } else {
+      uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&ctx)];
+      lftl_transaction_start(&ctx,tracker);
+      //a few bytes in some of the chunks, each chunk once: they share no write unit
+      for(unsigned int i=0;i<4;i++){
+        if(0 == ((xs_prng_get() >> i) & 1)) continue;
+        const uintptr_t chunk_len = (i < 3) ? page : (size4 - 3*page);
+        const uintptr_t offset = i*page + xs_prng_get() % chunk_len;
+        const uintptr_t len = 1 + xs_prng_get() % ((i*page + chunk_len - offset) < 32 ? (i*page + chunk_len - offset) : 32);
+        xs_prng_fill(large_src,len);
+        lftl_transaction_write_any(&ctx,area+offset,large_src,len);
+        memcpy(large_expected+offset,large_src,len);
+      }
+      if(r & 4){
+        lftl_transaction_commit(&ctx);
+      } else {
+        lftl_transaction_abort(&ctx);
+        lftl_read_unchecked(&ctx,large_expected,area,size4); //the committed data stays
+      }
+    }
+    if(0 == (it % 5)) ctx.data = LFTL_INVALID_POINTER;
+    LARGE_CHECK(lftl_check_data(&ctx));
+    lftl_read(&ctx,large_buf,area,size4);
+    LARGE_CHECK(0 == memcmp(large_buf,large_expected,size4));
+  }
+  SANITY_CHECK();
+}
+
+//The checksum of the data: a chunk the flash loses after its write (its
+//unit erased behind the library's back, which any flash can do, here by
+//the raw callback) is found, lazily, at the first use of the data after a
+//reset; every call that uses the data then raises LFTL_ERROR_DATA_CHECKSUM,
+//until a write of the whole data, an erase of all of it, or the repair of
+//the checksum; the unchecked read reads it all the same; a repair is one
+//commit, and none when the checksum matches.
+void large_checksum_test(){
+  DEBUG_PRINTLN(__func__);
+  const uintptr_t page = LFTL_PAGE_SIZE;
+  lftl_nvm_props_t props;
+  lftl_ctx_t ctx;
+  uint8_t buf[16];
+  scratch_large(&ctx,&props,4+2,page+page/2);
+  props.write = counting_nvm_write;
+  uint8_t*const area = (uint8_t*)ctx.area;
+  const uintptr_t size = ctx.data_size;
+  lftl_format(&ctx);
+  stateful_prng_fill(large_expected,size);
+  lftl_write(&ctx,area,large_expected,size);
+  large_check_whole(&ctx);
+  //chunk 1 is in the unit filled last
+  raw_erase(area + ctx.ewlf.head*page,1);
+  memcpy(large_src,large_expected,size);
+  memset(large_src+page,0xFF,size-page); //what the area reads now
+  //a reset, then any use of the data
+  ctx.data = LFTL_INVALID_POINTER;
+  EXPECT_ERROR(LFTL_ERROR_DATA_CHECKSUM, lftl_read(&ctx,buf,area,sizeof(buf)));
+  EXPECT_ERROR(LFTL_ERROR_DATA_CHECKSUM, lftl_read(&ctx,buf,area,sizeof(buf)));
+  LARGE_CHECK(!lftl_check_data(&ctx));
+  lftl_read_unchecked(&ctx,large_buf,area,size);
+  LARGE_CHECK(0 == memcmp(large_buf,large_src,size));
+  EXPECT_ERROR(LFTL_ERROR_DATA_CHECKSUM, lftl_write(&ctx,area+1,buf,4));
+  {
+    uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&ctx)];
+    EXPECT_ERROR(LFTL_ERROR_DATA_CHECKSUM, lftl_transaction_start(&ctx,tracker));
+  }
+  EXPECT_ERROR(LFTL_ERROR_DATA_CHECKSUM, lftl_read_unproven(&ctx,buf,area,4));
+  ctx.data = LFTL_INVALID_POINTER;
+  EXPECT_ERROR(LFTL_ERROR_DATA_CHECKSUM, lftl_read(&ctx,buf,area,sizeof(buf)));
+  //the repair: one commit, the data as it reads
+  lftl_repair_checksum(&ctx);
+  LARGE_CHECK(lftl_check_data(&ctx));
+  memcpy(large_buf,large_expected,size); //what was written
+  memcpy(large_expected,large_src,size);
+  large_check_whole(&ctx);
+  ctx.data = LFTL_INVALID_POINTER;
+  large_check_whole(&ctx);
+  //none when it matches
+  counted_writes = 0;
+  lftl_repair_checksum(&ctx);
+  LARGE_CHECK(0 == counted_writes);
+  //the chunk written again by an ordinary write
+  memcpy(large_expected,large_buf,size);
+  lftl_write(&ctx,area+page,large_expected+page,size-page);
+  ctx.data = LFTL_INVALID_POINTER;
+  large_check_whole(&ctx);
+  //lost again, then a write of the whole data needs no check and makes the area sound
+  raw_erase(area + ctx.ewlf.head*page,1);
+  ctx.data = LFTL_INVALID_POINTER;
+  stateful_prng_fill(large_expected,size);
+  lftl_write(&ctx,area,large_expected,size);
+  large_check_whole(&ctx);
+  ctx.data = LFTL_INVALID_POINTER;
+  LARGE_CHECK(lftl_check_data(&ctx));
+  //lost again, then an erase of all of it
+  raw_erase(area + ctx.ewlf.head*page,1);
+  ctx.data = LFTL_INVALID_POINTER;
+  LARGE_CHECK(!lftl_check_data(&ctx));
+  lftl_erase_all(&ctx);
+  memset(large_expected,0xFF,size);
+  large_check_whole(&ctx);
+  ctx.data = LFTL_INVALID_POINTER;
+  LARGE_CHECK(lftl_check_data(&ctx));
   SANITY_CHECK();
 }
 
@@ -2722,18 +3197,18 @@ static void ewlf_scratch_cut_write(ewlf_scratch_t*s, const uint8_t*d, unsigned i
   tearing_sim_clear_call_target();
 }
 //a boot: reset, the scan, and what it must find pending
-static void ewlf_scratch_boot(ewlf_scratch_t*s, lftl_ewlf_repair_t pending, lftl_ewlf_status_t*status){
+static void ewlf_scratch_boot(ewlf_scratch_t*s, lftl_repair_t pending, lftl_scan_status_t*status){
   tearing_sim_weak_new_boot();
   ewlf_reset(&s->ctx);
   counted_writes = 0;
   counted_erases = 0;
-  lftl_ewlf_status(&s->ctx,status);
+  lftl_scan_status(&s->ctx,status);
   EWLF_CHECK((0 == counted_writes) && (0 == counted_erases));
   EWLF_CHECK(status->pending == pending);
 }
 //the rest of the boot: the repair, then a read that must return `expected`
 static void ewlf_scratch_show(ewlf_scratch_t*s, const uint8_t*expected){
-  lftl_ewlf_complete_scan(&s->ctx);
+  lftl_complete_scan(&s->ctx);
   read_and_check(&s->ctx,s->area,expected,s->ctx.data_size);
 }
 //writes until the live log unit has no regular position left: the next write switches
@@ -2753,7 +3228,7 @@ static void ewlf_weak_confirm_test(ewlf_scratch_t*s){
   DEBUG_PRINTLN(__func__);
   const uintptr_t size = s->ctx.data_size;
   uint8_t d1[size], d2[size], buf[size];
-  lftl_ewlf_status_t status;
+  lftl_scan_status_t status;
   lftl_format(&s->ctx);
   stateful_prng_fill(d1,size);
   lftl_write(&s->ctx,s->area,d1,size);
@@ -2762,21 +3237,21 @@ static void ewlf_weak_confirm_test(ewlf_scratch_t*s){
   ewlf_scratch_cut_write(s,d2,EWLF_CALL_CONFIRM);
   EWLF_CHECK(tearing_sim_is_weak(confirm,s->l.flag_size));
   weak_script_set(confirm,WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d2);
   EWLF_CHECK(0 == counted_writes);
   weak_script_set(confirm,WEAK_ERASED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_BURY,&status);
-  EXPECT_ERROR(LFTL_ERROR_EWLF_PENDING, lftl_read(&s->ctx,buf,s->area,size));
-  lftl_ewlf_read_unproven(&s->ctx,buf,s->area,size);
+  ewlf_scratch_boot(s,LFTL_REPAIR_BURY,&status);
+  EXPECT_ERROR(LFTL_ERROR_SCAN_PENDING, lftl_read(&s->ctx,buf,s->area,size));
+  lftl_read_unproven(&s->ctx,buf,s->area,size);
   EWLF_CHECK(0 == memcmp(buf,d2,size));
   ewlf_scratch_show(s,d2);
   EWLF_CHECK(3 == counted_writes);
   //the copy is the top now: whatever the weak confirm reads
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d2);
   weak_script_set(confirm,WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d2);
   weak_script_clear();
 }
@@ -2790,7 +3265,7 @@ static void ewlf_weak_entry_test(ewlf_scratch_t*s, bool valid_first){
   DEBUG_PRINTLN(__func__);
   const uintptr_t size = s->ctx.data_size;
   uint8_t d1[size], d2[size], d3[size];
-  lftl_ewlf_status_t status;
+  lftl_scan_status_t status;
   lftl_format(&s->ctx);
   stateful_prng_fill(d1,size);
   lftl_write(&s->ctx,s->area,d1,size);
@@ -2801,19 +3276,19 @@ static void ewlf_weak_entry_test(ewlf_scratch_t*s, bool valid_first){
   ewlf_scratch_cut_write(s,d2,EWLF_CALL_ENTRY);
   EWLF_CHECK(tearing_sim_is_weak(weak,s->l.flag_size));
   weak_script_set(weak,valid_first ? WEAK_INTENDED : WEAK_ERASED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_BURY,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_BURY,&status);
   const uint8_t*const expected = valid_first ? d2 : d1;
   ewlf_scratch_show(s,expected);
   weak_script_set(weak,valid_first ? WEAK_ERASED : WEAK_INTENDED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,expected);
   weak_script_set(weak,WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,expected);
   stateful_prng_fill(d3,size);
   lftl_write(&s->ctx,s->area,d3,size);
   weak_script_set(weak,WEAK_INTENDED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d3);
   weak_script_clear();
 }
@@ -2828,45 +3303,45 @@ static void ewlf_stuck_test(ewlf_scratch_t*s){
   DEBUG_PRINTLN(__func__);
   const uintptr_t size = s->ctx.data_size;
   uint8_t d[size], d2[size];
-  lftl_ewlf_status_t status;
+  lftl_scan_status_t status;
   EWLF_CHECK(2 == s->l.n_certs);
   lftl_format(&s->ctx);
   memset(d,0xFF,size);
   ewlf_scratch_fill_log(s,d);
   const unsigned int live = s->ctx.ewlf.live;
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   EWLF_CHECK(2 == status.remaining_cuts);
   //first attempt: the cut in the certificate, which then reads programmed
   stateful_prng_fill(d2,size);
   ewlf_scratch_cut_write(s,d2,EWLF_CALL_SWITCH_CERT);
   weak_script_set(ewlf_raw_cert(&s->ctx,&s->l,live,0),WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   EWLF_CHECK(1 == status.remaining_cuts);
   ewlf_scratch_show(s,d);
   //second attempt: the other log unit is erased again, the last certificate
   //returns, the cut is in the carry's marker, which then reads erased
   ewlf_scratch_cut_write(s,d2,EWLF_CALL_SWITCH_MARKER);
   weak_script_set(ewlf_raw_pair(&s->ctx,&s->l,1-live,0),WEAK_ERASED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   EWLF_CHECK(0 == status.remaining_cuts);
   EWLF_CHECK(!status.stuck);
   ewlf_scratch_show(s,d);
   //third attempt: refused, nothing erased, the record it wrote is all it cost
   const unsigned int data_erases = ewlf_scratch_rolls_over(s) ? 1 : 0;
   counted_erases = 0;
-  EXPECT_ERROR(LFTL_ERROR_EWLF_STUCK, lftl_write(&s->ctx,s->area,d2,size));
+  EXPECT_ERROR(LFTL_ERROR_STUCK, lftl_write(&s->ctx,s->area,d2,size));
   EWLF_CHECK(data_erases == counted_erases);
-  lftl_ewlf_status(&s->ctx,&status);
-  EWLF_CHECK(status.stuck && (0 == status.remaining_cuts) && (LFTL_EWLF_REPAIR_NONE == status.pending));
+  lftl_scan_status(&s->ctx,&status);
+  EWLF_CHECK(status.stuck && (0 == status.remaining_cuts) && (LFTL_REPAIR_NONE == status.pending));
   read_and_check(&s->ctx,s->area,d,size);
-  EXPECT_ERROR(LFTL_ERROR_EWLF_STUCK, lftl_write(&s->ctx,s->area,d2,size));
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  EXPECT_ERROR(LFTL_ERROR_STUCK, lftl_write(&s->ctx,s->area,d2,size));
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   EWLF_CHECK(0 == status.remaining_cuts);
   ewlf_scratch_show(s,d);
   weak_script_clear();
   lftl_format(&s->ctx);
   lftl_write(&s->ctx,s->area,d2,size);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   EWLF_CHECK(2 == status.remaining_cuts);
   ewlf_scratch_show(s,d2);
 }
@@ -2880,7 +3355,7 @@ static void ewlf_carry_test(ewlf_scratch_t*s){
   DEBUG_PRINTLN(__func__);
   const uintptr_t size = s->ctx.data_size;
   uint8_t d[size], d2[size];
-  lftl_ewlf_status_t status;
+  lftl_scan_status_t status;
   lftl_format(&s->ctx);
   memset(d,0xFF,size);
   ewlf_scratch_fill_log(s,d);
@@ -2888,17 +3363,17 @@ static void ewlf_carry_test(ewlf_scratch_t*s){
   stateful_prng_fill(d2,size);
   ewlf_scratch_cut_write(s,d2,EWLF_CALL_SWITCH_MARKER);
   weak_script_set(ewlf_raw_pair(&s->ctx,&s->l,1-live,0),WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_CARRY,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_CARRY,&status);
   EWLF_CHECK(status.remaining_cuts == s->l.n_positions - 1);
   ewlf_scratch_show(s,d);
   EWLF_CHECK((3 == counted_writes) && (0 == counted_erases));
   EWLF_CHECK(s->ctx.ewlf.live == 1-live);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   EWLF_CHECK(status.remaining_cuts == s->l.n_certs);
   EWLF_CHECK(s->ctx.ewlf.live == 1-live);
   ewlf_scratch_show(s,d);
   lftl_write(&s->ctx,s->area,d2,size);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d2);
   weak_script_clear();
 }
@@ -2914,7 +3389,7 @@ static void ewlf_no_resurrection_test(ewlf_scratch_t*s){
   DEBUG_PRINTLN(__func__);
   const uintptr_t size = s->ctx.data_size;
   uint8_t d[size], d2[size];
-  lftl_ewlf_status_t status;
+  lftl_scan_status_t status;
   lftl_format(&s->ctx);
   memset(d,0xFF,size);
   ewlf_scratch_fill_log(s,d);
@@ -2924,7 +3399,7 @@ static void ewlf_no_resurrection_test(ewlf_scratch_t*s){
   stateful_prng_fill(d2,size);
   ewlf_scratch_cut_write(s,d2,EWLF_CALL_SWITCH_CERT);
   weak_script_set(cert0,WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d);
   const unsigned int data_erases = ewlf_scratch_rolls_over(s) ? 1 : 0;
   counted_erases = 0;
@@ -2933,14 +3408,14 @@ static void ewlf_no_resurrection_test(ewlf_scratch_t*s){
   EWLF_CHECK(tearing_sim_is_weak(weak_entry,s->l.flag_size));
   weak_script_set(cert0,WEAK_ERASED,0);
   weak_script_set(weak_entry,WEAK_ERASED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_CARRY,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_CARRY,&status);
   ewlf_scratch_show(s,d);
   EWLF_CHECK(0 == counted_erases);
   weak_script_set(weak_entry,WEAK_INTENDED,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d);
   weak_script_set(cert0,WEAK_ZEROS,0);
-  ewlf_scratch_boot(s,LFTL_EWLF_REPAIR_NONE,&status);
+  ewlf_scratch_boot(s,LFTL_REPAIR_NONE,&status);
   ewlf_scratch_show(s,d);
   weak_script_clear();
 }
@@ -3024,7 +3499,7 @@ static void ewlf_weak_stress_core(unsigned int certificates, unsigned int n_regu
     //with the log nearly full, around the programs of a switch
     if(0 == (r & 1)) tearing_sim_set_call_target(prefill ? (3 + (r >> 1) % 4) : ((r >> 1) % 10),(r >> 5) & 1);
     volatile int outcome;
-    MAYBE_CUT(outcome,LFTL_ERROR_EWLF_STUCK,lftl_write(&s.ctx,s.area,d,size));
+    MAYBE_CUT(outcome,LFTL_ERROR_STUCK,lftl_write(&s.ctx,s.area,d,size));
     tearing_sim_clear_call_target();
     if(0 == outcome){
       last_complete = current = seq;
@@ -3046,20 +3521,20 @@ static void ewlf_weak_stress_core(unsigned int certificates, unsigned int n_regu
       tearing_sim_weak_reseed(((uint64_t)seed << 32) | ((uint64_t)it << 8) | boot);
       tearing_sim_weak_new_boot();
       ewlf_reset(&s.ctx);
-      lftl_ewlf_status_t status;
-      lftl_ewlf_status(&s.ctx,&status);
+      lftl_scan_status_t status;
+      lftl_scan_status(&s.ctx,&status);
       uint8_t unproven[size];
-      lftl_ewlf_read_unproven(&s.ctx,unproven,s.area,size);
+      lftl_read_unproven(&s.ctx,unproven,s.area,size);
       //the last boot is not cut: the next write needs the area
       if((boot < n_boots) && (0 == (b & 3))) tearing_sim_set_call_target((b >> 2) % 8,(b >> 5) & 1);
-      MAYBE_CUT(outcome,LFTL_ERROR_EWLF_STUCK,lftl_ewlf_complete_scan(&s.ctx));
+      MAYBE_CUT(outcome,LFTL_ERROR_STUCK,lftl_complete_scan(&s.ctx));
       tearing_sim_clear_call_target();
       if(1 == outcome) continue;
       const uint8_t*shown_data = unproven;
       uint8_t buf[size];
       if(2 == outcome){
         //stuck at the scan: nothing is shown but by the unproven read
-        EWLF_CHECK(status.stuck || (LFTL_EWLF_REPAIR_NONE != status.pending));
+        EWLF_CHECK(status.stuck || (LFTL_REPAIR_NONE != status.pending));
         n_stuck++;
         format = true;
       } else {
@@ -3120,6 +3595,261 @@ void ewlf_weak_stress_test(){
 #endif
 
 #ifdef HAS_TEARING_SIMULATION
+//--- large areas under weak words without T3, with cuts in a row
+
+typedef struct {
+  lftl_ctx_t ctx;
+  lftl_nvm_props_t props;
+  uint8_t*area;
+  bool model_was_on;
+} large_scratch_t;
+static void large_scratch_init(large_scratch_t*s, unsigned int n_units, uintptr_t data_size, unsigned int certificates){
+  scratch_large(&s->ctx,&s->props,n_units,data_size);
+  s->props.erase = counting_nvm_erase;
+  s->props.write = counting_nvm_write;
+  s->ctx.ewlf_certificates = certificates;
+  s->area = (uint8_t*)s->ctx.area;
+  s->model_was_on = nvm_weak_model;
+  nvm_weak_model = 1;
+  tearing_sim_weak_scope_add(s->ctx.area,s->ctx.area_size);
+  tearing_sim_weak_clear_range(s->ctx.area,s->ctx.area_size);
+  nvm_weak_override = 0; //the model draws the readings
+  weak_script_clear();
+  tearing_sim_weak_reseed(0x1A26E);
+  counted_erases = 0;
+  counted_writes = 0;
+}
+static void large_scratch_end(large_scratch_t*s){
+  tearing_sim_weak_clear_range(s->ctx.area,s->ctx.area_size);
+  tearing_sim_weak_scope_pop();
+  nvm_weak_model = s->model_was_on;
+  tearing_sim_clear_call_target();
+}
+
+//one operation of the stress, from parameters drawn before it: a write, an
+//erase of all the data, or a transaction of one or two writes, each in its
+//own chunk, committed
+#define LARGE_STRESS_DATA (LFTL_PAGE_SIZE + LFTL_PAGE_SIZE/2)
+typedef struct {
+  unsigned int kind;
+  unsigned int n;
+  uintptr_t off[2];
+  uintptr_t len[2];
+} large_op_t;
+static uint8_t large_tracker[LFTL_TRANSACTION_TRACKER_SIZE_LARGE(LARGE_STRESS_DATA,LFTL_WU_SIZE,LFTL_PAGE_SIZE)];
+static void large_stress_apply(large_scratch_t*s, const large_op_t*op){
+  if(0 == op->kind){
+    lftl_write_any(&s->ctx,s->area+op->off[0],large_src,op->len[0]);
+  } else if(1 == op->kind){
+    lftl_erase_all(&s->ctx);
+  } else {
+    lftl_transaction_start(&s->ctx,large_tracker);
+    for(unsigned int i=0;i<op->n;i++) lftl_transaction_write_any(&s->ctx,s->area+op->off[i],large_src+op->off[i],op->len[i]);
+    lftl_transaction_commit(&s->ctx);
+  }
+}
+
+//Random operations cut at random programs or erases, boots with random weak
+//readings and a cut at a random program of the scan's repair, as
+//ewlf_weak_stress_core does for EWLF areas: after every boot the data read
+//is one of the last operations' results, never older than one already
+//shown, never older than the last operation that completed, and never an
+//operation that was cut and that a boot has since shown an older result
+//than. The data always matches its checksum, the scan programs nothing,
+//and a stuck area still shows what it showed. 2 chunks, the last in part,
+//over the scratch pages, on two geometries: 4 regular pairs per log unit,
+//so that the log switches every few operations, and 1 certificate behind
+//the default number of pairs, kept nearly full, where a switch runs out of
+//certificates after one cut.
+#define LARGE_STRESS_HISTORY 32
+static uint8_t large_history[LARGE_STRESS_HISTORY][LARGE_STRESS_DATA];
+static void large_weak_stress_core(unsigned int n_pool, unsigned int certificates_arg, unsigned int n_regular, bool prefill, unsigned int n_iterations, uint32_t seed){
+  large_scratch_t s;
+  //copies that live across the setjmp of MAYBE_CUT
+  volatile unsigned int certificates = certificates_arg;
+  large_scratch_init(&s,n_pool+2,LARGE_STRESS_DATA,certificates);
+  const uintptr_t size = s.ctx.data_size;
+  const uintptr_t page = LFTL_PAGE_SIZE;
+  const uintptr_t pair_size = 2*s.props.write_size + LFTL_ROUND_UP(2*2+10,s.props.write_size) + LFTL_ROUND_UP(16,s.props.write_size);
+  const unsigned int n_certs = certificates ? certificates : LFTL_EWLF_CERTIFICATES;
+  LARGE_CHECK((page - n_certs*s.props.write_size)/pair_size - LFTL_EWLF_RESERVED_PAIRS == n_regular);
+  #define H(k) large_history[(k) % LARGE_STRESS_HISTORY]
+  unsigned int seq = 0;              //the last operation that changed the data, H(seq)
+  unsigned int last_complete = 0;    //the last one that completed
+  unsigned int last_shown = 0;       //the last one a boot showed
+  unsigned int seq_at_last_show = 0; //the last one when it was shown
+  unsigned int current = 0;          //the one the area shows now
+  unsigned int n_stuck = 0;
+  unsigned int n_switches = 0;
+  unsigned int n_cut = 0;
+  lftl_scan_status_t status;
+  xs_prng_set_seed(seed);
+  bool format = true;
+  for(volatile unsigned int it=0;it<n_iterations;it++){
+    if(format){
+      format = false;
+      lftl_format(&s.ctx);
+      seq++;
+      memset(H(seq),0xFF,size); //a formatted area reads erased
+      last_complete = last_shown = seq_at_last_show = current = seq;
+    }
+    if(prefill){
+      //uncut writes until the live log unit is nearly full
+      while((unsigned int)(s.ctx.ewlf.unit[s.ctx.ewlf.live].started + 4) < n_regular){
+        seq++;
+        memcpy(H(seq),H(current),size);
+        const uintptr_t off = xs_prng_get() % (size - 8);
+        xs_prng_fill(large_src,8);
+        memcpy(H(seq)+off,large_src,8);
+        lftl_write_any(&s.ctx,s.area+off,large_src,8);
+        last_complete = current = seq;
+      }
+    }
+    //the operation and its result
+    large_op_t op;
+    const uint32_t r = xs_prng_get();
+    op.kind = (0 == (r % 16)) ? 1 : ((r & 2) ? 2 : 0);
+    //with the log nearly full: erases of all the data and small writes, so
+    //that the cuts can be aimed at the programs of the commit and its switch
+    if(prefill) op.kind = (r & 2) ? 1 : 0;
+    op.n = 0;
+    seq++;
+    uint8_t*const d = H(seq);
+    memcpy(d,H(current),size);
+    xs_prng_fill(large_src,size);
+    if(0 == op.kind){
+      op.off[0] = xs_prng_get() % size;
+      op.len[0] = 1 + xs_prng_get() % (((r & 4) && !prefill) ? (size - op.off[0]) : ((size - op.off[0]) < 40 ? (size - op.off[0]) : 40));
+      memcpy(d+op.off[0],large_src,op.len[0]);
+    } else if(1 == op.kind){
+      memset(d,0xFF,size);
+    } else {
+      for(unsigned int i=0;i<2;i++){
+        //each chunk with probability 1/2, at least one of them
+        const bool pick = ((1 == i) && (0 == op.n)) || (0 != ((r >> (3+i)) & 1));
+        if(!pick) continue;
+        const uintptr_t chunk_len = (0 == i) ? page : (size - page);
+        const uintptr_t off = i*page + xs_prng_get() % chunk_len;
+        const uintptr_t rest = i*page + chunk_len - off;
+        op.off[op.n] = off;
+        op.len[op.n] = 1 + xs_prng_get() % (rest < 40 ? rest : 40);
+        memcpy(d+off,large_src+off,op.len[op.n]);
+        op.n++;
+      }
+    }
+    //cut at a random call with probability 1/2; with the log nearly full,
+    //at a call of the commit: after the erase and the programs of each chunk
+    //written, one per block of the library (LARGE_BLOCK)
+    unsigned int before_pair = 0;
+    if(prefill && (0 == op.kind)){
+      const uint32_t ws = s.props.write_size;
+      for(unsigned int i=op.off[0]/page;i<=(op.off[0]+op.len[0]-1)/page;i++){
+        const uintptr_t phy = (0 == i) ? page : LFTL_ROUND_UP(size - page,ws);
+        before_pair += 1 + LFTL_DIV_CEIL(phy,2*LFTL_WU_MAX_SIZE);
+      }
+    }
+    const unsigned int live = s.ctx.ewlf.live;
+    if(0 == ((r >> 6) & 1)) tearing_sim_set_call_target(prefill ? (before_pair + (r >> 7) % 6) : ((r >> 7) % 48),(r >> 13) & 1);
+    volatile int outcome;
+    MAYBE_CUT(outcome,LFTL_ERROR_STUCK,large_stress_apply(&s,&op));
+    tearing_sim_clear_call_target();
+    if(0 == outcome){
+      last_complete = current = seq;
+      if(live != s.ctx.ewlf.live) n_switches++;
+    }
+    if(1 == outcome) n_cut++;
+    if(2 == outcome){
+      //stuck at an operation: the area still shows what it showed
+      s.ctx.transaction_tracker = LFTL_INVALID_POINTER;
+      lftl_read(&s.ctx,large_buf,s.area,size);
+      LARGE_CHECK(0 == memcmp(large_buf,H(current),size));
+      n_stuck++;
+      format = true;
+      continue;
+    }
+    //boots, each with its own weak readings, some with a cut in the repair
+    const unsigned int n_boots = 1 + (xs_prng_get() % 3);
+    for(volatile unsigned int boot=0;boot<=n_boots;boot++){
+      const uint32_t b = xs_prng_get();
+      tearing_sim_weak_reseed(((uint64_t)seed << 32) | ((uint64_t)it << 8) | boot);
+      tearing_sim_weak_new_boot();
+      s.ctx.data = LFTL_INVALID_POINTER;
+      s.ctx.transaction_tracker = LFTL_INVALID_POINTER;
+      counted_writes = 0;
+      counted_erases = 0;
+      lftl_scan_status(&s.ctx,&status);
+      //the data the scan chose, checked against its checksum: a mismatch is an error
+      lftl_read_unproven(&s.ctx,large_buf,s.area,size);
+      LARGE_CHECK((0 == counted_writes) && (0 == counted_erases));
+      //the last boot is not cut: the next operation needs the area
+      if((boot < n_boots) && (0 == (b & 3))) tearing_sim_set_call_target((b >> 2) % 8,(b >> 5) & 1);
+      MAYBE_CUT(outcome,LFTL_ERROR_STUCK,lftl_complete_scan(&s.ctx));
+      tearing_sim_clear_call_target();
+      if(1 == outcome) continue;
+      if(2 == outcome){
+        //stuck at the scan: nothing is shown but by the unproven read
+        LARGE_CHECK(status.stuck || (LFTL_REPAIR_NONE != status.pending));
+        n_stuck++;
+        format = true;
+      } else {
+        lftl_read(&s.ctx,large_expected,s.area,size);
+        LARGE_CHECK(0 == memcmp(large_expected,large_buf,size));
+        LARGE_CHECK(lftl_check_data(&s.ctx));
+      }
+      unsigned int shown = 0;
+      bool found = false;
+      for(unsigned int back=0;(back<LARGE_STRESS_HISTORY) && (back<=seq);back++){
+        if(0 == memcmp(large_buf,H(seq-back),size)){
+          shown = seq-back;
+          found = true;
+          break;
+        }
+      }
+      if(!found){
+        PRINTF("ERROR: iteration %u boot %u: the data read is none of the last results\n",it,boot);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      if(format) break; //the unproven read of a stuck area is one of the last results, no more is promised
+      if(shown < last_shown){
+        PRINTF("ERROR: iteration %u boot %u: rollback, result %u shown after result %u\n",it,boot,shown,last_shown);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      if(shown < last_complete){
+        PRINTF("ERROR: iteration %u boot %u: result %u shown, operation %u had completed\n",it,boot,shown,last_complete);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      if((shown != last_shown) && (shown <= seq_at_last_show)){
+        PRINTF("ERROR: iteration %u boot %u: resurrection, result %u shown after a boot showed result %u\n",it,boot,shown,last_shown);
+        throw_exception(ERROR_VERIFICATION_FAIL);
+      }
+      last_shown = current = shown;
+      seq_at_last_show = seq;
+    }
+  }
+  #undef H
+  PRINTLN("Large weak stress, %u pool units, %u certificates, %u regular pairs: %u iterations, %u cut, %u log switches, %u times stuck",n_pool,n_certs,n_regular,n_iterations,n_cut,n_switches,n_stuck);
+  if(prefill){
+    LARGE_CHECK(n_stuck > 0);
+  } else {
+    LARGE_CHECK(n_switches > n_iterations/16);
+  }
+  large_scratch_end(&s);
+}
+void large_weak_stress_test(){
+  DEBUG_PRINTLN(__func__);
+  const uint32_t write_size = nvm_props.write_size;
+  const uintptr_t pair_size = 2*write_size + LFTL_ROUND_UP(2*2+10,write_size) + LFTL_ROUND_UP(16,write_size);
+  //the certificates take what 4 regular and the reserved pairs leave
+  const unsigned int many_certificates = (LFTL_PAGE_SIZE - (4 + LFTL_EWLF_RESERVED_PAIRS)*pair_size) / write_size;
+  large_weak_stress_core(4,many_certificates,4,false,1500,0x1A265);
+  //1 certificate, a pool of 5
+  const unsigned int default_regular = (LFTL_PAGE_SIZE - write_size)/pair_size - LFTL_EWLF_RESERVED_PAIRS;
+  large_weak_stress_core(5,1,default_regular,true,300,0x1A266);
+  SANITY_CHECK();
+}
+#endif
+
+#ifdef HAS_TEARING_SIMULATION
 //A second cut, inside the recovery from the first: the sweep arms it at one
 //of the program calls the recovery's boots made when run without it (a
 //tombstone, a copy, a pin), and the recovery from that one runs without arming
@@ -3127,6 +3857,7 @@ static int64_t secondary_call_target = -1;
 static bool secondary_at_last_unit;
 static unsigned int recovery_depth;
 static uint64_t recovery_calls; //program calls made by the recovery's boots, run without a second cut
+static bool sweep_format; //this cut ends with a format for real, see SWEEP_FORMAT_PERIOD
 #endif
 
 void exception_handler(uint32_t err_code){
@@ -3140,15 +3871,22 @@ void exception_handler(uint32_t err_code){
     tearing_sim_clear_call_target();
     if(first && (secondary_call_target < 0)) recovery_calls = tearing_sim_get_call_count() - calls_before;
     tearing_sim_write_after_recovery();
-    format_func(&nvma);
-    format_func(&nvmb);
-    format_func(&ewlfa);
-    format_func(&ewlfb);
-    format_func(&nvmc);
-    format_func(&nvmd);
+    //back to the state every cut starts from
+    if(!sweep_snapshot_valid){
+      format_all();
+    } else {
+      if(sweep_format){
+        //a format for real over what the cut left: every area then reads formatted
+        format_all();
+        sweep_full = 1;
+        tearing_sim_check_nvm();
+      }
+      sweep_restore();
+    }
   } else {
     //a real error, that's unexpected
     PRINTF("ERROR: test failed with error code 0x%08x\n",err_code);
+    print_cut_context();
     //ui_wait_button();
     fail_abort();
   }
@@ -3165,6 +3903,9 @@ void exception_handler(uint32_t err_code){
 void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
   static unsigned int test_cnt=0;
   uint32_t err_code=-1;
+  #ifdef HAS_TEARING_SIMULATION
+  volatile unsigned int dut_targets = 0; //write units the test accesses: the cut points of its sweep
+  #endif
   led1(1);
   if(0 == (err_code = setjmp(exception_ctx))){
     #ifdef HAS_TEARING_SIMULATION
@@ -3176,9 +3917,11 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     tearing_sim_weak_scope_clear();
     tearing_sim_weak_scope_add(ewlfa.area,ewlfa.area_size);
     tearing_sim_weak_scope_add(ewlfb.area,ewlfb.area_size);
+    tearing_sim_weak_scope_add(largea.area,largea.area_size);
     recovery_depth = 0;
     secondary_call_target = -1;
     current_secondary_target = -1;
+    sweep_active = 0;
     #endif
     lftl_init_lib();
     // nvmc/nvmd are registered first: their nvm_props (nvm_props2/nvm_props3)
@@ -3193,16 +3936,22 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     lftl_register_area(&nvmb);
     lftl_register_area_ewlf(&ewlfa);
     lftl_register_area_ewlf(&ewlfb);
+    lftl_register_area_large(&largea);
     format_func(&nvma);
     format_func(&nvmb);
     format_func(&ewlfa);
     format_func(&ewlfb);
     format_func(&nvmc);
     format_func(&nvmd);
+    format_func(&largea);
     #ifdef HAS_TEARING_SIMULATION
+    sweep_snapshot_valid = 0;
     tearing_sim_init();
     #endif
     dut();//functional test
+    #ifdef HAS_TEARING_SIMULATION
+    dut_targets = tearing_sim_get_max_target();
+    #endif
     err_code = 0;
     led1(0);
   } else {
@@ -3212,7 +3961,11 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
     erase_cnt_enabled = 0;
     tearing_sim_check_nvm();//sanity check that model is in sync
     print_erase_cnt_stats();
-    volatile unsigned int target_max = tearing_sim_get_max_target();
+    //the cut points of the sweep are the accesses of the test alone. Counted
+    //after the check above, as they once were, they included its accesses:
+    //cut points past the end of the test, where a run cuts nothing
+    const unsigned int targets_with_check = tearing_sim_get_max_target();
+    volatile unsigned int target_max = dut_targets;
     const unsigned int n_targets = (target_max * target_percentage) / 100;
     volatile unsigned int target_start = target_max - n_targets;
     if(tear_at){ //one cut only, to reproduce a failure
@@ -3224,16 +3977,20 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
       target_max = tear_at;
     }
     PRINTF("%u targets for tearing simulation, testing %u (%u%%) of them from index %u\n",target_max,target_max-target_start,target_percentage,target_start);
+    PRINTF("  (%u with the accesses of the check that follows the test, which no cut reaches)\n",targets_with_check);
+    volatile unsigned int shard_cuts = 0;
+    sweep_active = 1;
     led1(1);
-    format_func(&nvma);
-    format_func(&nvmb);
-    format_func(&ewlfa);
-    format_func(&ewlfb);
-    format_func(&nvmc);
-    format_func(&nvmd);
+    format_all();
+    sweep_snapshot();
     for(volatile unsigned int i=target_start;i<target_max+1;i++){//volatile to remove warning about setjump.
       //if(0 == (i%1000)) PRINTF("tearing simulation target %u\n",i);
       if(0 == (i%50)) print_progress_bar(i-target_start,n_targets);
+      if(!tear_at && ((i % shard_count) != shard_index)) continue;
+      //a single cut asked for does everything in full
+      const bool full = tear_at || (0 == (shard_cuts % SWEEP_FULL_PERIOD));
+      sweep_format = tear_at || (0 == (shard_cuts % SWEEP_FORMAT_PERIOD));
+      shard_cuts++;
       //the cut alone first; then, when the boots that recovered from it
       //programmed anything, the same cut followed by a second one at each of
       //those programs, at its first write unit and at its last
@@ -3246,9 +4003,13 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
           secondary_at_last_unit = last;
           current_cut_target = i;
           current_secondary_target = k;
+          sweep_full = full; //the format that ends a cut sets it
           tearing_sim_set_target(i);
           if(0 == (err_code = setjmp(exception_ctx))){
             dut();//simulated tearing test
+            //not cut: the last cut point is the end of the test. Back to the
+            //state every cut starts from all the same
+            sweep_restore();
           } else {
             exception_handler(err_code);
           }
@@ -3258,6 +4019,9 @@ void test_and_simulate_tearing(void (*dut)(), unsigned int target_percentage){
       current_secondary_target = -1;
     }
     print_progress_bar_done();
+    sweep_active = 0;
+    sweep_snapshot_valid = 0;
+    if(shard_count > 1) PRINTF("shard %llu of %llu: %u cuts run\n",(unsigned long long)shard_index,(unsigned long long)shard_count,shard_cuts);
     err_code = 0;
     led1(0);
   #endif
@@ -3436,7 +4200,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     transaction_abort_func = lftl_transaction_abort;
   #endif
   
-  #define N_TESTS 40
+  #define N_TESTS 45
   #define TEAR_COV_NA 101
   unsigned int tear_cov_log[N_TESTS+1] = {0};
   uint64_t first_index=1;
@@ -3460,6 +4224,8 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     ACTION_ARG(no_weak_words,"--no-weak-words");
     U64_ARG(weak_seed,"--weak-seed=",0);
     U64_ARG(tear_at,"--tear-at=",0);
+    U64_ARG(shard_index,"--shard=",0);
+    U64_ARG(shard_count,"--shards=",0);
     U64_ARG(test_index,"--test=",0);
     U64_ARG(first_index,"--first=",0);
     U64_ARG(last_index,"--last=",0);
@@ -3489,7 +4255,7 @@ int test_main(int argc, const char*argv[], bool consumed[]){
     nvm_weak_model = 1;
     nvm_weak_seed = weak_seed;
     n_check_boots = 2; //a word may read differently at the second boot
-    PRINTLN("Weak words in the EWLF areas, seed %llu",(unsigned long long)weak_seed);
+    PRINTLN("Weak words in the EWLF and large areas, seed %llu",(unsigned long long)weak_seed);
   }
   #else
   (void)weak_words;
@@ -3512,6 +4278,10 @@ int test_main(int argc, const char*argv[], bool consumed[]){
   }
   if(tear_cov>100){
     PRINTLN("ERROR: max value for --tear-cov is 100");
+    fail_abort();
+  }
+  if((0 == shard_count) || (shard_index >= shard_count)){
+    PRINTLN("ERROR: '--shard' must be less than '--shards'");
     fail_abort();
   }
   if(test_index){
@@ -3605,6 +4375,22 @@ int test_main(int argc, const char*argv[], bool consumed[]){
         tear_cov_log[i]=TEAR_COV_NA;
         #ifdef HAS_TEARING_SIMULATION
         test_and_simulate_tearing((39 == i) ? ewlf_two_cuts_test : ewlf_weak_stress_test,0);
+        #endif
+        break;
+      case 41:TEAR_COV(100);test_and_simulate_tearing(large_basic_test      ,tear_cov_log[i]);break;
+      case 42:TEAR_COV(100);test_and_simulate_tearing(large_transaction_test,tear_cov_log[i]);break;
+      case 43:
+        //Hardcoded 0, ignoring --tear-cov: the test expects errors, which a
+        //cut injected inside them would replace
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(large_api_test,0);break;
+      case 44:
+        tear_cov_log[i]=TEAR_COV_NA;test_and_simulate_tearing(large_checksum_test,0);break;
+      case 45:
+        //Hardcoded 0, ignoring --tear-cov: the test cuts power at chosen
+        //points itself, under the weak word model
+        tear_cov_log[i]=TEAR_COV_NA;
+        #ifdef HAS_TEARING_SIMULATION
+        test_and_simulate_tearing(large_weak_stress_test,0);
         #endif
         break;
       default:

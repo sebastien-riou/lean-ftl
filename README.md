@@ -10,11 +10,12 @@ Main features:
 - Avoid fragmentation
 - Support transactions
 - Support high number of updates (see [EWLF areas](https://lean-ftl.readthedocs.io/en/latest/design.html#design-ewlf)): no rollback and no loss of data after any sequence of power cuts, a design checked by an exhaustive model checker (`test/ewlf-model`)
+- Data of many pages, with partial updates and transactions (see [large areas](https://lean-ftl.readthedocs.io/en/latest/design.html#design-large)): an update rewrites only the pages it touches, with the same guarantee as EWLF areas and a checksum of the whole data
 - Easily portable to new MCUs / new flash chips
 - [Documentation](https://lean-ftl.rtfd.io), [threat model](THREAT-MODEL.md) and [issue tracker](ISSUES.md) available
 - Bounded execution time: every operation's worst case follows from the configuration, and after the first access a write to a regular area costs the same whatever the NVM holds (see O5 in the [threat model](THREAT-MODEL.md))
-- The on-flash format of regular areas is unchanged since v0.1.0; the test suite reads areas written by v0.1.0 on every build (see [tests](https://lean-ftl.readthedocs.io/en/latest/tests.html)). The format of EWLF areas changed in v0.3.0 and in v0.4.0: an EWLF area written by an earlier version must be formatted again
-- Few requirements on the flash, stated in one page: [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html); regular areas do not depend on the erased value, EWLF areas need erased bytes to read 'FF'
+- The on-flash format of regular areas is unchanged since v0.1.0; the test suite reads areas written by v0.1.0 on every build (see [tests](https://lean-ftl.readthedocs.io/en/latest/tests.html)). The format of EWLF areas changed in v0.3.0 and in v0.4.0: an EWLF area written by an earlier version must be formatted again. Large areas are new in v0.5.0
+- Few requirements on the flash, stated in one page: [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html); regular areas do not depend on the erased value, EWLF and large areas need erased bytes to read 'FF'
 
 The library is independent of any NVM controller, porting it to a new MCU means providing 3 simple "accessor" functions, and an error handler:
 - nvm_erase

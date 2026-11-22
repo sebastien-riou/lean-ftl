@@ -465,11 +465,19 @@ def round_up(a, b):
     return ceil_div(a, b) * b
 
 
+# Time of the CRC-64 of the library per byte, in microseconds (--crc64-us): 0.2 for its
+# table of 16 entries (27 cycles per byte counted on the Cortex-M33 code, at 160 MHz, rounded
+# up), 0.65 for its bitwise form (LFTL_CRC64_BITWISE), which the tables of CHUNKED.md used
+CRC64_US = 0.2
+
+
 class Target:
     """An NVM and its timings. Defaults: the STM32U5A5 of EWLF.md, "Key figures"."""
 
-    def __init__(self, page=8192, wu=16, prog_us=128.0, erase_ms=1.56, crc64_us=0.65,
+    def __init__(self, page=8192, wu=16, prog_us=128.0, erase_ms=1.56, crc64_us=None,
                  crc32_us=0.3, endurance=10000, certs=32, reserved=8):
+        if crc64_us is None:
+            crc64_us = CRC64_US
         self.page, self.wu, self.prog_us, self.erase_ms = page, wu, prog_us, erase_ms
         self.crc64_us, self.crc32_us, self.endurance = crc64_us, crc32_us, endurance
         self.certs, self.reserved = certs, reserved
@@ -693,6 +701,7 @@ def large_tables(writes):
 
 
 def main():
+    global CRC64_US
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--suite', action='store_true')
     ap.add_argument('--compare', action='store_true')
@@ -700,6 +709,8 @@ def main():
     ap.add_argument('--large', action='store_true', help='the tables of LARGE.md')
     ap.add_argument('--less', type=int, default=0, help='--suite: units under the rule')
     ap.add_argument('--writes', type=int, default=500000, help='--tables: writes over life')
+    ap.add_argument('--crc64-us', type=float, default=CRC64_US,
+                    help='--tables, --large: time of the CRC-64 per byte, in us')
     ap.add_argument('-n', type=int, default=133, help='chunks')
     ap.add_argument('-S', type=int, default=16, help='slots per pool unit')
     ap.add_argument('-U', type=int, default=0, help='pool units (0: the sizing rule)')
@@ -722,6 +733,7 @@ def main():
         resource.setrlimit(resource.RLIMIT_AS, (a.mem_mb << 20, a.mem_mb << 20))
     if a.cpu_s:
         resource.setrlimit(resource.RLIMIT_CPU, (a.cpu_s, a.cpu_s))
+    CRC64_US = a.crc64_us
     if a.large:
         return large_tables(a.writes)
     if a.tables:

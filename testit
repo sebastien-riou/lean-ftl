@@ -20,10 +20,10 @@ gcc -Og ../../examples/hello/main.c -o hello $INCLUDES $LIBS
 gcc -O0 -g3 -ggdb -E ../../examples/single_area/main.c $DEFINES -I../../examples/single_area $INCLUDES > single_area_main.c.i
 gcc -O0 -g3 -ggdb ../../examples/single_area/main.c ../../target/linux/linux.c -o single_area $DEFINES $INCLUDES $LIBS
 
-./lean-ftl-test-fw
-
-#the same on a flash without the all-zero exception (N3 of the flash page): the scan then never programs
-./lean-ftl-test-fw --no-pinning
+#every test, in parallel (LFTL_TEST_JOBS processes at a time, default: one per processor), on the
+#default flash model and on a flash without the all-zero exception (N3 of the flash page), where
+#the scan never programs. ./lean-ftl-test-fw alone runs them in sequence in one process
+../../test/run-suite . --modes "default no-pinning"
 
 ./hello
 

@@ -48,8 +48,8 @@ static void raise_nvm_error(lftl_nvm_props_t*ctx, uint32_t err_code){
  * Aborts the area's transaction, if any, before calling ::raise_nvm_error:
  * after an error the transaction may be inconsistent (tracker bits set for
  * write units never written), and the error handler may unwind the frame
- * holding the tracker. On an EWLF area a low level or internal error also
- * forgets the scan, see the body.
+ * holding the tracker. On an EWLF or a large area a low level or internal
+ * error also forgets the scan, see the body.
  *
  * \param ctx Context of the LFTL area on whose behalf the operation was done,
  *   or ::LFTL_INVALID_POINTER if none
@@ -59,10 +59,10 @@ static void raise_nvm_error(lftl_nvm_props_t*ctx, uint32_t err_code){
 static void raise_area_error(lftl_ctx_t*ctx, lftl_nvm_props_t*nvm_props, uint32_t err_code){
   if(LFTL_INVALID_POINTER != ctx){
     ctx->transaction_tracker = LFTL_INVALID_POINTER;
-    //an EWLF area tracks its log in volatile memory: after a failed flash
-    //operation, or an internal error, that state is not to be trusted, and
-    //the next access scans again
-    if(lftl_is_ewlf(ctx) && (err_code >= LFTL_ERROR_LOW_LEVEL_ERASE)) ctx->data = LFTL_INVALID_POINTER;
+    //an EWLF or a large area tracks its log in volatile memory: after a
+    //failed flash operation, or an internal error, that state is not to be
+    //trusted, and the next access scans again
+    if((lftl_is_ewlf(ctx) || lftl_is_large(ctx)) && (err_code >= LFTL_ERROR_LOW_LEVEL_ERASE)) ctx->data = LFTL_INVALID_POINTER;
   }
   raise_nvm_error(nvm_props, err_code);
 }
@@ -162,14 +162,23 @@ static uint32_t crc32c(uint32_t crc, const void*const buf, unsigned int len) {
 }
 
 /**
- * \brief Compute (part of) a CRC-64/NVME, the checksum of EWLF records.
+ * \brief Compute (part of) a CRC-64/NVME, the checksum of EWLF records and of
+ * the map and the data of large areas.
  *
  * Width 64, polynomial 0xAD93D23594C93659 (0x9A6C9329AC4BC9B5 reflected),
  * reflected input and output, initial value and final XOR all ones; the
  * check value of "123456789" is 0xAE8B14860A799888. This is the core only:
  * to get the full CRC, initialize `crc` to all ones and complement the
- * result. Bitwise, with a branch-free mask: no table, and a running time
- * that depends on the length alone.
+ * result.
+ *
+ * Two forms, of the same result:
+ * - the default takes the input four bits at a time through a table of 16
+ *   entries, 128 bytes of read-only data. It reads the table at an index
+ *   that depends on the input: where reads of the table take a time that
+ *   depends on their address (a data cache), so does the running time;
+ * - with `LFTL_CRC64_BITWISE` defined when the library is built, one bit at
+ *   a time with a branch-free mask: no table, a running time that depends on
+ *   the length alone, at about four times the time per byte.
  *
  * \param crc Initial/accumulated CRC value
  * \param buf Start address of the buffer
@@ -178,6 +187,7 @@ static uint32_t crc32c(uint32_t crc, const void*const buf, unsigned int len) {
  */
 static uint64_t crc64_update(uint64_t crc, const void*const buf, unsigned int len) {
   const uint8_t*buf8 = (const uint8_t*)buf;
+#ifdef LFTL_CRC64_BITWISE
   const uint64_t poly = 0x9A6C9329AC4BC9B5ull;
   while (len != 0) {
     crc = crc ^ *buf8++;
@@ -186,6 +196,65 @@ static uint64_t crc64_update(uint64_t crc, const void*const buf, unsigned int le
         crc = (crc >> 1) ^ (poly & mask);
     }
     len--;
+  }
+#else
+  //table[i]: the register i after four steps of the bitwise form
+  static const uint64_t table[16] = {
+    0x0000000000000000ull, 0x78E0FF3B88BE6F81ull,
+    0xF1C1FE77117CDF02ull, 0x8921014C99C2B083ull,
+    0xD75ADABD7A6E2D6Full, 0xAFBA2586F2D042EEull,
+    0x269B24CA6B12F26Dull, 0x5E7BDBF1E3AC9DECull,
+    0x9A6C9329AC4BC9B5ull, 0xE28C6C1224F5A634ull,
+    0x6BAD6D5EBD3716B7ull, 0x134D926535897936ull,
+    0x4D364994D625E4DAull, 0x35D6B6AF5E9B8B5Bull,
+    0xBCF7B7E3C7593BD8ull, 0xC41748D84FE75459ull,
+  };
+  while (len != 0) {
+    crc = crc ^ *buf8++;
+    crc = (crc >> 4) ^ table[crc & 0xF];
+    crc = (crc >> 4) ^ table[crc & 0xF];
+    len--;
+  }
+#endif
+  return crc;
+}
+
+/**
+ * \brief Multiply two polynomials modulo the CRC-64/NVME polynomial, in the
+ * reflected representation ::crc64_update uses for its register: bit 63 is
+ * the coefficient of x^0. Branch-free: the running time depends on nothing.
+ *
+ * \param a First factor
+ * \param b Second factor
+ * \returns a times b modulo the polynomial
+ */
+static uint64_t crc64_mulmod(uint64_t a, uint64_t b){
+  const uint64_t poly = 0x9A6C9329AC4BC9B5ull;
+  uint64_t p = 0;
+  for(unsigned int i=0;i<64;i++){
+    p ^= b & -((a >> (63 - i)) & 1);
+    b = (b >> 1) ^ (poly & -(b & 1));
+  }
+  return p;
+}
+
+/**
+ * \brief What ::crc64_update makes of a register followed by `n` zero bytes,
+ * without the `n` steps: the register times x^(8n) modulo the polynomial,
+ * by squaring. The CRC is linear, so this is how the checksum of the data of
+ * a large area follows the chunks an update replaces (zlib's crc32_combine
+ * works the same way).
+ *
+ * \param crc The register
+ * \param n Number of zero bytes
+ * \returns The register after them
+ */
+static uint64_t crc64_shift(uint64_t crc, uintptr_t n){
+  uint64_t x8 = (uint64_t)1 << (63 - 8); //x^8: one zero byte
+  while(n){
+    if(n & 1) crc = crc64_mulmod(x8, crc);
+    x8 = crc64_mulmod(x8, x8);
+    n >>= 1;
   }
   return crc;
 }
@@ -288,6 +357,7 @@ static lftl_ctx_t*get_any_ctx(lftl_ctx_t*ctx, const void*const nvm_addr){
 
 static lftl_ctx_t*first_area;
 static lftl_ctx_t*first_area_ewlf;
+static lftl_ctx_t*first_area_large;
 static lftl_nvm_props_t*first_nvm;
 
 /**
@@ -299,7 +369,7 @@ static lftl_nvm_props_t*first_nvm;
  * `ctx->nvm_props` via ::lftl_register_nvm.
  *
  * \param ctx Context of the area to register
- * \param first Pointer to the head of the target list (::first_area or ::first_area_ewlf)
+ * \param first Pointer to the head of the target list (::first_area, ::first_area_ewlf or ::first_area_large)
  */
 static void lftl_register_area_core(lftl_ctx_t*ctx, lftl_ctx_t**first){
   if(LFTL_INVALID_POINTER==*first){
@@ -317,7 +387,7 @@ static void lftl_register_area_core(lftl_ctx_t*ctx, lftl_ctx_t**first){
  * \brief Search a list of registered areas for one containing an address.
  *
  * \param addr Logical address to search for
- * \param first Head of the circular area list to search (::first_area or ::first_area_ewlf)
+ * \param first Head of the circular area list to search (::first_area, ::first_area_ewlf or ::first_area_large)
  * \returns The matching context, or ::LFTL_INVALID_POINTER if `first` is
  *   ::LFTL_INVALID_POINTER or no area matches
  */
@@ -349,6 +419,16 @@ static lftl_ctx_t*addr_to_area_ewlf(const void*const addr){
 }
 
 /**
+ * \brief Search the registered large areas for one containing an address.
+ *
+ * \param addr Logical address to search for
+ * \returns The matching context, or ::LFTL_INVALID_POINTER if none matches
+ */
+static lftl_ctx_t*addr_to_area_large(const void*const addr){
+  return addr_to_area_core(addr, first_area_large);
+}
+
+/**
  * \brief Search the registered physical NVMs for one containing an address.
  *
  * Walks the circular linked list of ::lftl_nvm_props_t built by
@@ -376,7 +456,7 @@ static lftl_nvm_props_t*addr_to_nvm(const void*const addr){
 /**
  * \brief Resolve an address to its owning area (if any) and physical NVM.
  *
- * Searches std areas first, then EWLF areas, so that if the same NVM is
+ * Searches std areas first, then EWLF areas, then large areas, so that if the same NVM is
  * shared by several areas the correct owning context is returned via
  * `*ctx`. If `addr` is not within any registered area, falls back to
  * ::addr_to_nvm to check whether it is at least within some registered
@@ -392,6 +472,7 @@ static lftl_nvm_props_t*addr_to_area_and_nvm(const void*const addr, lftl_ctx_t**
   // we search first within LFTL areas to return the right ctx if several areas use the same NVM.
   *ctx = addr_to_area_std(addr);
   if(LFTL_INVALID_POINTER == *ctx) *ctx = addr_to_area_ewlf(addr);
+  if(LFTL_INVALID_POINTER == *ctx) *ctx = addr_to_area_large(addr);
   if(LFTL_INVALID_POINTER!=*ctx) return (*ctx)->nvm_props;
   // addr is not in any LFTL areas of any kind, check other NVM addresses
   return addr_to_nvm(addr);
@@ -1013,12 +1094,101 @@ static uintptr_t ewlf_entry_phy_size(lftl_ctx_t*ctx){
   return LFTL_DIV_CEIL(EWLF_ENTRY_SIZE, write_size) * write_size;
 }
 
-/**
- * \brief Physical size in bytes of a log pair: marker, entry, confirm.
+/*
+ * Large areas (LARGE.md). Their log is the one of EWLF areas, in its
+ * record-in-the-pair form (test/ewlf-model/proto_v4p.py): the data of a pair
+ * is the map of the chunks of the data, and the chunks live in a pool of
+ * erase units, one chunk per unit (test/ewlf-model/proto_c2.py with one slot
+ * per unit, the model of the pool rules).
  *
- * \param ctx Context of the EWLF area
+ * area = U pool units, then 2 log units, in address order
+ *
+ * pool unit: one chunk, the erase unit whole: no marker, no checksum
+ * log unit:  pairs from its base up, P regular then R reserved, then X
+ *            certificate write units (zeros), as for an EWLF area
+ *   pair   = marker (zeros) | map | meta | confirm (zeros)
+ *   map    = the pool unit of each chunk (16 bits, 0xFFFF: never written),
+ *            the head unit (16 bits), the CRC-64/NVME of the data (64 bits),
+ *            little endian, then zeros up to whole write units
+ *   meta   = generation (16 bits), zeros (16 bits), version (32 bits), the
+ *            CRC-64/NVME of the map then of those 8 bytes (64 bits), little
+ *            endian, then zeros up to whole write units
+ *
+ * Each part of a pair is programmed only after the one before it returned,
+ * every chunk an update writes before its pair is started, and a pool unit
+ * is erased only when the head enters it.
+ */
+
+/// Size in bytes of the content of a large area's meta field, see the layout.
+#define LARGE_META_SIZE 16
+
+/// A chunk never written, or no head unit yet.
+#define LARGE_NO_UNIT 0xFFFF
+
+/// Bytes a large area streams through RAM at a time: a multiple of any write
+/// unit (::LFTL_WU_MAX_SIZE is a power of 2), even, and room for a meta field
+/// and a confirm.
+#define LARGE_BLOCK (2*LFTL_WU_MAX_SIZE)
+
+/**
+ * \brief Number of chunks of a large area: one per erase unit of its data.
+ *
+ * \param ctx Context of the large area
+ */
+static unsigned int large_n_chunks(lftl_ctx_t*ctx){
+  return LFTL_DIV_CEIL(ctx->data_size, page_size(ctx));
+}
+
+/**
+ * \brief Number of pool units of a large area: all its erase units but the
+ * two log units at its end.
+ *
+ * \param ctx Context of the large area
+ */
+static unsigned int large_n_pool(lftl_ctx_t*ctx){
+  return n_pages(ctx) - LFTL_EWLF_LOG_UNITS;
+}
+
+/**
+ * \brief Size in bytes of the content of a map: a unit per chunk, the head
+ * unit, the checksum of the data.
+ *
+ * \param ctx Context of the large area
+ */
+static uintptr_t large_map_size(lftl_ctx_t*ctx){
+  return 2*large_n_chunks(ctx) + 2 + 8;
+}
+
+/**
+ * \brief Physical size in bytes of a map: ::large_map_size rounded up to whole
+ * write units.
+ *
+ * \param ctx Context of the large area
+ */
+static uintptr_t large_map_phy_size(lftl_ctx_t*ctx){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  return LFTL_DIV_CEIL(large_map_size(ctx), write_size) * write_size;
+}
+
+/**
+ * \brief Physical size in bytes of a large area's meta field:
+ * ::LARGE_META_SIZE rounded up to whole write units.
+ *
+ * \param ctx Context of the large area
+ */
+static uintptr_t large_meta_phy_size(lftl_ctx_t*ctx){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  return LFTL_DIV_CEIL(LARGE_META_SIZE, write_size) * write_size;
+}
+
+/**
+ * \brief Physical size in bytes of a log pair: marker, entry, confirm for
+ * an EWLF area; marker, map, meta, confirm for a large one.
+ *
+ * \param ctx Context of the EWLF or large area
  */
 static uintptr_t ewlf_pair_phy_size(lftl_ctx_t*ctx){
+  if(lftl_is_large(ctx)) return 2*ewlf_flag_phy_size(ctx) + large_map_phy_size(ctx) + large_meta_phy_size(ctx);
   return 2*ewlf_flag_phy_size(ctx) + ewlf_entry_phy_size(ctx);
 }
 
@@ -1034,9 +1204,9 @@ static uintptr_t ewlf_record_phy_size(lftl_ctx_t*ctx){
 
 /**
  * \brief Number of data units of an EWLF area: all its erase units but the
- * two log units at its end.
+ * two log units at its end. For a large area, its pool units.
  *
- * \param ctx Context of the EWLF area
+ * \param ctx Context of the EWLF or large area
  */
 static unsigned int ewlf_n_data_units(lftl_ctx_t*ctx){
   return n_pages(ctx) - LFTL_EWLF_LOG_UNITS;
@@ -1256,12 +1426,26 @@ static void ewlf_write_meta(lftl_ctx_t*ctx, uint8_t*record_addr, const ewlf_meta
   nvm_write(ctx,ctx->nvm_props,ewlf_record_meta(ctx,record_addr),buf,ewlf_meta_phy_size(ctx));
 }
 
-/// The content of a log entry, in volatile memory: which record is current.
+/// What the map of a new pair of a large area holds, see ::large_program_map.
+typedef struct large_map_src_struct {
+  bool copy;            /**< the decision's map as it is: a bury, a carry, a reserved pair */
+  bool erased;          /**< every chunk never written: a format, an erase of all the data */
+  uint16_t run_first;   /**< first chunk of the run a plain write gives new units */
+  uint16_t run_n;       /**< number of chunks of that run, 0 for none */
+  uint16_t run_head;    /**< the head the units of the run were taken after */
+  const uint8_t*slots;  /**< a transaction: the unit of each chunk, ::LARGE_NO_UNIT for none; NULL otherwise */
+  uint16_t head;        /**< the head unit of the new map */
+  uint64_t data_crc;    /**< the checksum of the data of the new map */
+} large_map_src_t;
+
+/// The content of a log entry, in volatile memory: which record is current,
+/// or, for a large area, which map.
 typedef struct {
   uint16_t gen;     /**< generation of the log unit holding the entry */
-  uint8_t unit;     /**< data unit of the record */
-  uint8_t pos;      /**< position of the record in its unit */
-  uint32_t version; /**< version of the record */
+  uint8_t unit;     /**< EWLF: data unit of the record */
+  uint8_t pos;      /**< EWLF: position of the record in its unit */
+  uint32_t version; /**< version of the record or the map */
+  const large_map_src_t*map; /**< large: how the map of a new pair is made; unused when read */
 } ewlf_entry_t;
 
 /**
@@ -1334,6 +1518,319 @@ static bool ewlf_try_zeros(lftl_ctx_t*ctx, uint8_t*addr){
 }
 
 /**
+ * \brief Decode 16 bits, little endian.
+ *
+ * \param b The bytes
+ */
+static uint16_t large_get16(const uint8_t*b){
+  return (uint16_t)(b[0] | (((uint16_t)b[1]) << 8));
+}
+
+/**
+ * \brief Encode 16 bits, little endian.
+ *
+ * \param b Destination
+ * \param v The value
+ */
+static void large_put16(uint8_t*b, uint16_t v){
+  b[0] = (uint8_t)v;
+  b[1] = (uint8_t)(v >> 8);
+}
+
+/**
+ * \brief Physical address of a pool unit of a large area, the chunk it holds.
+ *
+ * \param ctx Context of the large area
+ * \param u Index of the pool unit
+ */
+static uint8_t*large_unit_addr(lftl_ctx_t*ctx, unsigned int u){
+  return ((uint8_t*)ctx->area) + u*page_size(ctx);
+}
+
+/**
+ * \brief Physical address of the map of the decision: the data of the pair
+ * the scan chose, or of the last pair this session programmed.
+ *
+ * \param ctx Context of the large area
+ */
+static const uint8_t*large_map(lftl_ctx_t*ctx){
+  return ewlf_pair_addr(ctx,ctx->ewlf.d_unit,ctx->ewlf.d_q) + ewlf_flag_phy_size(ctx);
+}
+
+/**
+ * \brief One 16-bit value of the decision's map: the unit of chunk `i`, or the
+ * head unit for `i` = the number of chunks.
+ *
+ * The map of a pair whose meta field reads valid is solid: every word of it
+ * returned before the meta field was started.
+ *
+ * \param ctx Context of the large area
+ * \param i Index of the value
+ */
+static uint16_t large_map_entry(lftl_ctx_t*ctx, unsigned int i){
+  uint8_t b[2];
+  nvm_read(ctx,ctx->nvm_props,b,large_map(ctx)+2*i,2);
+  return large_get16(b);
+}
+
+/**
+ * \brief The checksum of the data the decision's map holds.
+ *
+ * \param ctx Context of the large area
+ */
+static uint64_t large_map_data_crc(lftl_ctx_t*ctx){
+  uint8_t b[8];
+  nvm_read(ctx,ctx->nvm_props,b,large_map(ctx)+2*large_n_chunks(ctx)+2,8);
+  uint64_t crc = 0;
+  for(unsigned int i=0;i<8;i++) crc |= ((uint64_t)b[i]) << (8*i);
+  return crc;
+}
+
+/**
+ * \brief The units of the open transaction of a large area, one per chunk,
+ * ::LARGE_NO_UNIT for a chunk it did not touch: after the bits of the
+ * tracker, see ::LFTL_TRANSACTION_TRACKER_SIZE_LARGE. NULL when no
+ * transaction is open.
+ *
+ * \param ctx Context of the large area
+ */
+static uint8_t*large_txn_units(lftl_ctx_t*ctx){
+  if(LFTL_INVALID_POINTER == ctx->transaction_tracker) return 0;
+  return ((uint8_t*)ctx->transaction_tracker) + LFTL_TRANSACTION_TRACKER_SIZE_LL(ctx->data_size,ctx->nvm_props->write_size);
+}
+
+/**
+ * \brief Whether a pool unit is held: it holds a chunk of the decision's map,
+ * or of the open transaction (`live` and `txn` of the model).
+ *
+ * \param ctx Context of the large area
+ * \param u Index of the pool unit
+ */
+static bool large_unit_held(lftl_ctx_t*ctx, unsigned int u){
+  const unsigned int n = large_n_chunks(ctx);
+  const uint8_t*const map = large_map(ctx);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  for(unsigned int i=0;i<n;){
+    const unsigned int k = (n - i) > LARGE_BLOCK/2 ? LARGE_BLOCK/2 : (n - i);
+    nvm_read(ctx,ctx->nvm_props,buf,map+2*i,2*k);
+    for(unsigned int j=0;j<k;j++) if(large_get16(buf+2*j) == u) return true;
+    i += k;
+  }
+  const uint8_t*const units = large_txn_units(ctx);
+  if(units){
+    for(unsigned int i=0;i<n;i++) if(large_get16(units+2*i) == u) return true;
+  }
+  return false;
+}
+
+/**
+ * \brief The unit the head enters after `from` (`survey` and `alloc` of the
+ * model, with one slot per unit): the first free unit after it in ring
+ * order, `from` itself last. Free: held by neither the decision's map nor
+ * the open transaction. The units an operation took are behind the search,
+ * which never goes a whole round: the operation counted its room first.
+ *
+ * \param ctx Context of the large area
+ * \param from The head, ::LARGE_NO_UNIT before the first unit: the search
+ *   then starts at unit 0
+ * \returns The unit, ::LARGE_NO_UNIT when none is free
+ */
+static uint16_t large_next_free(lftl_ctx_t*ctx, uint16_t from){
+  const unsigned int n_pool = large_n_pool(ctx);
+  for(unsigned int step=0;step<n_pool;step++){
+    const unsigned int u = (LARGE_NO_UNIT == from) ? step : (from + 1 + step) % n_pool;
+    if(!large_unit_held(ctx,u)) return (uint16_t)u;
+  }
+  return LARGE_NO_UNIT;
+}
+
+/**
+ * \brief Number of free pool units: all of them but those of the decision's
+ * map and of the open transaction, which are distinct.
+ *
+ * \param ctx Context of the large area
+ */
+static unsigned int large_count_free(lftl_ctx_t*ctx){
+  const unsigned int n = large_n_chunks(ctx);
+  const uint8_t*const map = large_map(ctx);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  unsigned int used = 0;
+  for(unsigned int i=0;i<n;){
+    const unsigned int k = (n - i) > LARGE_BLOCK/2 ? LARGE_BLOCK/2 : (n - i);
+    nvm_read(ctx,ctx->nvm_props,buf,map+2*i,2*k);
+    for(unsigned int j=0;j<k;j++) if(LARGE_NO_UNIT != large_get16(buf+2*j)) used++;
+    i += k;
+  }
+  const uint8_t*const units = large_txn_units(ctx);
+  if(units){
+    for(unsigned int i=0;i<n;i++) if(LARGE_NO_UNIT != large_get16(units+2*i)) used++;
+  }
+  const unsigned int n_pool = large_n_pool(ctx);
+  return used >= n_pool ? 0 : n_pool - used;
+}
+
+/**
+ * \brief Program the map of a new pair, block by block, each program after
+ * the previous one returned, and accumulate its CRC.
+ *
+ * The values come from `src`: copied from the decision's map, or all
+ * ::LARGE_NO_UNIT, or the decision's map with the units of a transaction or
+ * of a plain write's run in place of the old ones. The units of a run are
+ * found again as they were taken: the free units after `run_head`, in ring
+ * order; the decision's map and the transaction, which say which units are
+ * free, are the same as then. So the map takes no RAM that grows with the
+ * data, and a pair that has to be tried again at the next position makes
+ * the same map.
+ *
+ * \param ctx Context of the large area
+ * \param dst Physical address of the map in the pair
+ * \param src What the map holds
+ * \param crc In/out: the CRC so far
+ * \returns false when the flash refused a program
+ */
+static bool large_program_map(lftl_ctx_t*ctx, uint8_t*dst, const large_map_src_t*src, uint64_t*crc){
+  const unsigned int n = large_n_chunks(ctx);
+  const uintptr_t map_size = large_map_size(ctx);
+  const uintptr_t phy_size = large_map_phy_size(ctx);
+  const uint8_t*const old = large_map(ctx);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  uint16_t run_unit = src->run_head;
+  for(uintptr_t off=0;off<phy_size;off+=LARGE_BLOCK){
+    const uintptr_t len = (phy_size - off) > LARGE_BLOCK ? LARGE_BLOCK : (phy_size - off);
+    const uintptr_t valued = (off >= map_size) ? 0 : (((map_size - off) > len) ? len : (map_size - off));
+    memset(buf,0,len);
+    if(!src->erased) nvm_read(ctx,ctx->nvm_props,buf,old+off,valued);
+    if(!src->copy){
+      //every value is 16 bits at an even offset, and a block is even
+      for(uintptr_t b=0;b<valued;b+=2){
+        const unsigned int h = (off + b) / 2;
+        uint16_t v;
+        if(h < n){
+          if(src->erased){
+            v = LARGE_NO_UNIT;
+          } else if(src->slots && (LARGE_NO_UNIT != large_get16(src->slots+2*h))){
+            v = large_get16(src->slots+2*h);
+          } else if((h >= src->run_first) && (h - src->run_first < src->run_n)){
+            run_unit = large_next_free(ctx,run_unit);
+            v = run_unit;
+          } else {
+            continue;
+          }
+        } else if(h == n){
+          v = src->head;
+        } else {
+          v = (uint16_t)(src->data_crc >> (16*(h - n - 1)));
+        }
+        large_put16(buf+b,v);
+      }
+    }
+    *crc = crc64_update(*crc,buf,valued);
+    if(!ewlf_try_write(ctx,dst+off,buf,len)) return false;
+  }
+  return true;
+}
+
+/**
+ * \brief Program the map and the meta field of a pair of a large area, the
+ * data of the pair: the map, then the meta field once it returned.
+ *
+ * \param ctx Context of the large area
+ * \param pair Physical address of the pair, its marker programmed
+ * \param gen Generation of the entry
+ * \param entry Version and map of the entry
+ * \returns false when the flash refused a program
+ */
+static bool large_try_payload(lftl_ctx_t*ctx, uint8_t*pair, uint16_t gen, const ewlf_entry_t*entry){
+  uint8_t*const map = pair + ewlf_flag_phy_size(ctx);
+  uint64_t crc = ~(uint64_t)0;
+  if(!large_program_map(ctx,map,entry->map,&crc)) return false;
+  uint64_t buf64[SIZE64(LFTL_WU_MAX_SIZE)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  memset(buf,0,sizeof(buf64));
+  large_put16(buf,gen);
+  for(unsigned int i=0;i<4;i++) buf[4+i] = (uint8_t)(entry->version >> (8*i));
+  crc = ~crc64_update(crc,buf,8);
+  for(unsigned int i=0;i<8;i++) buf[8+i] = (uint8_t)(crc >> (8*i));
+  return ewlf_try_write(ctx,map+large_map_phy_size(ctx),buf,large_meta_phy_size(ctx));
+}
+
+/**
+ * \brief Read a pair of a large area once and decode it (`Unit` of
+ * proto_v4p.py, for one position).
+ *
+ * Its entry is valid when the CRC of its meta field verifies, over the map
+ * and the meta field, and every unit the map names exists. The generation's
+ * parity is checked by the caller.
+ *
+ * \param ctx Context of the large area
+ * \param l Index of the log unit
+ * \param q Position
+ * \param e Output: generation and version, when valid
+ * \param confirmed Output: the confirm reads all zeros
+ * \returns -1 when every byte of the pair reads erased, 1 when its entry is
+ *   valid, 0 otherwise
+ */
+static int large_read_pair(lftl_ctx_t*ctx, unsigned int l, unsigned int q, ewlf_entry_t*e, bool*confirmed){
+  const uintptr_t flag_size = ewlf_flag_phy_size(ctx);
+  const uintptr_t map_size = large_map_size(ctx);
+  const uintptr_t map_phy = large_map_phy_size(ctx);
+  const uintptr_t meta_phy = large_meta_phy_size(ctx);
+  const unsigned int n = large_n_chunks(ctx);
+  const unsigned int n_pool = large_n_pool(ctx);
+  const uint8_t*const pair = ewlf_pair_addr(ctx,l,q);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  bool in_range = true;
+  uint64_t crc = ~(uint64_t)0;
+  //the bytes of the map read so far, all erased, that the CRC has not taken
+  //yet: a position that reads erased all along, the common case, costs no CRC
+  uintptr_t erased_pending = 0;
+  bool map_erased = true;
+  nvm_read(ctx,ctx->nvm_props,buf,pair,flag_size);
+  bool erased = UNIT_ERASED == unit_state_of(buf,flag_size);
+  for(uintptr_t off=0;off<map_phy;off+=LARGE_BLOCK){
+    const uintptr_t len = (map_phy - off) > LARGE_BLOCK ? LARGE_BLOCK : (map_phy - off);
+    const uintptr_t valued = (off >= map_size) ? 0 : (((map_size - off) > len) ? len : (map_size - off));
+    nvm_read(ctx,ctx->nvm_props,buf,pair+flag_size+off,len);
+    if(UNIT_ERASED != unit_state_of(buf,len)){
+      erased = false;
+      map_erased = false;
+    }
+    if(map_erased){
+      erased_pending += valued;
+    } else {
+      crc = ewlf_checksum_update_erased(crc,erased_pending);
+      erased_pending = 0;
+      crc = crc64_update(crc,buf,valued);
+    }
+    for(uintptr_t b=0;b<valued;b+=2){
+      if((off + b)/2 > n) break; //the units and the head; then the checksum of the data
+      const uint16_t v = large_get16(buf+b);
+      if((LARGE_NO_UNIT != v) && (v >= n_pool)) in_range = false;
+    }
+  }
+  nvm_read(ctx,ctx->nvm_props,buf,pair+flag_size+map_phy,meta_phy+flag_size);
+  if(UNIT_ERASED != unit_state_of(buf,meta_phy+flag_size)) erased = false;
+  if(erased) return -1;
+  *confirmed = UNIT_ZERO == unit_state_of(buf+meta_phy,flag_size);
+  crc = ewlf_checksum_update_erased(crc,erased_pending);
+  crc = ~crc64_update(crc,buf,8);
+  uint64_t stored = 0;
+  for(unsigned int i=0;i<8;i++) stored |= ((uint64_t)buf[8+i]) << (8*i);
+  if((stored != crc) || !in_range) return 0;
+  e->gen = large_get16(buf);
+  e->unit = 0;
+  e->pos = 0;
+  e->version = 0;
+  for(unsigned int i=0;i<4;i++) e->version |= ((uint32_t)buf[4+i]) << (8*i);
+  e->map = 0;
+  return 1;
+}
+
+/**
  * \brief Whether generation `a` is newer than generation `b`.
  *
  * The two log units always hold adjacent generations, so 16 bits compared
@@ -1349,7 +1846,8 @@ static bool ewlf_gen_newer(uint16_t a, uint16_t b){
  *
  * A position is started when any of its bytes reads programmed. Its entry
  * is valid when its CRC verifies, its generation has the parity of the unit
- * and it names a record position that exists. The newest valid entry is the
+ * and it names a record position that exists, or, for a large area, pool
+ * units that exist (::large_read_pair). The newest valid entry is the
  * one at the highest position. Confirms and certificates count only when
  * they read all zeros: a few flipped bits in an erased word prove nothing.
  *
@@ -1373,19 +1871,31 @@ static void ewlf_read_log_unit(lftl_ctx_t*ctx, unsigned int l, lftl_ewlf_log_uni
   u->gen = 0;
   u->certs_free = 0;
   u->flags = 0;
+  const bool large = lftl_is_large(ctx);
   for(unsigned int q=0;q<n_positions;q++){
-    nvm_read(ctx,ctx->nvm_props,buf,ewlf_pair_addr(ctx,l,q),pair_size);
-    if(UNIT_ERASED == unit_state_of(bytes,pair_size)) continue;
-    u->started = q;
-    if(q >= n_regular) u->flags |= EWLF_UNIT_CLOSED;
     ewlf_entry_t e;
-    if(!ewlf_entry_from_bytes(&e,bytes+flag_size)) continue;
+    bool confirmed;
+    if(large){
+      const int r = large_read_pair(ctx,l,q,&e,&confirmed);
+      if(r < 0) continue;
+      u->started = q;
+      if(q >= n_regular) u->flags |= EWLF_UNIT_CLOSED;
+      if(0 == r) continue;
+    } else {
+      nvm_read(ctx,ctx->nvm_props,buf,ewlf_pair_addr(ctx,l,q),pair_size);
+      if(UNIT_ERASED == unit_state_of(bytes,pair_size)) continue;
+      u->started = q;
+      if(q >= n_regular) u->flags |= EWLF_UNIT_CLOSED;
+      if(!ewlf_entry_from_bytes(&e,bytes+flag_size)) continue;
+      if((e.unit >= n_data_units) || (e.pos >= records_per_unit)) continue;
+      e.map = 0;
+      confirmed = UNIT_ZERO == unit_state_of(bytes+flag_size+entry_size,flag_size);
+    }
     if((e.gen & 1) != l) continue;
-    if((e.unit >= n_data_units) || (e.pos >= records_per_unit)) continue;
     if((u->newest < 0) || ewlf_gen_newer(e.gen,u->gen)) u->gen = e.gen;
     u->newest = q;
     *newest = e;
-    if(UNIT_ZERO == unit_state_of(bytes+flag_size+entry_size,flag_size)){
+    if(confirmed){
       u->flags |= EWLF_UNIT_PROVEN | EWLF_UNIT_CONFIRMED;
     } else {
       u->flags &= ~EWLF_UNIT_CONFIRMED;
@@ -1449,24 +1959,24 @@ static void ewlf_plan_repair(lftl_ctx_t*ctx){
   const int n_regular = ewlf_n_regular(ctx);
   st->stuck = 0;
   if(ewlf_top_solid(st)){
-    st->pending = LFTL_EWLF_REPAIR_NONE;
+    st->pending = LFTL_REPAIR_NONE;
     return;
   }
   if(ewlf_uncertain(st)){
-    st->pending = LFTL_EWLF_REPAIR_CARRY;
+    st->pending = LFTL_REPAIR_CARRY;
     st->stuck = (O->started + 1 >= n_positions);
     return;
   }
   const int first_reserved = (L->started + 1 > n_regular) ? (L->started + 1) : n_regular;
   if((0 == (L->flags & EWLF_UNIT_CLOSED)) && (L->started + 1 < n_regular)){
-    st->pending = LFTL_EWLF_REPAIR_BURY;
+    st->pending = LFTL_REPAIR_BURY;
     return;
   }
   if(first_reserved < n_positions){
-    st->pending = LFTL_EWLF_REPAIR_BURY;
+    st->pending = LFTL_REPAIR_BURY;
     return;
   }
-  st->pending = LFTL_EWLF_REPAIR_SWITCH;
+  st->pending = LFTL_REPAIR_SWITCH;
   const bool certified = 0 != (L->flags & EWLF_UNIT_CERTIFIED);
   if(!certified && (0 == (L->flags & EWLF_UNIT_PROVEN))){
     st->stuck = 1; //step 1 needs a reserved pair and none is left
@@ -1544,6 +2054,17 @@ static void ewlf_scan(lftl_ctx_t*ctx){
     st->live = valid1 ? 1 : 0;
   }
   const ewlf_entry_t*const d = &newest[st->live];
+  if(lftl_is_large(ctx)){
+    //the map was checked with the pair: what a large area needs is in the log
+    st->d_unit = st->live;
+    st->d_q = st->unit[st->live].newest;
+    st->version = d->version;
+    st->rec_started = -2;
+    st->head = large_map_entry(ctx,large_n_chunks(ctx));
+    ewlf_plan_repair(ctx);
+    ctx->data = (LFTL_REPAIR_NONE == st->pending) ? (void*)large_map(ctx) : EWLF_PENDING_POINTER;
+    return;
+  }
   //the record the decision names: always in place for an entry this
   //protocol wrote, its unit is never erased while an entry can name it
   const uint8_t*const record = ewlf_record_addr(ctx,d->unit,d->pos);
@@ -1560,7 +2081,7 @@ static void ewlf_scan(lftl_ctx_t*ctx){
   st->version = d->version;
   st->rec_started = -2;
   ewlf_plan_repair(ctx);
-  ctx->data = (LFTL_EWLF_REPAIR_NONE == st->pending) ? (void*)ewlf_record_data(ctx,record) : EWLF_PENDING_POINTER;
+  ctx->data = (LFTL_REPAIR_NONE == st->pending) ? (void*)ewlf_record_data(ctx,record) : EWLF_PENDING_POINTER;
 }
 
 /**
@@ -1570,17 +2091,17 @@ static void ewlf_scan(lftl_ctx_t*ctx){
  */
 static void ewlf_stuck(lftl_ctx_t*ctx){
   ctx->ewlf.stuck = 1;
-  raise_error(ctx,LFTL_ERROR_EWLF_STUCK);
+  raise_error(ctx,LFTL_ERROR_STUCK);
 }
 
 /**
  * \brief Program a pair at the first position of a range above the started
  * ones (`fresh_pair` of the model).
  *
- * Marker, entry, confirm, each after the previous one returned. A position
- * where the flash refuses one of the three counts as started and the next
- * one is tried: nothing valued is ever programmed over a word that was
- * refused, and no word is retried.
+ * Marker, entry, confirm, each after the previous one returned; for a large
+ * area marker, map, meta, confirm. A position where the flash refuses one of
+ * them counts as started and the next one is tried: nothing valued is ever
+ * programmed over a word that was refused, and no word is retried.
  *
  * \param ctx Context of the EWLF area
  * \param l Index of the log unit
@@ -1594,23 +2115,37 @@ static bool ewlf_fresh_pair(lftl_ctx_t*ctx, unsigned int l, int lo, int hi, uint
   lftl_ewlf_log_unit_t*const u = &ctx->ewlf.unit[l];
   const uintptr_t flag_size = ewlf_flag_phy_size(ctx);
   const uintptr_t entry_size = ewlf_entry_phy_size(ctx);
+  const uintptr_t pair_size = ewlf_pair_phy_size(ctx);
   const int n_regular = ewlf_n_regular(ctx);
+  const bool large = lftl_is_large(ctx);
   uint64_t buf[SIZE64(LFTL_WU_MAX_SIZE)];
   memset(buf,0,sizeof(buf));
-  ewlf_entry_t e = *entry;
-  e.gen = gen;
-  ewlf_entry_to_bytes(&e,(uint8_t*)buf);
+  if(!large){
+    ewlf_entry_t e = *entry;
+    e.gen = gen;
+    ewlf_entry_to_bytes(&e,(uint8_t*)buf);
+  }
   for(int q = (u->started + 1 > lo) ? (u->started + 1) : lo; q < hi; q++){
     uint8_t*const pair = ewlf_pair_addr(ctx,l,q);
     //started from the first program on, whatever happens next
     u->started = q;
     if(q >= n_regular) u->flags |= EWLF_UNIT_CLOSED;
     if(!ewlf_try_zeros(ctx,pair)) continue;
-    if(!ewlf_try_write(ctx,pair+flag_size,buf,entry_size)) continue;
-    if(!ewlf_try_zeros(ctx,pair+flag_size+entry_size)) continue;
+    if(large){
+      if(!large_try_payload(ctx,pair,gen,entry)) continue;
+    } else {
+      if(!ewlf_try_write(ctx,pair+flag_size,buf,entry_size)) continue;
+    }
+    if(!ewlf_try_zeros(ctx,pair+pair_size-flag_size)) continue;
     u->newest = q;
     u->gen = gen;
     u->flags |= EWLF_UNIT_PROVEN | EWLF_UNIT_CONFIRMED;
+    if(large){
+      //the decision is this pair from now on: same content as before for a
+      //copy, the new map for an update
+      ctx->ewlf.d_unit = l;
+      ctx->ewlf.d_q = q;
+    }
     return true;
   }
   return false;
@@ -1645,6 +2180,28 @@ static bool ewlf_fresh_cert(lftl_ctx_t*ctx){
 }
 
 /**
+ * \brief The entry that copies the decision: its record for an EWLF area,
+ * its map as it is for a large one.
+ *
+ * \param ctx Context of the EWLF or large area
+ * \param d Output: the entry
+ * \param copy Storage for the description of the map, which `d` points to
+ */
+static void ewlf_decision_entry(lftl_ctx_t*ctx, ewlf_entry_t*d, large_map_src_t*copy){
+  const lftl_ewlf_state_t*const st = &ctx->ewlf;
+  d->gen = st->unit[st->live].gen;
+  d->unit = st->d_unit;
+  d->pos = st->d_pos;
+  d->version = st->version;
+  d->map = 0;
+  if(lftl_is_large(ctx)){
+    memset(copy,0,sizeof(*copy));
+    copy->copy = true;
+    d->map = copy;
+  }
+}
+
+/**
  * \brief Open the next generation in the other log unit, with `entry` as
  * its first entry, the carry (`switch` of the model).
  *
@@ -1661,7 +2218,7 @@ static bool ewlf_fresh_cert(lftl_ctx_t*ctx){
  * entered that way: a weak entry of the next generation is never exposed to
  * a torn erase while this generation is live.
  *
- * Raises ::LFTL_ERROR_EWLF_STUCK when a reserve is exhausted.
+ * Raises ::LFTL_ERROR_STUCK when a reserve is exhausted.
  *
  * \param ctx Context of the EWLF area
  * \param entry Record and version of the carry
@@ -1677,10 +2234,8 @@ static void ewlf_switch(lftl_ctx_t*ctx, const ewlf_entry_t*entry){
   const uint16_t gen = (uint16_t)(L->gen + 1);
   if((0 == (L->flags & (EWLF_UNIT_CERTIFIED | EWLF_UNIT_PROVEN)))){
     ewlf_entry_t d;
-    d.gen = L->gen;
-    d.unit = st->d_unit;
-    d.pos = st->d_pos;
-    d.version = st->version;
+    large_map_src_t copy;
+    ewlf_decision_entry(ctx,&d,&copy);
     if(!ewlf_fresh_pair(ctx,live,n_regular,n_positions,L->gen,&d)) ewlf_stuck(ctx);
   }
   if((0 == (L->flags & EWLF_UNIT_CERTIFIED)) || (O->started < 0)){
@@ -1733,10 +2288,8 @@ static void ewlf_bury(lftl_ctx_t*ctx){
   const int n_positions = ewlf_n_positions(ctx);
   const int n_regular = ewlf_n_regular(ctx);
   ewlf_entry_t d;
-  d.gen = L->gen;
-  d.unit = st->d_unit;
-  d.pos = st->d_pos;
-  d.version = st->version;
+  large_map_src_t copy;
+  ewlf_decision_entry(ctx,&d,&copy);
   if(ewlf_uncertain(st)){
     ewlf_switch(ctx,&d);
     return;
@@ -1751,7 +2304,7 @@ static void ewlf_bury(lftl_ctx_t*ctx){
  *
  * Runs phase 1 first if nothing did since the reset. Programs only when a
  * repair is pending: the bury, from the readings of phase 1, after which
- * the decision is shown. Raises ::LFTL_ERROR_EWLF_STUCK, before programming
+ * the decision is shown. Raises ::LFTL_ERROR_STUCK, before programming
  * anything, when phase 1 found no room for the repair.
  *
  * \param ctx Context of the EWLF area
@@ -1760,25 +2313,164 @@ static void ewlf_complete(lftl_ctx_t*ctx){
   if(LFTL_INVALID_POINTER == ctx->data) ewlf_scan(ctx);
   if(EWLF_PENDING_POINTER != ctx->data) return;
   lftl_ewlf_state_t*const st = &ctx->ewlf;
-  if(st->stuck) raise_error(ctx,LFTL_ERROR_EWLF_STUCK);
+  if(st->stuck) raise_error(ctx,LFTL_ERROR_STUCK);
   ewlf_bury(ctx);
-  st->pending = LFTL_EWLF_REPAIR_NONE;
-  ctx->data = ewlf_record_data(ctx,ewlf_record_addr(ctx,st->d_unit,st->d_pos));
+  st->pending = LFTL_REPAIR_NONE;
+  if(lftl_is_large(ctx)){
+    ctx->data = (void*)large_map(ctx);
+  } else {
+    ctx->data = ewlf_record_data(ctx,ewlf_record_addr(ctx,st->d_unit,st->d_pos));
+  }
 }
 
 /**
  * \brief Make sure an EWLF area can be read and written: scanned, and with
  * no repair pending.
  *
- * Raises ::LFTL_ERROR_EWLF_PENDING when a repair is pending, so that the
- * application decides when it is done (::lftl_ewlf_complete_scan), and
- * ::LFTL_ERROR_EWLF_STUCK when that repair has no room.
+ * Raises ::LFTL_ERROR_SCAN_PENDING when a repair is pending, so that the
+ * application decides when it is done (::lftl_complete_scan), and
+ * ::LFTL_ERROR_STUCK when that repair has no room.
  *
  * \param ctx Context of the EWLF area
  */
 static void ewlf_require_ready(lftl_ctx_t*ctx){
   if(LFTL_INVALID_POINTER == ctx->data) ewlf_scan(ctx);
-  if(EWLF_PENDING_POINTER == ctx->data) raise_error(ctx,ctx->ewlf.stuck ? LFTL_ERROR_EWLF_STUCK : LFTL_ERROR_EWLF_PENDING);
+  if(EWLF_PENDING_POINTER == ctx->data) raise_error(ctx,ctx->ewlf.stuck ? LFTL_ERROR_STUCK : LFTL_ERROR_SCAN_PENDING);
+}
+
+/**
+ * \brief Size in bytes of the data in chunk `i` of a large area: an erase
+ * unit, less for the last chunk.
+ *
+ * \param ctx Context of the large area
+ * \param i Index of the chunk
+ */
+static uintptr_t large_chunk_size(lftl_ctx_t*ctx, unsigned int i){
+  const uintptr_t rem = ctx->data_size - i*page_size(ctx);
+  return rem < page_size(ctx) ? rem : page_size(ctx);
+}
+
+/**
+ * \brief Size in bytes of what is programmed in chunk `i`: its data rounded
+ * up to whole write units, which an erase unit always holds.
+ *
+ * \param ctx Context of the large area
+ * \param i Index of the chunk
+ */
+static uintptr_t large_chunk_phy_size(lftl_ctx_t*ctx, unsigned int i){
+  const uintptr_t rem = data_phy_size(ctx) - i*page_size(ctx);
+  return rem < page_size(ctx) ? rem : page_size(ctx);
+}
+
+/**
+ * \brief Read part of the data of a large area, through the decision's map:
+ * a chunk never written reads erased.
+ *
+ * \param ctx Context of the large area, scanned
+ * \param dst Destination, in volatile memory
+ * \param offset Offset of the first byte in the data
+ * \param size Size in bytes, within the data
+ */
+static void large_read_data(lftl_ctx_t*ctx, void*dst, uintptr_t offset, uintptr_t size){
+  uint8_t*dst8 = (uint8_t*)dst;
+  const uintptr_t chunk = page_size(ctx);
+  while(size){
+    const unsigned int i = offset / chunk;
+    const uintptr_t in = offset % chunk;
+    const uintptr_t len = (chunk - in) < size ? (chunk - in) : size;
+    const uint16_t u = large_map_entry(ctx,i);
+    if(LARGE_NO_UNIT == u){
+      memset(dst8,0xFF,len);
+    } else {
+      nvm_read(ctx,ctx->nvm_props,dst8,large_unit_addr(ctx,u)+in,len);
+    }
+    dst8 += len;
+    offset += len;
+    size -= len;
+  }
+}
+
+/**
+ * \brief Update a CRC with a physical range of NVM, read in blocks.
+ *
+ * \param ctx Context of the large area
+ * \param crc The CRC so far
+ * \param addr Physical address
+ * \param size Size in bytes
+ */
+static uint64_t large_crc_phys(lftl_ctx_t*ctx, uint64_t crc, const uint8_t*addr, uintptr_t size){
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  while(size){
+    const uintptr_t len = size > LARGE_BLOCK ? LARGE_BLOCK : size;
+    nvm_read(ctx,ctx->nvm_props,buf64,addr,len);
+    crc = crc64_update(crc,buf64,len);
+    addr += len;
+    size -= len;
+  }
+  return crc;
+}
+
+/**
+ * \brief Update a CRC with the data of chunk `i` as the decision's map
+ * names it, or erased bytes.
+ *
+ * \param ctx Context of the large area
+ * \param crc The CRC so far
+ * \param i Index of the chunk
+ */
+static uint64_t large_crc_chunk(lftl_ctx_t*ctx, uint64_t crc, unsigned int i){
+  const uint16_t u = large_map_entry(ctx,i);
+  if(LARGE_NO_UNIT == u) return ewlf_checksum_update_erased(crc,large_chunk_size(ctx,i));
+  return large_crc_phys(ctx,crc,large_unit_addr(ctx,u),large_chunk_size(ctx,i));
+}
+
+/**
+ * \brief The CRC-64/NVME of the data of a large area as it reads now.
+ *
+ * \param ctx Context of the large area, scanned: the decision's map, pending
+ *   or not
+ */
+static uint64_t large_data_crc(lftl_ctx_t*ctx){
+  const unsigned int n = large_n_chunks(ctx);
+  uint64_t crc = ~(uint64_t)0;
+  for(unsigned int i=0;i<n;i++) crc = large_crc_chunk(ctx,crc,i);
+  return ~crc;
+}
+
+/**
+ * \brief Check the data of a large area against its checksum, and keep the
+ * result until the next scan.
+ *
+ * \param ctx Context of the large area, scanned
+ * \returns true when the data matches
+ */
+static bool large_check(lftl_ctx_t*ctx){
+  const bool sound = large_data_crc(ctx) == large_map_data_crc(ctx);
+  ctx->ewlf.data_check = sound ? 1 : 2;
+  return sound;
+}
+
+/**
+ * \brief The lazy check of a large area: once per scan, before the first use
+ * of the data it holds; ::LFTL_ERROR_DATA_CHECKSUM when it does not match.
+ *
+ * \param ctx Context of the large area, scanned
+ */
+static void large_require_sound(lftl_ctx_t*ctx){
+  if(0 == ctx->ewlf.data_check) large_check(ctx);
+  if(2 == ctx->ewlf.data_check) raise_error(ctx,LFTL_ERROR_DATA_CHECKSUM);
+}
+
+/**
+ * \brief Scan a large area if nothing did since the reset, and allow a
+ * pending repair or a stuck area: what the reads that may see the data the
+ * scan chose need (::lftl_read_unproven, ::lftl_read_unchecked,
+ * ::lftl_check_data).
+ *
+ * \param ctx Context of the large area
+ */
+static void large_scanned(lftl_ctx_t*ctx){
+  if(LFTL_INVALID_POINTER == ctx->data) ewlf_scan(ctx);
 }
 
 /**
@@ -1801,7 +2493,7 @@ static void*translate_addr_std(lftl_ctx_t*ctx, const void*const nvm_addr, uintpt
  * \brief Translate a logical address into a physical one, for an EWLF area.
  *
  * Scans the area first if nothing did since the reset, and raises
- * ::LFTL_ERROR_EWLF_PENDING when the scan left a repair to do
+ * ::LFTL_ERROR_SCAN_PENDING when the scan left a repair to do
  * (::ewlf_require_ready). The logical address space is the same shape as
  * for std areas -- `ctx->area` to `ctx->area+ctx->data_size` represents one
  * record's data -- only how `ctx->data` is located differs.
@@ -1853,8 +2545,9 @@ void dbg_memcpy(void*dst, const void*const src, uintptr_t size){
  * If `*p_src_phy_addr` is a logical address belonging to a registered
  * area, this translates it to the actual physical address of the current
  * data and updates `*src_ctx` to that area's context, so that
- * ::mem_read/nvm_read can be used directly on it later. Otherwise leaves
- * both inputs untouched.
+ * ::mem_read/nvm_read can be used directly on it later. A large area's
+ * address stays logical: ::src_read and ::src_copy read it through its map.
+ * Otherwise leaves both inputs untouched.
  *
  * \param src_ctx In/out: context to read `*p_src_phy_addr` through
  * \param p_src_phy_addr In/out: address to resolve
@@ -1875,8 +2568,99 @@ static void check_src_phy_addr(lftl_ctx_t**src_ctx, const uint8_t**p_src_phy_add
         *p_src_phy_addr = translate_addr_ewlf(ctx, (void*)src_phy_addr, size);
         *src_ctx = ctx;
       }
+    }else{
+      ctx = addr_to_area_large(src_phy_addr);
+      if((LFTL_INVALID_POINTER!=ctx) && is_in_data(ctx,src_phy_addr)){
+        //a large area's data is not contiguous: the address stays logical,
+        //and the source is read through its map (::src_read, ::src_copy).
+        //Reading it uses its data: it is checked first
+        check_in_data(ctx, src_phy_addr, size);
+        ewlf_require_ready(ctx);
+        large_require_sound(ctx);
+        *src_ctx = ctx;
+      }
     }
   }
+}
+
+/**
+ * \brief Whether a source resolved by ::check_src_phy_addr is the logical
+ * address of a large area's data.
+ *
+ * Such an address is never also a physical one passed with that context:
+ * the only ones are the large area's own pool units, which this layer never
+ * hands to a source.
+ *
+ * \param src_ctx The context of the source
+ * \param src The source address
+ */
+static bool src_is_large(lftl_ctx_t*src_ctx, const void*const src){
+  return lftl_is_large(src_ctx) && is_in_data(src_ctx,src);
+}
+
+/**
+ * \brief Read a source resolved by ::check_src_phy_addr: through its map for
+ * a large area, else as ::mem_read does.
+ *
+ * \param src_ctx The context of the source
+ * \param dst Destination, in volatile memory
+ * \param src The source address
+ * \param size Size in bytes
+ */
+static void src_read(lftl_ctx_t*src_ctx, void*dst, const void*const src, uintptr_t size){
+  if(src_is_large(src_ctx,src)){
+    large_read_data(src_ctx,dst,(uintptr_t)src - (uintptr_t)src_ctx->area,size);
+    return;
+  }
+  mem_read(src_ctx,dst,src,size);
+}
+
+/**
+ * \brief Program whole write units from a source resolved by
+ * ::check_src_phy_addr: through RAM, block by block, for a large area, else
+ * straight from the source.
+ *
+ * \param dst_ctx Context of the destination
+ * \param dst_phy_addr Physical destination, aligned on a write unit
+ * \param src_ctx The context of the source
+ * \param src The source address
+ * \param size Size in bytes, whole write units
+ */
+static void src_copy(lftl_ctx_t*dst_ctx, uint8_t*dst_phy_addr, lftl_ctx_t*src_ctx, const uint8_t*src, uintptr_t size){
+  if(!src_is_large(src_ctx,src)){
+    nvm_write(dst_ctx,dst_ctx->nvm_props,dst_phy_addr,src,size);
+    return;
+  }
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  while(size){
+    const uintptr_t len = size > LARGE_BLOCK ? LARGE_BLOCK : size;
+    src_read(src_ctx,buf64,src,len);
+    nvm_write(dst_ctx,dst_ctx->nvm_props,dst_phy_addr,buf64,len);
+    dst_phy_addr += len;
+    src += len;
+    size -= len;
+  }
+}
+
+/**
+ * \brief Update the checksum of an EWLF record with a source resolved by
+ * ::check_src_phy_addr.
+ *
+ * \param src_ctx The context of the source
+ * \param crc Checksum so far
+ * \param src The source address
+ * \param size Size in bytes
+ */
+static uint64_t src_checksum_update(lftl_ctx_t*src_ctx, uint64_t crc, const uint8_t*src, uintptr_t size){
+  uint64_t buf64[16];
+  while(size){
+    const uintptr_t len = size > sizeof(buf64) ? sizeof(buf64) : size;
+    src_read(src_ctx,buf64,src,len);
+    crc = crc64_update(crc,buf64,len);
+    src += len;
+    size -= len;
+  }
+  return crc;
 }
 
 /**
@@ -1920,7 +2704,7 @@ static void write_src_phy_addr_to_dst_phy_addr(
   const uintptr_t end_offset = offset+size_aligned;
   uint64_t wu[SIZE64(write_size)];
   memset(&wu,0x55,sizeof(wu));
-  void* dst_phy_addr = dst_base + offset;
+  uint8_t* dst_phy_addr = dst_base + offset;
   if(!transaction){
     if(offset){
       nvm_write(dst_ctx,dst_ctx->nvm_props,dst_base, current_base, offset);
@@ -1941,7 +2725,7 @@ static void write_src_phy_addr_to_dst_phy_addr(
       nvm_read(dst_ctx,dst_ctx->nvm_props,((uint8_t*)&wu) + addr_misalignement + size, current_base+offset+ addr_misalignement+size, tail_size);
     }
     nvm_read(dst_ctx,dst_ctx->nvm_props,&wu, current_base+offset, addr_misalignement);
-    mem_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
+    src_read(src_ctx,((uint8_t*)&wu) + addr_misalignement, src_phy_addr , size_consumed);
     nvm_write(dst_ctx,dst_ctx->nvm_props,dst_phy_addr,&wu,write_size);
     // adjust write range
     offset += write_size;
@@ -1955,14 +2739,14 @@ static void write_src_phy_addr_to_dst_phy_addr(
     size_aligned -= write_size;
   }
   //at this point size_aligned >= size
-  nvm_write(dst_ctx,dst_ctx->nvm_props,dst_phy_addr,src_phy_addr,size_aligned);
+  src_copy(dst_ctx,dst_phy_addr,src_ctx,src_phy_addr,size_aligned);
   if(size != size_aligned){
     const uintptr_t last_wu_offset = offset+size_aligned;
     // fix up last WU
     uintptr_t size_misalignement = size % write_size;//((uintptr_t)dst_nvm_addr + size) % write_size;
     const uintptr_t wu_part1_size = size_misalignement;
     const uint8_t* wu_part1_src = ((uint8_t*)src_phy_addr) + size_aligned;
-    mem_read(src_ctx,&wu,wu_part1_src, wu_part1_size);
+    src_read(src_ctx,&wu,wu_part1_src, wu_part1_size);
     uint8_t*const wu_part2_base = ((uint8_t*)&wu) + size_misalignement;
     const uintptr_t wu_part2_size = write_size - size_misalignement;
     const uint8_t* wu_part2_src = current_base + last_wu_offset + size_misalignement;
@@ -2202,7 +2986,7 @@ static void ewlf_update(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*
   if(write_data){
     const uintptr_t first = (uintptr_t)dst_nvm_addr - (uintptr_t)dst_ctx->area;
     crc = ewlf_checksum_update(dst_ctx,crc,current_data,first);
-    crc = ewlf_checksum_update(src_ctx,crc,src_phy_addr,size);
+    crc = src_checksum_update(src_ctx,crc,src_phy_addr,size);
     crc = ewlf_checksum_update(dst_ctx,crc,current_data+first+size,dst_ctx->data_size-first-size);
   } else {
     crc = ewlf_checksum_update_erased(crc,dst_ctx->data_size);
@@ -2299,6 +3083,438 @@ static void format_ewlf(lftl_ctx_t*ctx){
 }
 
 /**
+ * \brief The next unit of a large area's pool, ready for a chunk (`alloc` of
+ * the model, with one slot per unit): the first free unit after the head,
+ * erased at that instant whatever it reads, since a unit that reads erased
+ * may hold the remains of an erase a power cut interrupted (T4). The erase
+ * is guarded as a rollover of an EWLF area is: nothing started in the log
+ * may outrank the decision once a unit is erased (after a scan nothing
+ * can: the check is defensive). Nothing is erased while a repair is
+ * pending: the callers need an area that is ready.
+ *
+ * \param ctx Context of the large area
+ * \returns The unit, now the head
+ */
+static uint16_t large_take_unit(lftl_ctx_t*ctx){
+  lftl_ewlf_state_t*const st = &ctx->ewlf;
+  const uint16_t u = large_next_free(ctx,st->head);
+  //the room was counted first: none free means a map naming the same unit twice
+  if(LARGE_NO_UNIT == u) raise_error(ctx,LFTL_ERROR_LARGE_NO_SPACE);
+  if(!ewlf_top_solid(st)) ewlf_bury(ctx);
+  nvm_erase(ctx,ctx->nvm_props,large_unit_addr(ctx,u),1);
+  st->head = u;
+  return u;
+}
+
+/**
+ * \brief Program chunk `i` of a large area into unit `u`, erased: its current
+ * content with the bytes of a write in place, block by block through RAM,
+ * and the CRC of what it means to program.
+ *
+ * Every write unit of the chunk is programmed, whatever its value, so that
+ * the time does not depend on the data.
+ *
+ * \param ctx Context of the large area
+ * \param i Index of the chunk
+ * \param u Unit, erased in this session
+ * \param offset Offset in the data of the bytes written
+ * \param size Number of bytes written, 0 for none
+ * \param src_ctx Context of the source, see ::check_src_phy_addr
+ * \param src Source of the bytes written
+ * \param fresh When not NULL: the CRC of the whole data, chunk after chunk,
+ *   updated with the new content
+ * \param delta When `fresh` is NULL: the CRC of the difference between the
+ *   old and the new data, from the first chunk the update replaces, updated
+ *   with this chunk: R(delta, old) ^ R(0, new)
+ */
+static void large_write_chunk(lftl_ctx_t*ctx, unsigned int i, uint16_t u, uintptr_t offset, uintptr_t size, lftl_ctx_t*src_ctx, const uint8_t*src, uint64_t*fresh, uint64_t*delta){
+  const uintptr_t base = i*page_size(ctx);
+  const uintptr_t len = large_chunk_size(ctx,i);
+  const uintptr_t phy = large_chunk_phy_size(ctx,i);
+  const uint16_t old_u = large_map_entry(ctx,i);
+  const uint8_t*const old = (LARGE_NO_UNIT == old_u) ? 0 : large_unit_addr(ctx,old_u);
+  uint8_t*const dst = large_unit_addr(ctx,u);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  uint64_t a = fresh ? 0 : *delta;
+  uint64_t b = 0;
+  for(uintptr_t p=0;p<phy;p+=LARGE_BLOCK){
+    const uintptr_t l = (phy - p) > LARGE_BLOCK ? LARGE_BLOCK : (phy - p);
+    const uintptr_t d = (p >= len) ? 0 : (((len - p) > l) ? l : (len - p)); //bytes of data, not padding
+    if(old){
+      nvm_read(ctx,ctx->nvm_props,buf,old+p,l);
+    } else {
+      memset(buf,0xFF,l);
+    }
+    if(!fresh) a = crc64_update(a,buf,d);
+    const uintptr_t lo = (base + p > offset) ? (base + p) : offset;
+    const uintptr_t hi = (base + p + l < offset + size) ? (base + p + l) : (offset + size);
+    if(lo < hi) src_read(src_ctx,buf + (lo - base - p),src + (lo - offset),hi - lo);
+    if(fresh){
+      *fresh = crc64_update(*fresh,buf,d);
+    } else {
+      b = crc64_update(b,buf,d);
+    }
+    nvm_write(ctx,ctx->nvm_props,dst+p,buf,l);
+  }
+  if(!fresh) *delta = a ^ b;
+}
+
+/**
+ * \brief Commit a new map of a large area: one pair, in the live log unit or
+ * by a switch, after which the decision is that pair (::ewlf_fresh_pair).
+ *
+ * \param ctx Context of the large area
+ * \param m What the map holds
+ */
+static void large_commit(lftl_ctx_t*ctx, const large_map_src_t*m){
+  lftl_ewlf_state_t*const st = &ctx->ewlf;
+  ewlf_entry_t entry;
+  entry.gen = 0; //set by the pair
+  entry.unit = 0;
+  entry.pos = 0;
+  entry.version = st->version + 1;
+  entry.map = m;
+  ewlf_append(ctx,&entry);
+  st->version = entry.version;
+  st->stuck = 0;
+  ctx->data = (void*)large_map(ctx);
+}
+
+/**
+ * \brief One update of a large area: a plain write, or an erase of all its
+ * data.
+ *
+ * 1. Room: one free unit per chunk the write touches, counted before
+ *    anything is programmed (::LFTL_ERROR_LARGE_NO_SPACE otherwise).
+ * 2. The chunks, in increasing order, each in the next free unit, erased
+ *    right before (::large_take_unit, ::large_write_chunk).
+ * 3. The commit: a pair whose map names the new units and the old ones of
+ *    the chunks not touched, the head, and the checksum of the new data.
+ *
+ * A write that replaces the whole data, and an erase of all of it, use no
+ * data the area holds: no check first, and the checksum is computed afresh.
+ * Any other write needs the data sound, and the checksum follows the chunks
+ * it replaces (::crc64_shift), or is computed afresh when it replaces every
+ * chunk.
+ *
+ * \param ctx Context of the target large area
+ * \param dst_nvm_addr Destination logical address
+ * \param src Source address (ignored when `write_data` is false)
+ * \param size Size in bytes to write, not 0 (ignored when `write_data` is false)
+ * \param write_data Whether to write new data, or erase all of it
+ */
+static void large_update(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool write_data){
+  if(write_data) check_in_data(ctx, dst_nvm_addr, size);
+  ewlf_require_ready(ctx);
+  if(LFTL_INVALID_POINTER != ctx->transaction_tracker) raise_error(ctx,LFTL_ERROR_TRANSACTION_ONGOING);
+  lftl_ewlf_state_t*const st = &ctx->ewlf;
+  const uintptr_t chunk = page_size(ctx);
+  const unsigned int n = large_n_chunks(ctx);
+  const uintptr_t offset = write_data ? ((uintptr_t)dst_nvm_addr - (uintptr_t)ctx->area) : 0;
+  const bool whole = !write_data || ((0 == offset) && (size == ctx->data_size));
+  if(!whole) large_require_sound(ctx);
+  //the source: resolving it can check another area, and can fail
+  const uint8_t*src_addr = (const uint8_t*)src;
+  lftl_ctx_t*src_ctx = ctx;
+  if(write_data) check_src_phy_addr(&src_ctx,&src_addr,size);
+  //the run of chunks the write touches; extended to whole write units it
+  //stays in them, an erase unit being whole write units
+  unsigned int first = 0;
+  unsigned int k = 0;
+  if(write_data){
+    first = offset / chunk;
+    k = (offset + size - 1) / chunk - first + 1;
+  }
+  //1. room
+  if(k > large_count_free(ctx)) raise_error(ctx,LFTL_ERROR_LARGE_NO_SPACE);
+  //2. the chunks
+  const uint16_t run_head = st->head;
+  const bool fresh = whole || (k == n);
+  uint64_t crc = ~(uint64_t)0;
+  uint64_t delta = 0;
+  const uint64_t old_crc = large_map_data_crc(ctx);
+  for(unsigned int j=0;j<k;j++){
+    const uint16_t u = large_take_unit(ctx);
+    large_write_chunk(ctx,first+j,u,offset,size,src_ctx,src_addr,fresh ? &crc : 0,&delta);
+  }
+  uint64_t data_crc;
+  if(!write_data){
+    data_crc = ewlf_checksum_end(ewlf_checksum_update_erased(~(uint64_t)0,ctx->data_size));
+  } else if(fresh){
+    data_crc = ewlf_checksum_end(crc);
+  } else {
+    const uintptr_t end = first*chunk;
+    uintptr_t run_end = end;
+    for(unsigned int j=0;j<k;j++) run_end += large_chunk_size(ctx,first+j);
+    data_crc = old_crc ^ crc64_shift(delta,ctx->data_size - run_end);
+  }
+  //3. the commit
+  large_map_src_t m;
+  memset(&m,0,sizeof(m));
+  m.erased = !write_data;
+  m.run_first = first;
+  m.run_n = k;
+  m.run_head = run_head;
+  m.head = st->head;
+  m.data_crc = data_crc;
+  large_commit(ctx,&m);
+  st->data_check = 1;
+}
+
+/**
+ * \brief Start a transaction on a large area: it uses the data the area
+ * holds, so the data is checked first; nothing is erased.
+ *
+ * \param ctx Context of the large area
+ * \param tracker The caller's tracker, ::LFTL_TRANSACTION_TRACKER_SIZE bytes
+ */
+static void large_txn_start(lftl_ctx_t*ctx, void*const tracker){
+  ewlf_require_ready(ctx);
+  if(LFTL_INVALID_POINTER != ctx->transaction_tracker) raise_error(ctx,LFTL_ERROR_TRANSACTION_ONGOING);
+  large_require_sound(ctx);
+  //start tracking only once nothing can fail anymore
+  const uintptr_t bits = LFTL_TRANSACTION_TRACKER_SIZE_LL(ctx->data_size,ctx->nvm_props->write_size);
+  memset(tracker,0,bits);
+  memset(((uint8_t*)tracker) + bits,0xFF,2*large_n_chunks(ctx));
+  ctx->transaction_tracker = tracker;
+}
+
+/**
+ * \brief Whether the transaction wrote the write unit at an offset of the data.
+ *
+ * \param ctx Context of the area, with a transaction open
+ * \param offset Offset in the data, in the write unit
+ */
+static bool txn_marked(lftl_ctx_t*ctx, uintptr_t offset){
+  const uintptr_t wu = offset / ctx->nvm_props->write_size;
+  return 0 != (((const uint8_t*)ctx->transaction_tracker)[wu / BITS_PER_BYTE] & (1 << (wu % BITS_PER_BYTE)));
+}
+
+/**
+ * \brief A write of a transaction on a large area, its write units already
+ * marked in the tracker: each chunk it touches for the first time takes a
+ * free unit, and its write units are programmed straight there, the bytes
+ * of a write unit the write covers only in part completed from the
+ * committed data.
+ *
+ * \param ctx Context of the large area, with a transaction open
+ * \param dst_nvm_addr Destination logical address
+ * \param src Source address
+ * \param size Size in bytes, not 0
+ * \param aligned Whether the write is to be whole write units (::ALIGNED)
+ */
+static void large_txn_write(lftl_ctx_t*ctx, void*const dst_nvm_addr, const void*const src, uintptr_t size, bool aligned){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  if(aligned){
+    if(0 != ((uintptr_t)dst_nvm_addr % write_size)) raise_error(ctx,LFTL_ERROR_BASE_MISALIGNED);
+    if(0 != (size % write_size)) raise_error(ctx,LFTL_ERROR_SIZE_MISALIGNED);
+  }
+  ewlf_require_ready(ctx);
+  const uint8_t*src_addr = (const uint8_t*)src;
+  lftl_ctx_t*src_ctx = ctx;
+  check_src_phy_addr(&src_ctx,&src_addr,size);
+  uint8_t*const units = large_txn_units(ctx);
+  const uintptr_t chunk = page_size(ctx);
+  const uintptr_t offset = (uintptr_t)dst_nvm_addr - (uintptr_t)ctx->area;
+  const uintptr_t lo = offset - offset % write_size;
+  const uintptr_t hi = LFTL_DIV_CEIL(offset + size, write_size) * write_size;
+  const unsigned int first = lo / chunk;
+  const unsigned int last = (hi - 1) / chunk;
+  //room: a unit for each chunk the transaction did not touch yet
+  unsigned int k = 0;
+  for(unsigned int i=first;i<=last;i++) if(LARGE_NO_UNIT == large_get16(units+2*i)) k++;
+  if(k > large_count_free(ctx)) raise_error(ctx,LFTL_ERROR_LARGE_NO_SPACE);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  for(unsigned int i=first;i<=last;i++){
+    uint16_t u = large_get16(units+2*i);
+    if(LARGE_NO_UNIT == u){
+      u = large_take_unit(ctx);
+      large_put16(units+2*i,u);
+    }
+    const uintptr_t base = i*chunk;
+    const uintptr_t c_lo = (lo > base) ? lo - base : 0;
+    const uintptr_t c_hi = ((hi - base) < chunk) ? (hi - base) : chunk;
+    for(uintptr_t p=c_lo;p<c_hi;p+=LARGE_BLOCK){
+      const uintptr_t l = (c_hi - p) > LARGE_BLOCK ? LARGE_BLOCK : (c_hi - p);
+      //the committed bytes, for a write unit the write covers in part; the
+      //bytes past the data, in its last write unit, read erased
+      memset(buf,0xFF,l);
+      if(base + p < ctx->data_size) large_read_data(ctx,buf,base+p,((base+p+l) <= ctx->data_size) ? l : (ctx->data_size - base - p));
+      const uintptr_t w_lo = (base + p > offset) ? (base + p) : offset;
+      const uintptr_t w_hi = (base + p + l < offset + size) ? (base + p + l) : (offset + size);
+      src_read(src_ctx,buf + (w_lo - base - p),src_addr + (w_lo - offset),w_hi - w_lo);
+      nvm_write(ctx,ctx->nvm_props,large_unit_addr(ctx,u)+p,buf,l);
+    }
+  }
+}
+
+/**
+ * \brief The newer data of a large area during a transaction: the write
+ * units it wrote from its units, the others from the committed data.
+ *
+ * \param ctx Context of the large area, with a transaction open
+ * \param dst Destination, in volatile memory
+ * \param offset Offset in the data
+ * \param size Size in bytes, within the data
+ */
+static void large_txn_read(lftl_ctx_t*ctx, void*dst, uintptr_t offset, uintptr_t size){
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  const uintptr_t chunk = page_size(ctx);
+  const uint8_t*const units = large_txn_units(ctx);
+  uint8_t*dst8 = (uint8_t*)dst;
+  const uintptr_t end = offset + size;
+  while(offset < end){
+    //up to the end of the write unit holding offset
+    const uintptr_t wu_end = (offset / write_size + 1) * write_size;
+    const uintptr_t len = (wu_end < end ? wu_end : end) - offset;
+    if(txn_marked(ctx,offset)){
+      const uint16_t u = large_get16(units+2*(offset / chunk));
+      nvm_read(ctx,ctx->nvm_props,dst8,large_unit_addr(ctx,u)+(offset % chunk),len);
+    } else {
+      large_read_data(ctx,dst8,offset,len);
+    }
+    dst8 += len;
+    offset += len;
+  }
+}
+
+/**
+ * \brief Commit a transaction on a large area.
+ *
+ * Completes each chunk the transaction touched (the write units it did not
+ * write, from the committed data), computes the checksum of the new data
+ * (afresh when every chunk was touched, else from the chunks replaced and
+ * the gaps between them, ::crc64_shift), then commits the map. A
+ * transaction that touched no chunk changes nothing and commits nothing.
+ *
+ * \param ctx Context of the large area, with a transaction open
+ */
+static void large_txn_commit(lftl_ctx_t*ctx){
+  ewlf_require_ready(ctx);
+  lftl_ewlf_state_t*const st = &ctx->ewlf;
+  const uint32_t write_size = ctx->nvm_props->write_size;
+  const unsigned int n = large_n_chunks(ctx);
+  const uintptr_t chunk = page_size(ctx);
+  const uint8_t*const units = large_txn_units(ctx);
+  uint64_t buf64[SIZE64(LARGE_BLOCK)];
+  uint8_t*const buf = (uint8_t*)buf64;
+  unsigned int touched = 0;
+  for(unsigned int i=0;i<n;i++){
+    const uint16_t u = large_get16(units+2*i);
+    if(LARGE_NO_UNIT == u) continue;
+    touched++;
+    const uintptr_t base = i*chunk;
+    const uintptr_t phy = large_chunk_phy_size(ctx,i);
+    for(uintptr_t p=0;p<phy;){
+      if(txn_marked(ctx,base+p)){
+        p += write_size;
+        continue;
+      }
+      uintptr_t l = 0;
+      while((p + l < phy) && (l < LARGE_BLOCK) && !txn_marked(ctx,base+p+l)) l += write_size;
+      memset(buf,0xFF,l);
+      if(base + p < ctx->data_size) large_read_data(ctx,buf,base+p,(base + p + l <= ctx->data_size) ? l : (ctx->data_size - base - p));
+      nvm_write(ctx,ctx->nvm_props,large_unit_addr(ctx,u)+p,buf,l);
+      p += l;
+    }
+  }
+  if(0 == touched){
+    ctx->transaction_tracker = LFTL_INVALID_POINTER;
+    return;
+  }
+  uint64_t data_crc;
+  if(touched == n){
+    uint64_t crc = ~(uint64_t)0;
+    for(unsigned int i=0;i<n;i++) crc = large_crc_phys(ctx,crc,large_unit_addr(ctx,large_get16(units+2*i)),large_chunk_size(ctx,i));
+    data_crc = ewlf_checksum_end(crc);
+  } else {
+    uint64_t delta = 0;
+    uintptr_t prev_end = 0;
+    for(unsigned int i=0;i<n;i++){
+      const uint16_t u = large_get16(units+2*i);
+      if(LARGE_NO_UNIT == u) continue;
+      const uintptr_t base = i*chunk;
+      delta = crc64_shift(delta,base - prev_end);
+      const uint64_t a = large_crc_chunk(ctx,delta,i);
+      const uint64_t b = large_crc_phys(ctx,0,large_unit_addr(ctx,u),large_chunk_size(ctx,i));
+      delta = a ^ b;
+      prev_end = base + large_chunk_size(ctx,i);
+    }
+    data_crc = large_map_data_crc(ctx) ^ crc64_shift(delta,ctx->data_size - prev_end);
+  }
+  large_map_src_t m;
+  memset(&m,0,sizeof(m));
+  m.slots = units;
+  m.head = st->head;
+  m.data_crc = data_crc;
+  large_commit(ctx,&m);
+  ctx->transaction_tracker = LFTL_INVALID_POINTER;
+}
+
+/**
+ * \brief Make the checksum of a large area that of its data as it reads now:
+ * a commit of the same map with that checksum, when it differs.
+ *
+ * \param ctx Context of the large area
+ */
+static void large_repair_checksum(lftl_ctx_t*ctx){
+  ewlf_require_ready(ctx);
+  if(LFTL_INVALID_POINTER != ctx->transaction_tracker) raise_error(ctx,LFTL_ERROR_TRANSACTION_ONGOING);
+  const uint64_t crc = large_data_crc(ctx);
+  if(crc != large_map_data_crc(ctx)){
+    large_map_src_t m;
+    memset(&m,0,sizeof(m));
+    m.head = ctx->ewlf.head;
+    m.data_crc = crc;
+    large_commit(ctx,&m);
+  }
+  ctx->ewlf.data_check = 1;
+}
+
+/**
+ * \brief Format a large area.
+ *
+ * Erases every erase unit, then writes the first pair at the first position
+ * of log unit 1, generation 1, version 1: a map that names no unit, no head,
+ * the checksum of erased data. Not anti-tearing, as for an EWLF area.
+ *
+ * \param ctx Context of the target large area
+ */
+static void format_large(lftl_ctx_t*ctx){
+  lftl_ewlf_state_t*const st = &ctx->ewlf;
+  ctx->data = LFTL_INVALID_POINTER;
+  ctx->transaction_tracker = LFTL_INVALID_POINTER;
+  nvm_erase(ctx,ctx->nvm_props,ctx->area,n_pages(ctx));
+  memset(st,0,sizeof(*st));
+  for(unsigned int l=0;l<2;l++){
+    st->unit[l].started = -1;
+    st->unit[l].newest = -1;
+    st->unit[l].certs_free = ewlf_n_certs(ctx);
+  }
+  st->live = 1;
+  st->version = 1;
+  st->rec_started = -2;
+  st->head = LARGE_NO_UNIT;
+  large_map_src_t m;
+  memset(&m,0,sizeof(m));
+  m.erased = true;
+  m.head = LARGE_NO_UNIT;
+  m.data_crc = ewlf_checksum_end(ewlf_checksum_update_erased(~(uint64_t)0,ctx->data_size));
+  ewlf_entry_t entry;
+  entry.gen = 1;
+  entry.unit = 0;
+  entry.pos = 0;
+  entry.version = 1;
+  entry.map = &m;
+  //freshly erased cells: a refused program is a flash that does not work
+  if(!ewlf_fresh_pair(ctx,1,0,1,1,&entry)) raise_error(ctx,LFTL_ERROR_LOW_LEVEL_WRITE | LFTL_NVM_STATUS_REFUSED);
+  st->data_check = 1;
+  ctx->data = (void*)large_map(ctx);
+}
+
+/**
  * \brief Logically erase a range of an area's data.
  *
  * Used by ::lftl_erase_all. Like ::write_core's non-transactional
@@ -2363,7 +3579,12 @@ static void erase(lftl_ctx_t*ctx, void*const dst_nvm_addr, uintptr_t size){
  *   more than 256 (an entry names a data unit on one byte), less than 2
  *   records fit in a data unit (a constraint the layout macro
  *   ::LFTL_AREA_EWLF asserts too), or a log unit has no room for its
- *   certificates, its reserved pairs and 2 regular pairs.
+ *   certificates, its reserved pairs and 2 regular pairs;
+ * - a large area has no data, a pool smaller than its chunks plus one unit
+ *   (a constraint the layout macro ::LFTL_AREA_LARGE asserts too) or larger
+ *   than 65535 units (a map names a unit on 16 bits), or a log unit has no
+ *   room for its certificates, its reserved pairs and 2 regular pairs of
+ *   its map.
  *
  * \param ctx Context of the LFTL area, with `area_type` already set
  */
@@ -2382,6 +3603,11 @@ static void check_config(lftl_ctx_t*ctx){
     if(n_pages(ctx) < LFTL_EWLF_LOG_UNITS + 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
     if(ewlf_n_data_units(ctx) > 256) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
     if(erase_size / ewlf_record_phy_size(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+    if(ewlf_n_regular(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  } else if(lftl_is_large(ctx)){
+    if(0 == ctx->data_size) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+    if(n_pages(ctx) < LFTL_EWLF_LOG_UNITS + large_n_chunks(ctx) + 1) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+    if(large_n_pool(ctx) > LARGE_NO_UNIT) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
     if(ewlf_n_regular(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
   } else {
     if(n_slots(ctx) < 2) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);

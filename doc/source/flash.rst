@@ -57,24 +57,26 @@ callback should (the STM32 callbacks of the repository check the flash's error f
 operation, clearing them before it so that a refused one cannot poison the next, and read back
 what they programmed).
 
-**R6. EWLF areas only: erased bytes read 0xFF.**
-Free positions, of records and of log pairs, free certificates and the erased-data checksum of
-:c:func:`lftl_erase_all` are recognised by that value. Regular areas do not need it (N1).
+**R6. EWLF and large areas only: erased bytes read 0xFF.**
+Free positions, of records and of log pairs, free certificates, the erased-data checksum of
+:c:func:`lftl_erase_all` and, in a large area, a chunk never written are recognised by that
+value. Regular areas do not need it (N1).
 
 **R7. Flash with ECC.**
 The write unit is at least the ECC codeword (R2). A double-bit error raises an NMI on the STM32L5
 and STM32U5: the handler clears the flag and returns, so that the read completes and *lean-ftl*
 rejects the content; a handler that loops or resets hangs the device at every boot. On the STM32U5
 a pending single-bit correction flag masks the next NMI and must be cleared promptly. See T5.
-For an EWLF area the read callback must also leave, in the write unit that faulted, a value that
-is neither all ``0xFF`` nor all ``0x00``: the unit then counts as started and proves nothing.
+For an EWLF or a large area the read callback must also leave, in the write unit that faulted, a
+value that is neither all ``0xFF`` nor all ``0x00``: the unit then counts as started and proves
+nothing.
 
 **R8. The configuration is static and matches the hardware.**
 ``write_size``, ``erase_size``, the area and its data size are compile-time constants, never read
 from the NVM. Registration checks that they are consistent with each other, not that they are
 true.
 
-**R9. EWLF areas only: a refused program is reported as such.**
+**R9. EWLF and large areas only: a refused program is reported as such.**
 A write unit a power cut left weak can read erased and still be refused by a flash that checks
 before it programs (PROGERR on the STM32L5 and STM32U5). The write callback then returns
 :c:macro:`LFTL_NVM_STATUS_REFUSED`, having programmed nothing, and the area steps over that unit.
@@ -92,7 +94,7 @@ back, so an erased slot never passes as valid whatever its erased value. Two pla
 ``0xFF`` and are safe with any other value: a version word reading ``0xFFFFFFFF`` is skipped as
 "no version" (a shortcut, the checksum would reject it anyway), and the scan sets a torn slot aside only
 when its last meta-data word reads all ``0xFF`` (otherwise the slot is kept, the safe
-side). EWLF areas do need ``0xFF`` (R6).
+side). EWLF and large areas do need ``0xFF`` (R6).
 
 **N2. Bit- or byte-granular programming.**
 Whole write units only, up to 128 bytes. A flash that programs 16 bytes at a time is as good as
@@ -164,7 +166,8 @@ around them. *lean-ftl* therefore never trusts a unit because it reads erased: a
 erases the next slot before every write, and an EWLF rollover erases the unit it enters right
 before its first record is programmed, whatever that unit reads, and never on the strength of a
 flag written earlier. A log unit of an EWLF area is written only in the session that erased it,
-or under a certificate that session left in the other log unit. EWLF areas assume one thing that
+or under a certificate that session left in the other log unit; a pool unit of a large area is
+erased when the head enters it, whatever it reads. EWLF and large areas assume one thing that
 T4 does not say: an interrupted erase of cells that were already erased leaves them erased. It
 held in 40 interrupted erases out of 40 on one STM32U5A5 (:ref:`design-ewlf-checked`).
 

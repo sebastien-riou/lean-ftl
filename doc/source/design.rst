@@ -7,7 +7,7 @@ Anti-tearing and wear leveling
 power cut at any instant, the block reads as the last committed version or as the one before it,
 never a mix of the two and never nothing. It also spreads the erases over the area, so that the
 data can be updated many more times than one page endures. This page describes how both are done
-for the two kinds of areas: the layout on the flash, how an update is written, how the first
+for the three kinds of areas, regular, EWLF and large: the layout on the flash, how an update is written, how the first
 access after a reset locates the current data (the *scan*), what a power cut can leave behind and
 what the scan does about it, and what each update costs in wear. What the library relies on from
 the flash is on the :ref:`flash` page, whose statements R1 to R8, N1 to N5 and T1 to T5 are cited
@@ -29,6 +29,13 @@ one. A copy is *valid* when its checksum matches its data and version. In a regu
 valid copy with the highest version is the current one; in an EWLF area the current copy is the
 one its log names, and the version only ties the two together. The version is not expected to
 wrap: 4.3 billion updates exceed the endurance of any area.
+
+The CRC-64 is computed four bits at a time through a table of 16 entries, 128 bytes of read-only
+data. The table is read at an index that depends on the data: on a processor where the time of a
+read depends on its address, a data cache, the time of the checksum depends on the data. A
+library built with ``LFTL_CRC64_BITWISE`` defined computes the same CRC-64 one bit at a time,
+without a table and in a time that depends on the length alone, at about four times the time per
+byte. Both builds read and write the same areas. The CRC-32 of regular areas is bitwise.
 
 **Meta-data of a regular area.** The version, the checksum and a third item, the *end marker*
 ``checksum2``, a second copy of the checksum, each occupy one write unit, 4 bytes at least (R2 of
@@ -366,8 +373,8 @@ Scan
 ^^^^
 
 The scan reads; it programs and erases nothing. It runs once, at the first call that needs the
-area after a reset: :c:func:`lftl_ewlf_status`, :c:func:`lftl_ewlf_complete_scan`,
-:c:func:`lftl_ewlf_read_unproven`, a read or a write. Registration reads nothing: an area is
+area after a reset: :c:func:`lftl_scan_status`, :c:func:`lftl_complete_scan`,
+:c:func:`lftl_read_unproven`, a read or a write. Registration reads nothing: an area is
 registered before it is formatted. Every word of both log units is read once, and from that one
 reading:
 
@@ -415,7 +422,7 @@ Then:
    writable. This is every boot after a session that was not cut, with one exception, below;
 4. otherwise a *repair* is pending, and nothing is shown until it is done.
 
-**The repair** is :c:func:`lftl_ewlf_complete_scan`, a separate call, so that the application
+**The repair** is :c:func:`lftl_complete_scan`, a separate call, so that the application
 decides when the flash is written. It *buries* ``D``: it programs a copy of ``D`` above every
 started position, by the first of these that applies:
 
@@ -431,14 +438,14 @@ and reads the log no more. When no repair is pending the call does nothing, and 
 may call it unconditionally after a reset.
 
 **While a repair is pending**, :c:func:`lftl_read` and the write functions raise
-:c:macro:`LFTL_ERROR_EWLF_PENDING` on the area, so that no version that is not vouched for reaches
+:c:macro:`LFTL_ERROR_SCAN_PENDING` on the area, so that no version that is not vouched for reaches
 the normal path. Two calls work in that state:
 
-- :c:func:`lftl_ewlf_status` gives the pending repair, ``D``'s version, and the number of further
+- :c:func:`lftl_scan_status` gives the pending repair, ``D``'s version, and the number of further
   power cuts, each at the worst instant, that the area can take before it is stuck
   (:ref:`design-stuck-state`). An application applies the threshold it wants before it calls the
   repair, for instance to ask the user for a stable power supply first;
-- :c:func:`lftl_ewlf_read_unproven` reads ``D``'s record. The record itself is solid: its programs
+- :c:func:`lftl_read_unproven` reads ``D``'s record. The record itself is solid: its programs
   returned before its entry was started, and its unit is not erased while an entry can name it.
   Within the session it is exactly the version the repair makes current. What is not proven is
   that a later boot chooses the same one, if the session ends before the repair: the other
@@ -619,7 +626,7 @@ Limitations
   :c:macro:`LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED`;
 - two erase units of every area are its log, and the area needs two data units at least;
 - after a reset, an application that reads or writes the area without calling
-  :c:func:`lftl_ewlf_complete_scan` first gets :c:macro:`LFTL_ERROR_EWLF_PENDING` when the last
+  :c:func:`lftl_complete_scan` first gets :c:macro:`LFTL_ERROR_SCAN_PENDING` when the last
   session was cut;
 - the update that rolls over or switches costs one or two erases and the others none, so the
   update time is not uniform;
@@ -629,6 +636,197 @@ Limitations
 A possible extension, not implemented: for data of a few tens of bytes the record could live in
 the pair itself, without data units, which halves the smallest area. Another: an EWLF area could
 serve as the journal of transactions that span several areas.
+
+.. _design-large:
+
+Large areas
+-----------
+
+A large area, declared with :c:macro:`LFTL_AREA_LARGE` and registered with
+:c:func:`lftl_register_area_large`, is meant for data of several erase units. A regular area and
+an EWLF area rewrite the whole data at every update; a large area cuts it into *chunks* of one
+erase unit each, keeps them in a *pool* of erase units, and rewrites only the chunks an update
+touches. A *map* says which pool unit holds each chunk; the map is replaced atomically by the log
+of an EWLF area, whose pairs hold it. It keeps:
+
+- the guarantee of EWLF areas: after any sequence of power cuts at any instant, a boot shows the
+  data the last acknowledged update left or a newer one, never takes back data it showed, never
+  shows an update that was never acknowledged after older data was shown, and loses nothing. An
+  update is atomic whatever the number of chunks it touches; the stuck state of
+  :ref:`design-stuck-state` is the one residual, and it is the log's;
+- the transactions of regular areas, with the same calls;
+- a checksum of the whole data, checked once per reset.
+
+The pool must hold the chunks and one more unit, 65535 units at most, and a log unit must hold
+its certificates, its reserved pairs and 2 regular pairs of the map. The flash must meet what an
+EWLF area needs: R6 and R9 of the flash page.
+
+Layout
+^^^^^^
+
+.. code-block:: text
+
+   area = U pool units, then 2 log units
+
+   +---------+---------+-------+---------+---------+---------+
+   |   P0    |   P1    |  ...  | P(U-1)  |   L0    |   L1    |
+   |  chunk  |  chunk  |       |  chunk  |  pairs  |  pairs  |
+   +---------+---------+-------+---------+---------+---------+
+
+   pair = marker | map | meta | confirm
+   map  = the unit of each chunk (16 bits each) | head unit (16 bits) | CRC-64 of the data
+   meta = generation (16 bits) | 0 (16 bits) | version (32 bits) | CRC-64 of the map and meta
+
+A pool unit holds one chunk, which fills it: no marker, no flag, no checksum, and nothing says
+which chunk it is; only the map says. The last chunk may hold less than a unit. A map entry of
+``0xFFFF`` is a chunk never written, which reads erased. The *head* is the pool unit the update
+that wrote the map filled last. The log units are those of an EWLF area, pairs then certificates;
+a pair is the marker, the map, the meta field and the confirm, each programmed only after the one
+before it returned, so that a meta field that reads valid proves its map solid. The map of 64 KB
+on the STM32U5 is 26 bytes, its pair 80 bytes; that of 1 MB is 266 bytes, its pair 320 bytes.
+
+Update
+^^^^^^
+
+A plain write covers a run of consecutive chunks:
+
+1. **room**: one free pool unit per chunk the write touches, counted before anything is
+   programmed. When the pool has not that many, :c:macro:`LFTL_ERROR_LARGE_NO_SPACE` is raised
+   and nothing changes;
+2. **the chunks**, in increasing order, each in the next free unit, erased right before: the bytes
+   written from the caller, the others from the chunk's current copy, or erased when it has none;
+3. **the commit**: a pair whose map names the new units for the chunks written and the old ones
+   for the others, the head, and the checksum of the new data, appended to the log as an EWLF area
+   appends an entry, with a log switch when the live unit is full.
+
+Every chunk's program returned before the pair was started, so a map that the log names, names
+only whole chunks. The map is streamed into the pair, two bytes per chunk, with no copy of it in
+RAM: the units of the run are found again as they were taken, the free units after the head in
+ring order. :c:func:`lftl_erase_all` is an update whose map names no unit.
+
+The pool
+^^^^^^^^
+
+A pool unit is *free* when it holds no chunk of the current map and none of the open transaction;
+whatever a free unit holds is garbage: an older copy of a chunk, or what a power cut or an
+aborted transaction left. There is no third state: a unit holds a whole chunk or nothing of value,
+so nothing is ever copied to make room and there is no garbage collection.
+
+**The head goes round the pool.** For each chunk to write the head moves to the next free unit
+after it, in increasing order, wrapping around, the head itself last. It steps over the units that
+hold a current chunk, which are left alone.
+
+**A unit is erased when the head enters it, whatever it reads.** A free unit that reads erased may
+hold the remains of an erase a power cut interrupted (T4); it is erased again before its chunk is
+programmed. Nothing is erased anywhere else, and nothing while a repair of the scan is pending;
+the erase is guarded as the rollover of an EWLF area is.
+
+**Wear.** The free units take the writes in turn, so the erases spread over every unit but those
+whose chunk never changes, which are never erased nor copied. ``W`` chunk writes over the life of
+the area need ``W`` / endurance units on top of the chunks that are not rewritten. A power cut
+burns nothing that lasts: the units an interrupted update wrote are free, and are erased again
+when the head reaches them.
+
+The checksum of the data
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The map carries the CRC-64/NVME of the whole data, so that the CRC-64 of the pair covers the data
+too, through the map. It is not computed again over the whole data at every update: a CRC is
+linear, so replacing a run of chunks changes it by the CRC of the old content xor that of the new
+one, shifted by the bytes of data after the run, a multiplication by a power of ``x`` modulo the
+polynomial, of bounded time. An update reads the old content of the chunks it replaces; an update
+that replaces every chunk computes the checksum afresh.
+
+It plays no part in the anti-tearing argument: it is there for what the flash does to the data
+after it was written. It is checked once per reset and never by the scan, whose time does not
+depend on the size of the data: by :c:func:`lftl_check_data` when the application calls it, or
+otherwise before the first call that uses the data the area holds. A mismatch is an error,
+:c:macro:`LFTL_ERROR_DATA_CHECKSUM`, never a fallback to older data, which a large area does not
+have; :c:func:`lftl_read_unchecked` reads the data whatever its checksum, and
+:c:func:`lftl_repair_checksum` commits the checksum of the data as it reads. A write of the whole
+data, or of all of its chunks, and an erase of all of it, need no check.
+
+Transactions
+^^^^^^^^^^^^
+
+The calls and the rules are those of regular areas. :c:func:`lftl_transaction_start` erases
+nothing; the tracker holds, after the bit of each write unit, the pool unit of each chunk. A
+transaction write takes a free unit for each chunk it touches for the first time and programs its
+write units straight there. The commit completes each chunk touched from its current copy, then
+commits the map as an update does. An abort forgets the tracker: the units the transaction took
+are free again. A transaction holds the old and the new copy of every chunk it touches until its
+commit, so its size is bounded by the free units of the pool.
+
+Scan
+^^^^
+
+The scan is that of an EWLF area: both log units read once, the decision is the newest valid pair
+of the live unit, a pair being valid when the CRC of its meta field verifies over the map and the
+meta field and every unit the map names exists. The pool is not read. The repair, when the scan
+leaves one pending, copies a map, never data: the chunks of the map the decision names are intact,
+since nothing is erased while a repair is pending.
+
+Why there is no rollback, no loss and no mixed content
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+1. *The map is the data of an EWLF pair.* What is shown is a map that a proven pair holds; the
+   order of maps is that of their pairs; a map once shown is never outranked. This is the
+   argument of EWLF areas, which does not depend on what the data of a pair is.
+2. *A map names only whole chunks*, each programmed into a unit whose erase returned in the same
+   session, before the pair was started.
+3. *No erase destroys a chunk a boot can show.* A pool unit is erased only when the head enters
+   it, in a session where the area is ready: the current map is final, and the unit holds none of
+   its chunks, nor of the map being written. After a cut the two candidates are the map that was
+   current and the one being committed, and nothing is erased until a boot made one of them final.
+4. *The content is never mixed*: a single pair replaces the map.
+
+A cut in a chunk, or in the erase of a pool unit, leaves a unit no map names: the previous data,
+and the unit is free. A cut in the pair is a cut in the log, handled as in an EWLF area.
+
+Costs
+^^^^^
+
+On the STM32U5A5, for data of 64 KB less 48 bytes, the best case of a regular area, estimates
+(``test/ewlf-model/chunked_sim.py --large``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 30 30
+
+   * -
+     - Regular area
+     - Large area
+   * - Update of the whole data
+     - 8 units, 556 ms
+     - 8 units and an 80-byte pair, 551 ms
+   * - Update of a few bytes
+     - 8 units, 556 ms
+     - 1 unit, 71 ms
+   * - Smallest area, a transaction of the whole data allowed
+     - 128 KB
+     - 144 KB
+   * - Area for 500 000 updates of the whole data
+     - 3.12 MB
+     - 3.14 MB
+   * - Area for 500 000 updates of one unit or less
+     - 3.12 MB
+     - 480 KB
+   * - Updates the log endures
+     - 10 000 per slot
+     - 1.76 million, fewer as the map grows: 320 000 for 1 MB
+   * - First access after a reset
+     - the checksum of half the slots on average
+     - 16 KB of log; the check of the data apart, 13 ms
+   * - After a power cut
+     - the old or the new version; a rollback by one version in the cases of
+       :ref:`design-residual`
+     - the old or the new data, never taken back
+
+An update of the whole data takes the same time within 1 %: the pair costs 10 ms, and the checksum
+of the data 6 ms less than the CRC-32 of a regular area. With the bitwise CRC-64 of
+``LFTL_CRC64_BITWISE`` (see :ref:`design-common`) the three times of a large area are 580 ms,
+78 ms and 43 ms. The log limits the commits: with its
+two units, 500 000 commits hold up to 83 chunks, 664 KB on the STM32U5.
 
 .. _design-without-pinning:
 
@@ -702,9 +900,28 @@ word of the record or of the pair the cut interrupted, or a word of a repair or 
        log unit has positions (:ref:`design-stuck-state`)
      - The area is stuck: it refuses to write, or to show a version it cannot prove (O3). No
        rollback, no loss: the content is there, and readable by
-       :c:func:`lftl_ewlf_read_unproven`
+       :c:func:`lftl_read_unproven`
      - Open; the area reports how many such cuts are left before each of them, and
        :c:func:`lftl_format` brings it back
+     - Same
+   * - Large area: everything above that applies to EWLF areas
+     - The same: its log is the log of an EWLF area, and its pool adds no way to the stuck state
+     - Same as for EWLF areas
+     - Same
+   * - Large area: a cut in a chunk or in the erase of a pool unit
+     - None: the unit is free, no map names it, the previous data is shown
+     - Closed: the unit is erased again when the head enters it, whatever it reads
+     - Same
+   * - Large area: an update or a transaction larger than the free units of the pool
+     - :c:macro:`LFTL_ERROR_LARGE_NO_SPACE`, nothing changed, the transaction aborted (O3 for
+       that update only)
+     - Sized away: a pool of the chunks plus the chunks of the largest update never lacks room,
+       whatever the power cuts
+     - Same
+   * - Large area: data the flash changed after it was written
+     - Not a power cut: detected once per reset by the checksum of the data,
+       :c:macro:`LFTL_ERROR_DATA_CHECKSUM`, never a fallback to older data
+     - The application reads what it can with :c:func:`lftl_read_unchecked` and repairs
      - Same
    * - Power cut at every boot
      - Wear, availability (O3)
@@ -768,20 +985,22 @@ Unchanged in both variants: wear driven by the application's updates (T1.5), a t
 
 .. _design-stuck-state:
 
-The stuck state of EWLF areas
------------------------------
+The stuck state of EWLF and large areas
+---------------------------------------
 
-The one state in which an EWLF area refuses to proceed, :c:macro:`LFTL_ERROR_EWLF_STUCK`. It has
+The one state in which an EWLF area refuses to proceed, :c:macro:`LFTL_ERROR_STUCK`. It is a
+state of the log, so it is the same for a large area, whose pairs are larger and fewer: the
+positions of ``O`` below are about 120 for a small map. It has
 two faces:
 
 - *at an update*: the log switch finds no certificate, no reserved pair or no position left. The
   write fails, and every later write fails the same way; the area keeps showing its current
   version, at this boot and at the next ones;
-- *at a boot*: the repair has no room. :c:func:`lftl_ewlf_complete_scan` raises the error before
+- *at a boot*: the repair has no room. :c:func:`lftl_complete_scan` raises the error before
   programming anything, and reads and writes raise it too.
 
 Both are a loss of availability, not of data. The content is physically present; in the second
-case the version the scan chose is readable with :c:func:`lftl_ewlf_read_unproven`, and
+case the version the scan chose is readable with :c:func:`lftl_read_unproven`, and
 :c:func:`lftl_format` brings the area back empty.
 
 It is reached only by exhausting a reserve, one word or one position per power cut, each cut
@@ -817,7 +1036,7 @@ the STM32U5. The attempts need not be consecutive boots: a boot that does not sw
 burns a word nor gives one back. What ends the count is a switch that returns: the new live unit
 has all its certificates.
 
-**The remaining cuts.** :c:func:`lftl_ewlf_status` reports, at any time, the smallest number of
+**The remaining cuts.** :c:func:`lftl_scan_status` reports, at any time, the smallest number of
 further power cuts, each at the worst instant, after which the area is stuck. It is the smallest
 of three counts taken from the scan's reading of the log, every word that does not read erased
 counting as burnt:
@@ -867,3 +1086,23 @@ and under its model, nothing more.
 
 **The library** is tested on the Linux simulator, where a power cut leaves weak words and every
 program of an update and of a repair is cut in turn, and on the STM32U5A5: :ref:`tests`.
+
+.. _design-large-checked:
+
+How the design of large areas was checked
+-----------------------------------------
+
+The same model checker, with ``test/ewlf-model/chunked_model.py``: ``proto_c2.py`` is the pool,
+whose rules the library's large block follows, run with one slot per unit; ``proto_c2p.py`` puts
+it over ``proto_v4p.py``, the log with its data inside the pair, which is what a large area is;
+``proto_c2a.py`` puts it over the contract of the log instead of the log, which has far fewer
+states and explores the pool further. A chunk is one word in the model. No violation was found
+with 2 power cuts and 5 boots on the log (162 million sessions), with 2 cuts and 4 boots and a
+log switch at every commit, with three chunks, and with two operations per session; nor with 3
+cuts and 6 boots over the contract of the log.
+Each pool rule, removed alone, gives a violation: without the check that a unit holds no current
+chunk, or no chunk of the open transaction, a wrong read; without the erase of a unit that reads
+erased, a chunk that reads garbage later (T4). The simulation in ``chunked_sim.py`` plays the pool
+at real sizes and finds no update short of room under the sizing rule, and the erases spread as
+the rule counts. ``CHUNKED.md`` and ``LARGE.md`` in the repository hold the figures; the checksum
+of the data plays no part in this argument and is not in the model.

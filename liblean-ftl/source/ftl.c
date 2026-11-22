@@ -15,6 +15,7 @@ const char* lftl_build_type(){
 void lftl_init_lib(){
   first_area = LFTL_INVALID_POINTER;
   first_area_ewlf = LFTL_INVALID_POINTER;
+  first_area_large = LFTL_INVALID_POINTER;
   first_nvm = LFTL_INVALID_POINTER;
 }
 
@@ -42,11 +43,19 @@ void lftl_register_area_ewlf(lftl_ctx_t*ctx){
   lftl_register_area_core(ctx, &first_area_ewlf);
 }
 
+void lftl_register_area_large(lftl_ctx_t*ctx){
+  ctx->area_type = LFTL_AREA_TYPE_LARGE;
+  check_config(ctx);
+  lftl_register_area_core(ctx, &first_area_large);
+}
+
 void lftl_format(lftl_ctx_t*ctx){
   DEBUG_PRINTLN("lftl_format entry");
   if(ctx->nvm_props->write_size>LFTL_WU_MAX_SIZE) raise_error(ctx,LFTL_ERROR_WU_SIZE_TOO_LARGE);
   if(lftl_is_ewlf(ctx)){
     format_ewlf(ctx);
+  } else if(lftl_is_large(ctx)){
+    format_large(ctx);
   } else {
     nvm_erase(ctx,ctx->nvm_props,ctx->area,n_pages(ctx));
     ctx->data = ctx->area;
@@ -63,31 +72,60 @@ lftl_ctx_t*lftl_get_ctx_ewlf(const void*const addr){
   return addr_to_area_ewlf(addr);
 }
 
+lftl_ctx_t*lftl_get_ctx_large(const void*const addr){
+  return addr_to_area_large(addr);
+}
+
 lftl_ctx_t*lftl_get_ctx(const void*const addr){
   lftl_ctx_t*ctx = lftl_get_ctx_std(addr);
   if(LFTL_INVALID_POINTER != ctx) return ctx;
-  return lftl_get_ctx_ewlf(addr);
+  ctx = lftl_get_ctx_ewlf(addr);
+  if(LFTL_INVALID_POINTER != ctx) return ctx;
+  return lftl_get_ctx_large(addr);
 }
 
 bool lftl_is_ewlf(const lftl_ctx_t*const ctx){
   return ctx->area_type == LFTL_AREA_TYPE_EWLF;
 }
 
-void lftl_ewlf_status(lftl_ctx_t*ctx, lftl_ewlf_status_t*status){
-  if(!lftl_is_ewlf(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+bool lftl_is_large(const lftl_ctx_t*const ctx){
+  return ctx->area_type == LFTL_AREA_TYPE_LARGE;
+}
+
+void lftl_scan_status(lftl_ctx_t*ctx, lftl_scan_status_t*status){
+  if(!lftl_is_ewlf(ctx) && !lftl_is_large(ctx)){
+    //no log: nothing is ever pending, the area is never stuck
+    if(LFTL_INVALID_POINTER == ctx->data) find_current_slot(ctx);
+    status->version = get_slot_version(ctx,get_current_slot_index(ctx));
+    status->remaining_cuts = 0xFFFF;
+    status->pending = LFTL_REPAIR_NONE;
+    status->stuck = 0;
+    return;
+  }
   if(LFTL_INVALID_POINTER == ctx->data) ewlf_scan(ctx);
   status->version = ctx->ewlf.version;
   status->remaining_cuts = ewlf_remaining_cuts(ctx);
-  status->pending = (EWLF_PENDING_POINTER == ctx->data) ? ctx->ewlf.pending : LFTL_EWLF_REPAIR_NONE;
+  status->pending = (EWLF_PENDING_POINTER == ctx->data) ? ctx->ewlf.pending : LFTL_REPAIR_NONE;
   status->stuck = 0 != ctx->ewlf.stuck;
 }
 
-void lftl_ewlf_complete_scan(lftl_ctx_t*ctx){
-  if(!lftl_is_ewlf(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+void lftl_complete_scan(lftl_ctx_t*ctx){
+  if(!lftl_is_ewlf(ctx) && !lftl_is_large(ctx)){
+    if(LFTL_INVALID_POINTER == ctx->data) find_current_slot(ctx);
+    return;
+  }
   ewlf_complete(ctx);
 }
 
-void lftl_ewlf_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
+void lftl_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
+  if(lftl_is_large(ctx)){
+    if(0==size) return;
+    check_in_data(ctx, src_nvm_addr, size);
+    large_scanned(ctx);
+    large_require_sound(ctx);
+    large_read_data(ctx,dst,(uintptr_t)src_nvm_addr - (uintptr_t)ctx->area,size);
+    return;
+  }
   if(!lftl_is_ewlf(ctx)){
     lftl_read(ctx,dst,src_nvm_addr,size);
     return;
@@ -102,9 +140,30 @@ void lftl_ewlf_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_
   nvm_read(ctx,ctx->nvm_props,dst,base + offset,size);
 }
 
+bool lftl_check_data(lftl_ctx_t*ctx){
+  if(!lftl_is_large(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  large_scanned(ctx);
+  return large_check(ctx);
+}
+
+void lftl_read_unchecked(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
+  if(!lftl_is_large(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  if(0==size) return;
+  check_in_data(ctx, src_nvm_addr, size);
+  large_scanned(ctx);
+  large_read_data(ctx,dst,(uintptr_t)src_nvm_addr - (uintptr_t)ctx->area,size);
+}
+
+void lftl_repair_checksum(lftl_ctx_t*ctx){
+  if(!lftl_is_large(ctx)) raise_error(ctx,LFTL_ERROR_BAD_CONFIG);
+  large_repair_checksum(ctx);
+}
+
 void lftl_erase_all(lftl_ctx_t*ctx){
   if(lftl_is_ewlf(ctx)){
     erase_ewlf(ctx);
+  } else if(lftl_is_large(ctx)){
+    large_update(ctx,ctx->area,LFTL_INVALID_POINTER,0,false);
   } else {
     erase(ctx, ctx->area, ctx->data_size);//dst_nvm_addr is area because erase function does the address translation
   }
@@ -114,6 +173,8 @@ void lftl_basic_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*co
   if(0==size) return;
   if(lftl_is_ewlf(dst_ctx)){
     write_ewlf(dst_ctx,dst_nvm_addr,src,size);
+  } else if(lftl_is_large(dst_ctx)){
+    large_update(dst_ctx,dst_nvm_addr,src,size,true);
   } else {
     write_core(dst_ctx,dst_nvm_addr,src,size,NO_TRANSACTION,UNALIGNED);
   }
@@ -122,6 +183,13 @@ void lftl_basic_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const void*co
 void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size){
   DEBUG_PRINTLN("lftl_read entry");
   if(0==size) return;
+  if(lftl_is_large(ctx)){
+    check_in_data(ctx, src_nvm_addr, size);
+    ewlf_require_ready(ctx);
+    large_require_sound(ctx);
+    large_read_data(ctx,dst,(uintptr_t)src_nvm_addr - (uintptr_t)ctx->area,size);
+    return;
+  }
   const void*const phy_addr = translate_addr(ctx, src_nvm_addr, size);
   nvm_read(ctx,ctx->nvm_props,dst, phy_addr, size);
   DEBUG_PRINTLN("lftl_read exit");
@@ -129,6 +197,10 @@ void lftl_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_
 
 void lftl_transaction_start(lftl_ctx_t*dst_ctx, void *const transaction_tracker){
   if(lftl_is_ewlf(dst_ctx)) raise_error(dst_ctx,LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED);
+  if(lftl_is_large(dst_ctx)){
+    large_txn_start(dst_ctx,transaction_tracker);
+    return;
+  }
   if(LFTL_INVALID_POINTER != dst_ctx->transaction_tracker) raise_error(dst_ctx,LFTL_ERROR_TRANSACTION_ONGOING);
   //next_slot needs the current slot, which nothing may have located yet after a reset
   if(LFTL_INVALID_POINTER == dst_ctx->data) find_current_slot(dst_ctx);
@@ -159,6 +231,10 @@ void lftl_transaction_write(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, const v
     if(tracker[byte_index] & mask) raise_error(dst_ctx,LFTL_ERROR_TRANSACTION_OVERWRITE);
     tracker[byte_index] |= mask;
   }
+  if(lftl_is_large(dst_ctx)){
+    large_txn_write(dst_ctx,dst_nvm_addr,src,size,ALIGNED);
+    return;
+  }
   write_core(dst_ctx,dst_nvm_addr,src,size,TRANSACTION, ALIGNED);
 }
 
@@ -187,6 +263,10 @@ void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, con
       if(tracker[byte_index] & mask) raise_error(dst_ctx,LFTL_ERROR_TRANSACTION_OVERWRITE);
       tracker[byte_index] |= mask;
     }
+    if(lftl_is_large(dst_ctx)){
+      large_txn_write(dst_ctx,dst_nvm_addr,src,size,UNALIGNED);
+      return;
+    }
     write_core(dst_ctx,dst_nvm_addr,src,size,TRANSACTION, UNALIGNED);
   }
   
@@ -194,6 +274,10 @@ void lftl_transaction_write_any(lftl_ctx_t*dst_ctx, void*const dst_nvm_addr, con
 
 void lftl_transaction_commit(lftl_ctx_t*dst_ctx){
   if(LFTL_INVALID_POINTER == dst_ctx->transaction_tracker) raise_error(dst_ctx,LFTL_ERROR_NO_TRANSACTION);
+  if(lftl_is_large(dst_ctx)){
+    large_txn_commit(dst_ctx);
+    return;
+  }
   //lookup transaction tracker and copy unwritten write units
   const uint32_t write_size = dst_ctx->nvm_props->write_size;
   const uint32_t n_write_units = dst_ctx->data_size / write_size;
@@ -238,6 +322,11 @@ void lftl_transaction_read(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_ad
   if(LFTL_INVALID_POINTER == ctx->transaction_tracker) raise_error(ctx,LFTL_ERROR_NO_TRANSACTION);
   if(0==size) return;
   check_in_data(ctx, src_nvm_addr, size);
+  if(lftl_is_large(ctx)){
+    ewlf_require_ready(ctx);
+    large_txn_read(ctx,dst,(uintptr_t)src_nvm_addr - (uintptr_t)ctx->area,size);
+    return;
+  }
   const uint32_t write_size = ctx->nvm_props->write_size;
   const uintptr_t offset = (uintptr_t)src_nvm_addr - (uintptr_t)ctx->area;
   const uintptr_t end = offset + size;

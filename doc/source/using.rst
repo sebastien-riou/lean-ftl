@@ -137,7 +137,7 @@ Formatting, reading and writing work the same way as for a regular area, with th
   last session was cut by a power loss. Nothing is written until the application asks for it.
 
 After a reset, set the context's ``data`` to :c:macro:`LFTL_INVALID_POINTER`, as for a regular
-area, then call :c:func:`lftl_ewlf_complete_scan` before the first read or write. It does the
+area, then call :c:func:`lftl_complete_scan` before the first read or write. It does the
 repair if there is one and nothing otherwise, so it can be called unconditionally:
 
 .. code-block:: c
@@ -146,16 +146,16 @@ repair if there is one and nothing otherwise, so it can be called unconditionall
   :name: Example: An EWLF area after a reset
 
   lftl_register_area_ewlf(&ewlf_c);
-  lftl_ewlf_complete_scan(&ewlf_c); //does the repair a power cut left to do, if any
+  lftl_complete_scan(&ewlf_c); //does the repair a power cut left to do, if any
   lftl_read(&ewlf_c, &counter, &nvm.counter, sizeof(counter));
 
 Without that call, :c:func:`lftl_read` and the write functions raise
-:c:macro:`LFTL_ERROR_EWLF_PENDING` when a repair is pending, and work as usual when none is. On
+:c:macro:`LFTL_ERROR_SCAN_PENDING` when a repair is pending, and work as usual when none is. On
 an area that was never formatted the call raises :c:macro:`LFTL_ERROR_NO_VALID_VERSION`, as a
 read does.
 
 An application that wants to decide before the flash is written asks first.
-:c:func:`lftl_ewlf_status` reads the area without writing it and reports the pending repair and
+:c:func:`lftl_scan_status` reads the area without writing it and reports the pending repair and
 ``remaining_cuts``: the number of further power cuts, each at the worst instant, that the area
 can take before it is *stuck* (:ref:`design-stuck-state`). That number is the number of
 certificates of the area, 32 by default, in normal operation, and goes down by one for each log
@@ -166,22 +166,22 @@ switch a power cut interrupts in a particular 256 us window:
   :caption: Example: Deciding before the repair
   :name: Example: Deciding before the repair
 
-  lftl_ewlf_status_t status;
-  lftl_ewlf_status(&ewlf_c, &status);
+  lftl_scan_status_t status;
+  lftl_scan_status(&ewlf_c, &status);
   if(status.stuck){
     //no room left for the repair: salvage what the scan chose, then format
-    lftl_ewlf_read_unproven(&ewlf_c, &counter, &nvm.counter, sizeof(counter));
+    lftl_read_unproven(&ewlf_c, &counter, &nvm.counter, sizeof(counter));
     lftl_format(&ewlf_c);
   } else {
     if(status.remaining_cuts < 8){
       //the power supply keeps failing at the wrong time: ask the user before going on
     }
-    lftl_ewlf_complete_scan(&ewlf_c);
+    lftl_complete_scan(&ewlf_c);
   }
 
 The same number is worth a look before a write, since most of the cuts that count are cuts of a
-write: a write that finds no certificate left raises :c:macro:`LFTL_ERROR_EWLF_STUCK` and the
-area keeps showing its current content. :c:func:`lftl_ewlf_read_unproven` reads the area in any
+write: a write that finds no certificate left raises :c:macro:`LFTL_ERROR_STUCK` and the
+area keeps showing its current content. :c:func:`lftl_read_unproven` reads the area in any
 state; while a repair is pending it returns the version the repair then makes current.
 
 The number of certificates is the ``ewlf_certificates`` member of :c:type:`lftl_ctx_t`; left at
@@ -192,6 +192,88 @@ Use :c:func:`lftl_is_ewlf` if you need to tell, given a context, whether it refe
 area or a regular one. How EWLF areas work is described in :ref:`design-ewlf`. Their on-flash
 format changed in v0.4.0: an EWLF area written by an earlier version is not read and must be
 formatted again (regular areas are unchanged since v0.1.0).
+
+Large areas
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A regular area rewrites its whole content at every update, and so does an EWLF area. For data of
+several pages this is costly: 500 000 updates of 64 KB need fifty copies of it, whatever the size
+of each update. :c:macro:`LFTL_AREA_LARGE` cuts the data into *chunks* of one page each, keeps
+them in a *pool* of pages, and rewrites only the chunks an update touches. An update of the whole
+data costs what it costs in a regular area, an update of a few bytes one page:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: Declaring a large LFTL area
+  :name: Example: Declaring a large LFTL area
+
+  typedef struct data_flash_struct {
+
+    LFTL_AREA_LARGE(d,
+      uint8_t records[64*1024];
+      ,24)
+
+  } __attribute__ ((aligned (LFTL_PAGE_SIZE))) data_flash_t;
+  data_flash_t nvm;
+
+The last argument is the number of pages of the pool; the macro adds 2 pages for the log that
+says where each chunk is. How large the pool must be (:ref:`design-large`):
+
+- the chunks of the data plus the chunks of the largest update or transaction: 8 + 8 above, so
+  that a transaction may rewrite all of it. :c:macro:`LFTL_ERROR_LARGE_NO_SPACE` is raised,
+  with nothing changed, by an update that needs more free pages than the pool has;
+- for wear, the chunks never rewritten plus the chunk writes over the life of the area divided by
+  the endurance of a page: at 10 000 cycles, the 24 pages above allow 160 000 writes of one chunk
+  (the rule counts the 8 chunks as never rewritten), or 30 000 updates of the whole data (24
+  pages of 10 000 erases, 8 per update).
+
+An area declared with :c:macro:`LFTL_AREA_LARGE` is registered with
+:c:func:`lftl_register_area_large`. Formatting, reading, writing and transactions work as for a
+regular area; the boot is that of an EWLF area, the same calls (:c:func:`lftl_complete_scan`,
+:c:func:`lftl_scan_status`, :c:func:`lftl_read_unproven`) and the same stuck state; the flash must
+meet the same requirements (R6 and R9 of :ref:`flash-required`). The differences:
+
+- :c:func:`lftl_transaction_start` erases nothing: each page a transaction touches is taken from
+  the pool at its first write. The tracker is larger, :c:macro:`LFTL_TRANSACTION_TRACKER_SIZE`
+  for any type of area, :c:macro:`LFTL_TRANSACTION_TRACKER_SIZE_LARGE` for a static buffer;
+- the area keeps a CRC-64 of its whole data, and checks the data against it once per reset,
+  before the first call that uses the data: a read, a write that does not replace the whole data,
+  the start of a transaction. That reads all of it, about 0.2 s per megabyte on the STM32U5A5.
+  :c:func:`lftl_check_data` does it at the moment the application chooses instead:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: A large area after a reset
+  :name: Example: A large area after a reset
+
+  lftl_register_area_large(&large_d);
+  lftl_complete_scan(&large_d); //does the repair a power cut left to do, if any
+  if(!lftl_check_data(&large_d)){
+    //the flash lost some of the data since it was written: no older copy to fall back to
+  }
+  lftl_read(&large_d, &rec, &nvm.records[i], sizeof(rec));
+
+A mismatch is an error, never a fallback to older data: there is none, and a fallback would be a
+rollback. From then on every call that uses the data raises :c:macro:`LFTL_ERROR_DATA_CHECKSUM`.
+:c:func:`lftl_read_unchecked` reads the data all the same, and :c:func:`lftl_repair_checksum`
+makes the checksum that of the data as it reads, in one commit, after which the application
+repairs the chunks it knows are wrong by ordinary writes, one page at a time:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: Repairing a large area
+  :name: Example: Repairing a large area
+
+  if(!lftl_check_data(&large_d)){
+    lftl_read_unchecked(&large_d, &rec, &nvm.records[i], sizeof(rec)); //what is still right
+    lftl_repair_checksum(&large_d); //the data as it reads is accepted
+    lftl_write(&large_d, &nvm.records[i], &good_rec, sizeof(good_rec));
+  }
+
+A write of the whole data and :c:func:`lftl_erase_all` need no check and leave the area sound.
+
+Use :c:func:`lftl_is_large` to tell, given a context, whether it refers to a large area.
+``ewlf_certificates`` sets the certificates of its log as for an EWLF area. How large areas work
+is described in :ref:`design-large`; their on-flash format is new in v0.5.0.
 
 Single LFTL area vs many
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -64,6 +64,7 @@ uint64_t nvm_weak_seed = 1;
 //comes filled with the value the program meant to leave; the override changes
 //it as it likes and returns true, or returns false to let the model choose
 bool (*nvm_weak_override)(const void*unit_nvm_addr, uint8_t*unit, uintptr_t size) = 0;
+static uintptr_t weak_bytes;   //number of NVM bytes that are weak: most of the time none, and nothing below has to look
 static uint8_t*weak_flag;      //one per NVM byte, set when the byte is weak
 static uint8_t*weak_intended;  //what the torn program meant to leave there
 static uint8_t*weak_drawn;     //one per NVM byte, set once the byte's reading was drawn this boot
@@ -111,38 +112,41 @@ static bool weak_active(const void*addr){
   }
   return 0;
 }
+//a byte is drawn only while it is weak, so with no weak byte both maps are clear
 void tearing_sim_weak_clear_range(const void*addr, uintptr_t size){
-  if(weak_flag){
-    memset(weak_flag + nvm_offset(addr),0,size);
-    memset(weak_drawn + nvm_offset(addr),0,size);
-  }
+  if(0 == weak_bytes) return;
+  uint8_t*const f = weak_flag + nvm_offset(addr);
+  for(uintptr_t i=0;i<size;i++) weak_bytes -= f[i];
+  memset(f,0,size);
+  memset(weak_drawn + nvm_offset(addr),0,size);
 }
 void tearing_sim_weak_clear(){
-  if(weak_flag){
-    memset(weak_flag,0,nvm_size);
-    memset(weak_drawn,0,nvm_size);
-  }
+  if(0 == weak_bytes) return;
+  memset(weak_flag,0,nvm_size);
+  memset(weak_drawn,0,nvm_size);
+  weak_bytes = 0;
 }
 //a new boot: every weak unit reads a fresh value from now on
 void tearing_sim_weak_new_boot(){
-  if(weak_drawn) memset(weak_drawn,0,nvm_size);
+  if(weak_bytes) memset(weak_drawn,0,nvm_size);
 }
 bool tearing_sim_is_weak(const void*addr, uintptr_t size){
-  if(0 == weak_flag) return 0;
-  const uint8_t*const f = weak_flag + nvm_offset(addr);
-  for(uintptr_t i=0;i<size;i++) if(f[i]) return 1;
-  return 0;
+  if(0 == weak_bytes) return 0;
+  return 0 != memchr(weak_flag + nvm_offset(addr),1,size);
+}
+static void weak_flag_set(const void*addr, uintptr_t size){
+  weak_alloc();
+  uint8_t*const f = weak_flag + nvm_offset(addr);
+  for(uintptr_t i=0;i<size;i++) weak_bytes += 1 - f[i];
+  memset(f,1,size);
+  memset(weak_drawn + nvm_offset(addr),0,size);
 }
 static void weak_mark(const void*addr, const uint8_t*intended, uintptr_t size){
-  weak_alloc();
-  memset(weak_flag + nvm_offset(addr),1,size);
-  memset(weak_drawn + nvm_offset(addr),0,size);
+  weak_flag_set(addr,size);
   memcpy(weak_intended + nvm_offset(addr),intended,size);
 }
 static void weak_mark_erased(const void*addr, uintptr_t size){
-  weak_alloc();
-  memset(weak_flag + nvm_offset(addr),1,size);
-  memset(weak_drawn + nvm_offset(addr),0,size);
+  weak_flag_set(addr,size);
   memset(weak_intended + nvm_offset(addr),0xFF,size);
 }
 void tearing_sim_weak_reseed(uint64_t seed){
@@ -179,9 +183,11 @@ static void weak_reading(const uint8_t*unit_nvm_addr, uint8_t*unit){
 }
 //substitute the reading of every weak write unit a read range overlaps
 static void weak_read(uint8_t*dst, const uint8_t*src, uintptr_t size){
-  if(!nvm_weak_model || (0 == weak_flag) || (0 == size)) return;
+  if(!nvm_weak_model || (0 == weak_bytes) || (0 == size)) return;
   const uintptr_t ws = nvm_write_size;
   const uintptr_t src_off = nvm_offset(src);
+  //a weak unit is flagged whole: none of the bytes read flagged, nothing to substitute
+  if(0 == memchr(weak_flag + src_off,1,size)) return;
   const uintptr_t first = src_off / ws;
   const uintptr_t last = (src_off + size - 1) / ws;
   for(uintptr_t u = first; u <= last; u++){

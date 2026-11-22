@@ -23,12 +23,26 @@
   ((((data_size)+(write_size)-1)/(write_size))+7)\
   /8)
 
-/// Compute the size required for ``transaction_tracker``. 
+/// Compute the size required for ``transaction_tracker`` of a large area:
+/// one bit per write unit of the data, as for a regular area, then two bytes
+/// per chunk (erase unit) of the data.
 /// See ::lftl_transaction_start.
-/// \param ctx  Pointer to lftl_ctx_t
+/// \param data_size   Size of the data in the target LFTL area, in bytes
+/// \param write_size  Size of the minimum write unit in the NVM, in bytes
+/// \param erase_size  Size of the erase unit in the NVM, in bytes
 ///
-#define LFTL_TRANSACTION_TRACKER_SIZE(ctx) \
-  LFTL_TRANSACTION_TRACKER_SIZE_LL((ctx)->data_size,(ctx)->nvm_props->write_size)
+#define LFTL_TRANSACTION_TRACKER_SIZE_LARGE(data_size,write_size,erase_size) (\
+  LFTL_TRANSACTION_TRACKER_SIZE_LL(data_size,write_size)\
+  + 2*(((data_size)+(erase_size)-1)/(erase_size)))
+
+/// Compute the size required for ``transaction_tracker``, for any type of area.
+/// See ::lftl_transaction_start.
+/// \param ctx  Pointer to lftl_ctx_t, registered
+///
+#define LFTL_TRANSACTION_TRACKER_SIZE(ctx) (\
+  (LFTL_AREA_TYPE_LARGE == (ctx)->area_type)\
+  ? LFTL_TRANSACTION_TRACKER_SIZE_LARGE((ctx)->data_size,(ctx)->nvm_props->write_size,(ctx)->nvm_props->erase_size)\
+  : LFTL_TRANSACTION_TRACKER_SIZE_LL((ctx)->data_size,(ctx)->nvm_props->write_size))
 
 /// @name Return codes
 /// @{
@@ -57,12 +71,16 @@
 #define LFTL_ERROR_WU_SIZE_TOO_LARGE 0x0A
 /// Error: a transaction API call is attempted on an EWLF area, which does not support transactions
 #define LFTL_ERROR_EWLF_TRANSACTION_UNSUPPORTED 0x0B
-/// Error: an area or its NVM is badly configured, see ::lftl_register_area and ::lftl_register_area_ewlf
+/// Error: an area or its NVM is badly configured, see ::lftl_register_area, ::lftl_register_area_ewlf and ::lftl_register_area_large; or a call is made on a type of area it does not apply to
 #define LFTL_ERROR_BAD_CONFIG 0x0C
-/// Error: an EWLF area is read or written while the repair its scan found is pending, see ::lftl_ewlf_complete_scan
-#define LFTL_ERROR_EWLF_PENDING 0x0D
-/// Error: an EWLF area is stuck: it has no room left to make a decision solid, see ::lftl_ewlf_status
-#define LFTL_ERROR_EWLF_STUCK 0x0E
+/// Error: an EWLF or a large area is read or written while the repair its scan found is pending, see ::lftl_complete_scan
+#define LFTL_ERROR_SCAN_PENDING 0x0D
+/// Error: an EWLF or a large area is stuck: it has no room left to make a decision solid, see ::lftl_scan_status
+#define LFTL_ERROR_STUCK 0x0E
+/// Error: an update or a transaction of a large area needs more free erase units than its pool has; nothing was changed
+#define LFTL_ERROR_LARGE_NO_SPACE 0x0F
+/// Error: the data of a large area does not match its checksum, see ::lftl_check_data
+#define LFTL_ERROR_DATA_CHECKSUM 0x10
 /// Base value for errors reported by the erase function. Bits 0 to 7 may give more details.
 #define LFTL_ERROR_LOW_LEVEL_ERASE 0x0100
 /// Base value for error reported by the write function. Bits 0 to 7 may give more details.
@@ -201,27 +219,28 @@ typedef struct lftl_nvm_props_struct {
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
 } lftl_nvm_props_t;
 
-/// Type of area registered with ::lftl_register_area or ::lftl_register_area_ewlf.
+/// Type of area registered with ::lftl_register_area, ::lftl_register_area_ewlf or ::lftl_register_area_large.
 typedef enum {
   LFTL_AREA_TYPE_STD = 0,
   LFTL_AREA_TYPE_EWLF = 1,
+  LFTL_AREA_TYPE_LARGE = 2,
 } lftl_area_type_t;
 
-/// What the scan of an EWLF area found left to do, see ::lftl_ewlf_status.
+/// What the scan of an EWLF or a large area found left to do, see ::lftl_scan_status.
 typedef enum {
-  LFTL_EWLF_REPAIR_NONE = 0,   /**< nothing: the area is readable and writable */
-  LFTL_EWLF_REPAIR_BURY = 1,   /**< a copy of the decision in the live log unit: one pair */
-  LFTL_EWLF_REPAIR_CARRY = 2,  /**< a copy of the decision in the other log unit, already erased: one pair */
-  LFTL_EWLF_REPAIR_SWITCH = 3, /**< a log switch: at most one reserved pair, one erase, one certificate, one pair */
-} lftl_ewlf_repair_t;
+  LFTL_REPAIR_NONE = 0,   /**< nothing: the area is readable and writable */
+  LFTL_REPAIR_BURY = 1,   /**< a copy of the decision in the live log unit: one pair */
+  LFTL_REPAIR_CARRY = 2,  /**< a copy of the decision in the other log unit, already erased: one pair */
+  LFTL_REPAIR_SWITCH = 3, /**< a log switch: at most one reserved pair, one erase, one certificate, one pair */
+} lftl_repair_t;
 
-/// State of an EWLF area, see ::lftl_ewlf_status.
+/// State of an area after its scan, see ::lftl_scan_status.
 typedef struct {
-  uint32_t version;        /**< version of the record the area shows, or will show once the pending repair is done */
+  uint32_t version;        /**< version of the data the area shows, or will show once the pending repair is done */
   uint16_t remaining_cuts; /**< the smallest number of further power cuts, each at the worst instant, after which the area is stuck; 0 when it is */
-  uint8_t pending;         /**< a ::lftl_ewlf_repair_t: the repair ::lftl_ewlf_complete_scan will do */
-  bool stuck;              /**< the area is stuck: only ::lftl_ewlf_read_unproven and ::lftl_format work */
-} lftl_ewlf_status_t;
+  uint8_t pending;         /**< a ::lftl_repair_t: the repair ::lftl_complete_scan will do */
+  bool stuck;              /**< the area is stuck: only ::lftl_read_unproven and ::lftl_format work */
+} lftl_scan_status_t;
 
 /// What one reading of a log unit of an EWLF area gave. Internal.
 typedef struct {
@@ -232,16 +251,19 @@ typedef struct {
   uint8_t flags;        /**< proven, closed, certified, newest entry confirmed */
 } lftl_ewlf_log_unit_t;
 
-/// What an EWLF area knows about its log since its scan. Internal.
+/// What an EWLF or a large area knows about its log since its scan. Internal.
 typedef struct {
   lftl_ewlf_log_unit_t unit[2];
   uint32_t version;     /**< version of the decision */
-  int16_t rec_started;  /**< last started record position in the decision's data unit, -2 until read */
-  uint8_t d_unit;       /**< data unit of the decision's record */
-  uint8_t d_pos;        /**< position of the decision's record in its unit */
+  int16_t rec_started;  /**< EWLF: last started record position in the decision's data unit, -2 until read */
+  uint8_t d_unit;       /**< EWLF: data unit of the decision's record; large: log unit of the decision's pair */
+  uint8_t d_pos;        /**< EWLF: position of the decision's record in its unit */
   uint8_t live;         /**< index of the live log unit */
-  uint8_t pending;      /**< a ::lftl_ewlf_repair_t */
+  uint8_t pending;      /**< a ::lftl_repair_t */
   uint8_t stuck;        /**< no room for the pending repair, or a write found none */
+  uint8_t data_check;   /**< large: 0 data not checked since the scan, 1 sound, 2 corrupt */
+  int16_t d_q;          /**< large: position of the decision's pair in its log unit */
+  uint16_t head;        /**< large: the pool unit filled last, 0xFFFF before the first */
 } lftl_ewlf_state_t;
 
 /** @struct lftl_ctx_struct
@@ -257,9 +279,9 @@ typedef struct lftl_ctx_struct {
   uintptr_t data_size;            /**< Size in bytes of the data in this LFTL area. */
   void *transaction_tracker;      /**< Initialize it ::LFTL_INVALID_POINTER. */
   void *next;                     /**< Initialize it ::LFTL_INVALID_POINTER. */
-  lftl_area_type_t area_type;     /**< Set by ::lftl_register_area or ::lftl_register_area_ewlf. Do not set manually. */
-  uint16_t ewlf_certificates;     /**< EWLF areas only: number of certificate write units in each log unit, 0 (the value a zeroed or shorter initializer leaves) for ::LFTL_EWLF_CERTIFICATES. Part of the on-flash format of the area, like `data_size`: an area whose value changes must be formatted again. */
-  lftl_ewlf_state_t ewlf;         /**< EWLF areas only: internal, needs no initialization. */
+  lftl_area_type_t area_type;     /**< Set by ::lftl_register_area, ::lftl_register_area_ewlf or ::lftl_register_area_large. Do not set manually. */
+  uint16_t ewlf_certificates;     /**< EWLF and large areas only: number of certificate write units in each log unit, 0 (the value a zeroed or shorter initializer leaves) for ::LFTL_EWLF_CERTIFICATES. Part of the on-flash format of the area, like `data_size`: an area whose value changes must be formatted again. */
+  lftl_ewlf_state_t ewlf;         /**< EWLF and large areas only: internal, needs no initialization. */
 } lftl_ctx_t;
 
 /** @name Meta information API
@@ -386,13 +408,41 @@ void lftl_register_nvm(lftl_nvm_props_t*ctx);
 /// not read and must be formatted again.
 ///
 /// Nothing is read here. The first call that needs the area's content scans
-/// it, reading only: ::lftl_ewlf_status, ::lftl_ewlf_complete_scan,
-/// ::lftl_ewlf_read_unproven, or a read or a write. After a reset, set
+/// it, reading only: ::lftl_scan_status, ::lftl_complete_scan,
+/// ::lftl_read_unproven, or a read or a write. After a reset, set
 /// `ctx->data` to ::LFTL_INVALID_POINTER or register again.
 /// \param ctx Context of the LFTL area to register
 ///
 ////////////////////////////////////////////////////////////
 void lftl_register_area_ewlf(lftl_ctx_t*ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief Register an LFTL large area
+///
+/// A large area cuts its data into chunks of one erase unit each and keeps
+/// them in a pool of erase units; a map of where each chunk is, with a
+/// CRC-64 of the whole data, is the data of the pairs of an EWLF log. An
+/// update rewrites only the chunks it touches, a transaction is atomic
+/// whatever the number of chunks it touches, and a power cut is never
+/// followed by a rollback (LARGE.md). Declare it with ::LFTL_AREA_LARGE: the
+/// pool units, then 2 log units.
+///
+/// The configuration is checked first, as for ::lftl_register_area, except
+/// that the pool must hold the data and one more erase unit, at most 65535
+/// erase units, and that a log unit must hold its certificates
+/// (::lftl_ctx_struct::ewlf_certificates), ::LFTL_EWLF_RESERVED_PAIRS reserved
+/// pairs and at least 2 regular ones, a pair holding the map. The NVM's
+/// erased bytes must read 0xFF and its write callback must report a refused
+/// program (R6 and R9 of the "Flash requirements and assumptions" page).
+///
+/// Nothing is read here. The first call that needs the area's content scans
+/// it, as for an EWLF area; the first call that uses its data checks the
+/// data against its checksum, unless ::lftl_check_data did. After a reset,
+/// set `ctx->data` to ::LFTL_INVALID_POINTER or register again.
+/// \param ctx Context of the LFTL area to register
+///
+////////////////////////////////////////////////////////////
+void lftl_register_area_large(lftl_ctx_t*ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Format an LFTL area
@@ -440,12 +490,25 @@ lftl_ctx_t*lftl_get_ctx_std(const void*const addr);
 lftl_ctx_t*lftl_get_ctx_ewlf(const void*const addr);
 
 ////////////////////////////////////////////////////////////
+/// \brief Retrieve the large LFTL context correponding to an
+/// address, if any.
+///
+/// Only searches areas registered with ::lftl_register_area_large.
+/// See ::lftl_get_ctx to search all area types at once.
+///
+/// \param addr Address to search
+/// \returns a valid LFTL context or LFTL_INVALID_POINTER
+////////////////////////////////////////////////////////////
+lftl_ctx_t*lftl_get_ctx_large(const void*const addr);
+
+////////////////////////////////////////////////////////////
 /// \brief Retrieve the LFTL context correponding to an
 /// address, if any.
 ///
-/// Searches areas of every type: std (::lftl_register_area) then
-/// EWLF (::lftl_register_area_ewlf). See ::lftl_get_ctx_std and
-/// ::lftl_get_ctx_ewlf to search only one area type.
+/// Searches areas of every type: std (::lftl_register_area), then
+/// EWLF (::lftl_register_area_ewlf), then large
+/// (::lftl_register_area_large). See ::lftl_get_ctx_std,
+/// ::lftl_get_ctx_ewlf and ::lftl_get_ctx_large to search only one area type.
 ///
 /// \param addr Address to search
 /// \returns a valid LFTL context or LFTL_INVALID_POINTER
@@ -461,51 +524,67 @@ lftl_ctx_t*lftl_get_ctx(const void*const addr);
 bool lftl_is_ewlf(const lftl_ctx_t*const ctx);
 
 ////////////////////////////////////////////////////////////
-/// \brief State of an EWLF area: remaining cuts, pending repair
+/// \brief Indicates if the LFTL context is a large area.
 ///
-/// Scans the area if nothing did since the reset: the scan reads the two log
-/// units once and checks one record, and programs or erases nothing. When
-/// the last session was cut, or when a write unit that an older cut left
-/// weak reads differently, the scan may find a repair to do before the area
-/// can be shown: `status->pending` says which, and ::lftl_ewlf_complete_scan
-/// does it. Until then ::lftl_read and the write functions raise
-/// ::LFTL_ERROR_EWLF_PENDING on this area.
+/// \param ctx A valid LFTL context
+/// \returns 0 or 1
+////////////////////////////////////////////////////////////
+bool lftl_is_large(const lftl_ctx_t*const ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief State of an area after its scan: remaining cuts, pending repair
+///
+/// For an EWLF or a large area: scans the area if nothing did since the
+/// reset. The scan reads the two log units once and checks one record or
+/// one map, and programs or erases nothing. When the last session was cut,
+/// or when a write unit that an older cut left weak reads differently, the
+/// scan may find a repair to do before the area can be shown:
+/// `status->pending` says which, and ::lftl_complete_scan does it. Until
+/// then ::lftl_read and the write functions raise ::LFTL_ERROR_SCAN_PENDING
+/// on this area.
+///
+/// A regular area has no log: its scan locates its current slot, nothing
+/// is ever pending, it is never stuck, and `status->remaining_cuts` is
+/// 0xFFFF.
 ///
 /// `status->remaining_cuts` is the number of further power cuts, each at the
 /// worst instant, that the area can take before it is stuck. It is back to
 /// the number of certificates after a log switch that completed. The
 /// application applies the threshold it wants: before a write, or after a
-/// reset before calling ::lftl_ewlf_complete_scan, for instance to ask the
+/// reset before calling ::lftl_complete_scan, for instance to ask the
 /// user to move to a stable power supply first.
 ///
 /// Raises ::LFTL_ERROR_NO_VALID_VERSION if the area holds no version.
-/// \param ctx Context of the EWLF area
+/// \param ctx Context of the area
 /// \param status Output: the state of the area
 ////////////////////////////////////////////////////////////
-void lftl_ewlf_status(lftl_ctx_t*ctx, lftl_ewlf_status_t*status);
+void lftl_scan_status(lftl_ctx_t*ctx, lftl_scan_status_t*status);
 
 ////////////////////////////////////////////////////////////
-/// \brief Do the repair the scan of an EWLF area found pending
+/// \brief Do the repair the scan of an area found pending
 ///
 /// Scans the area if nothing did since the reset. Does nothing more when no
-/// repair is pending: it can be called unconditionally after a reset.
+/// repair is pending: it can be called unconditionally after a reset, on an
+/// area of any type (a regular area never has one).
 /// Otherwise programs a copy of the decision above everything a power cut
 /// may have left, from the readings of the scan, and the area is readable
 /// and writable once it returns.
 ///
-/// Raises ::LFTL_ERROR_EWLF_STUCK, with nothing programmed, when the area has
+/// Raises ::LFTL_ERROR_STUCK, with nothing programmed, when the area has
 /// no room left for the repair, and ::LFTL_ERROR_NO_VALID_VERSION if the
 /// area holds no version.
-/// \param ctx Context of the EWLF area
+/// \param ctx Context of the area
 ////////////////////////////////////////////////////////////
-void lftl_ewlf_complete_scan(lftl_ctx_t*ctx);
+void lftl_complete_scan(lftl_ctx_t*ctx);
 
 ////////////////////////////////////////////////////////////
-/// \brief Read an EWLF area whatever its state: pending repair or stuck
+/// \brief Read an area whatever its state: pending repair or stuck
 ///
-/// Like ::lftl_read when no repair is pending. With one pending, or with the
-/// area stuck, reads the record the scan chose: the one
-/// ::lftl_ewlf_complete_scan makes current when called in the same session.
+/// Like ::lftl_read when no repair is pending, and always on a regular
+/// area. With one pending, or with the area stuck, reads the data the scan
+/// chose: the one ::lftl_complete_scan makes current when called in the
+/// same session. On a large area the data is checked against its checksum
+/// first, as by ::lftl_read; ::lftl_read_unchecked reads without the check.
 /// Its content is a version the application wrote; what is not proven is
 /// that a later boot chooses the same one, if this session ends before the
 /// repair is done: the other candidate is the version written just before
@@ -514,12 +593,73 @@ void lftl_ewlf_complete_scan(lftl_ctx_t*ctx);
 /// An application that uses it to decide whether to go on must keep the
 /// state of that decision in another area: this one accepts no write
 /// before the repair.
-/// \param ctx Context of the EWLF area
+/// \param ctx Context of the area
 /// \param dst Destination address (in volatile memory)
 /// \param src_nvm_addr Source logical address
 /// \param size Size in bytes of the data to read
 ////////////////////////////////////////////////////////////
-void lftl_ewlf_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);
+void lftl_read_unproven(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);
+
+////////////////////////////////////////////////////////////
+/// \brief Check the data of an area against its checksum
+///
+/// Optional. Reads the whole data, computes its CRC-64 and compares it with
+/// the one the area keeps; the result holds until the next reset, or the
+/// next call. When the application does not call it, the check is done
+/// once per reset anyway, before the first call that uses the data the
+/// area holds: a read, a write that does not replace the whole data, the
+/// start of a transaction, the read of a pending area by
+/// ::lftl_read_unproven. Calling it is how the application chooses when
+/// the check takes its time (about 0.7 s per megabyte on the STM32U5A5).
+///
+/// Works while a repair is pending or the area is stuck: it checks the data
+/// the scan chose. A mismatch is reported by the return value, not by an
+/// error; from then on the calls that use the data raise
+/// ::LFTL_ERROR_DATA_CHECKSUM, until a write of the whole data,
+/// ::lftl_erase_all or ::lftl_repair_checksum. ::lftl_read_unchecked reads
+/// the data whatever its checksum.
+///
+/// Large areas only: raises ::LFTL_ERROR_BAD_CONFIG on another type.
+/// \param ctx Context of the area
+/// \returns true when the data matches its checksum
+////////////////////////////////////////////////////////////
+bool lftl_check_data(lftl_ctx_t*ctx);
+
+////////////////////////////////////////////////////////////
+/// \brief Read the data of an area without checking it against its checksum
+///
+/// Like ::lftl_read_unproven, but runs no check and needs none: it reads
+/// what the area holds in a sound area, in a corrupt one, in one not
+/// checked yet, while a repair is pending and when the area is stuck. It is
+/// how an application saves what is still right in an area whose data
+/// fails its checksum, before ::lftl_repair_checksum or a write of the
+/// whole data.
+///
+/// Large areas only: raises ::LFTL_ERROR_BAD_CONFIG on another type.
+/// \param ctx Context of the area
+/// \param dst Destination address (in volatile memory)
+/// \param src_nvm_addr Source logical address
+/// \param size Size in bytes of the data to read
+////////////////////////////////////////////////////////////
+void lftl_read_unchecked(lftl_ctx_t*ctx, void*dst, const void*const src_nvm_addr, uintptr_t size);
+
+////////////////////////////////////////////////////////////
+/// \brief Make the checksum of an area that of its data as it reads now
+///
+/// Computes the CRC-64 of the data as the area reads it and commits it,
+/// with the data unchanged: one atomic commit, after which the area is
+/// sound and its chunks can be repaired by ordinary writes, one at a time,
+/// with no need to hold the whole data elsewhere. It does not make the data
+/// right, it declares it accepted: it is for an application that has looked
+/// at it with ::lftl_read_unchecked. Commits nothing when the checksum
+/// already matches.
+///
+/// Needs an area with no repair pending, and no transaction open
+/// (::LFTL_ERROR_TRANSACTION_ONGOING). Large areas only: raises
+/// ::LFTL_ERROR_BAD_CONFIG on another type.
+/// \param ctx Context of the area
+////////////////////////////////////////////////////////////
+void lftl_repair_checksum(lftl_ctx_t*ctx);
 
 ////////////////////////////////////////////////////////////
 /// \brief Erase all the data of an LFTL area
@@ -539,7 +679,10 @@ void lftl_erase_all(lftl_ctx_t*ctx);
 /// `transaction_tracker` is used from this call until a call to
 /// ::lftl_transaction_commit or ::lftl_transaction_abort.
 ///
-/// Performance considerations: this function erase one slot.
+/// Performance considerations: on a regular area this function erase one
+/// slot. On a large area it erases nothing: each chunk the transaction
+/// touches gets a free erase unit, erased at its first write; its size is
+/// bounded by the free units of the pool (::LFTL_ERROR_LARGE_NO_SPACE).
 ///
 /// \param dst_ctx Context of the target LFTL area
 /// \param transaction_tracker Volatile buffer, see ::LFTL_TRANSACTION_TRACKER_SIZE
@@ -872,6 +1015,27 @@ typedef lftl_dat_t __attribute__ ((aligned (LFTL_PAGE_SIZE))) flash_sw_page_t[SI
 #define LFTL_AREA_EWLF(name, area_content, wear_leveling_factor) union {\
   _Static_assert(LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content)) >= 2, "EWLF area " #name ": at least 2 records must fit in a page");\
   flash_sw_page_t name##_pages[LFTL_EWLF_LOG_UNITS + LFTL_MAX(2,LFTL_DIV_CEIL(wear_leveling_factor,LFTL_EWLF_RECORDS_PER_PAGE(LFTL_EWLF_RECORD_SIZE(area_content))))];\
+  struct {area_content} name##_data;\
+  struct {area_content};\
+  struct {area_content} _##name##_data;\
+  };
+
+/// Number of chunks of a large area of `area_content`: one per erase unit
+/// of its data.
+#define LFTL_LARGE_CHUNKS(area_content) LFTL_PAGES(sizeof(struct {area_content}))
+
+/// Declare a large area: `pool_pages` erase units that hold the chunks of
+/// the data, one erase unit each, then the ::LFTL_EWLF_LOG_UNITS log units.
+/// The pool needs the chunks of the data and one more erase unit at least;
+/// to allow a transaction or an update of `k` chunks, the chunks plus `k`;
+/// for wear, the chunks never rewritten plus the chunk writes over the life
+/// of the area divided by the endurance of an erase unit (LARGE.md, "Sizing").
+/// \param name Name of the LFTL area.
+/// \param area_content Members of the LFTL area.
+/// \param pool_pages Number of erase units of the pool.
+#define LFTL_AREA_LARGE(name, area_content, pool_pages) union {\
+  _Static_assert((pool_pages) >= LFTL_LARGE_CHUNKS(area_content) + 1, "large area " #name ": the pool must hold the data and one more page");\
+  flash_sw_page_t name##_pages[(pool_pages) + LFTL_EWLF_LOG_UNITS];\
   struct {area_content} name##_data;\
   struct {area_content};\
   struct {area_content} _##name##_data;\

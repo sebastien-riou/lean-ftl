@@ -34,6 +34,11 @@
  * "error_handler(...)", or reads back the newest data, and no callback reports
  * an access outside the area. Tests 1-3 raise a range error, test 12 is refused
  * at registration (0xc), test 13 finds no valid record (0x2).
+ *
+ * Tests 14 to 16 cover large areas (LARGE.md), 8-byte write units, 356-byte
+ * data in 2 chunks, a pool of 6 units and 2 log units: every call, ending in
+ * "large: ok"; a pair whose map names a unit past the pool, which is not
+ * valid (0x2); an unchecked read whose size wraps (0x4).
  */
 #include <stdio.h>
 #include <string.h>
@@ -79,7 +84,8 @@ static lftl_nvm_props_t props = { .base = flash, .size = sizeof(flash), .write_s
                                   .erase = er, .write = wr, .read = rd, .error_handler = eh,
                                   .next = LFTL_INVALID_POINTER };
 
-static void init_area(uint32_t write_size, uint8_t *area, unsigned pages, uintptr_t data_size, int ewlf) {
+/* type: 0 regular, 1 EWLF, 2 large */
+static void init_area(uint32_t write_size, uint8_t *area, unsigned pages, uintptr_t data_size, int type) {
   props.write_size = write_size;
   area_lo = (uintptr_t)area; area_hi = area_lo + pages * PG;
   ctx = (lftl_ctx_t){ .nvm_props = &props, .area = area, .area_size = pages * PG,
@@ -88,11 +94,12 @@ static void init_area(uint32_t write_size, uint8_t *area, unsigned pages, uintpt
                       .next = LFTL_INVALID_POINTER,
                       .ewlf_certificates = 2 }; /* what a log unit of 256 bytes has room for */
   lftl_init_lib();
-  if (ewlf) lftl_register_area_ewlf(&ctx); else lftl_register_area(&ctx);
+  if (2 == type) lftl_register_area_large(&ctx); else if (type) lftl_register_area_ewlf(&ctx); else lftl_register_area(&ctx);
 }
 static void init(uint32_t write_size) { init_area(write_size, flash, 8, 64, 0); }
 
-/* same CRC core as ftl_internal.h: CRC-64/NVME; an EWLF record's checksum is
+/* CRC-64/NVME, bit by bit: the result of the CRC core of ftl_internal.h in
+   either of its forms; an EWLF record's checksum is
    ~crc64(crc64(-1, version little endian), data) */
 static uint64_t crc64(uint64_t crc, const uint8_t *b, unsigned n) {
   while (n--) { crc ^= *b++; for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ (0x9A6C9329AC4BC9B5ull & -(crc & 1)); }
@@ -120,7 +127,7 @@ static void dump(const char *name, const uint8_t *b, unsigned n) {
    below it at area+336, and the one after wraps to the top of page 0,
    area+168. A write programs the record's start marker, data and meta field,
    then the pair's marker, entry and confirm; a wrap erases the unit it
-   enters first. After a reset lftl_ewlf_complete_scan does the repair the
+   enters first. After a reset lftl_complete_scan does the repair the
    scan found, if any, before the area is read. */
 static void ewlf_two_writes_then_torn(const uint8_t *d1, const uint8_t *d2) {
   memset(flash, 0xFF, sizeof(flash));
@@ -211,7 +218,7 @@ int main(int argc, char **argv) {
     printf("T%d/LF-9: EWLF on %s flash: write d1, power cut in d2 before its meta field, reset, write d3\n",
            t, t == 7 ? "NOR (program = AND)" : "STM32U5-like (no reprogramming)");
     ewlf_two_writes_then_torn(d1, d2);
-    lftl_ewlf_complete_scan(&ctx);
+    lftl_complete_scan(&ctx);
     lftl_read(&ctx, buf, flash, 64); dump("after reset ", buf, 8);
     lftl_write(&ctx, flash, d3, 64);
     lftl_read(&ctx, buf, flash, 64); dump("after d3    ", buf, 8);
@@ -240,7 +247,7 @@ int main(int argc, char **argv) {
     if (!setjmp(pc)) lftl_write(&ctx, flash, d, 64);
     cut_at = -1;
     ctx.data = LFTL_INVALID_POINTER; /* reset */
-    lftl_ewlf_complete_scan(&ctx);
+    lftl_complete_scan(&ctx);
     lftl_read(&ctx, buf, flash, 64); dump("after reset ", buf, 8);
     memset(d, 0xA5, 64);
     lftl_write(&ctx, flash, d, 64);
@@ -268,7 +275,7 @@ int main(int argc, char **argv) {
     ewlf_meta(d2 + 32, 16, version, ewlf_checksum(version, d2, 64));
     printf("T11/LF-10: EWLF, d2 holds a forged log pair, power cut in d2 before its meta field, reset\n");
     ewlf_two_writes_then_torn(d1, d2);
-    lftl_ewlf_complete_scan(&ctx);
+    lftl_complete_scan(&ctx);
     lftl_read(&ctx, buf, flash, 64);
     dump("read", buf, 32);
     printf("  matches d1: %s, matches d2: %s, at area%+ld\n", memcmp(buf, d1, 64) ? "no" : "yes",
@@ -309,6 +316,65 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 8; i++) pair[24 + i] = (uint8_t)(entry_crc >> (8 * i));
     printf("T13/LF-12: EWLF area holding only a log pair 48 bytes before its end, then lftl_read\n");
     lftl_read(&ctx, buf, flash + 4 * PG, 16);
+    break;
+  }
+  case 14: { /* large areas: every call */
+    if (setjmp(jb)) return 0;
+    const unsigned size = 2 * PG - 100;
+    init_area(8, flash, 8, size, 2);
+    static uint8_t want[2 * PG], got[2 * PG], d[2 * PG];
+    uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE_LARGE(2 * PG - 100, 8, PG)];
+    for (unsigned i = 0; i < sizeof(d); i++) d[i] = (uint8_t)(i * 7 + 3);
+    int ok = 1;
+    printf("T14: large area, format, writes, transactions, checks, repair, reset\n");
+    lftl_format(&ctx);
+    memset(want, 0xFF, size);
+    lftl_write(&ctx, flash, d, size); memcpy(want, d, size);
+    lftl_write_any(&ctx, flash + PG - 5, d + 50, 11); memcpy(want + PG - 5, d + 50, 11);
+    lftl_transaction_start(&ctx, tracker);
+    lftl_transaction_write_any(&ctx, flash + 3, d + 9, 5); memcpy(want + 3, d + 9, 5);
+    lftl_transaction_write_any(&ctx, flash + size - 7, d + 1, 7); memcpy(want + size - 7, d + 1, 7);
+    lftl_read_newer(&ctx, got, flash + 3, 5); ok &= !memcmp(got, want + 3, 5);
+    lftl_transaction_commit(&ctx);
+    lftl_transaction_start(&ctx, tracker);
+    lftl_transaction_write_any(&ctx, flash + PG + 1, d, 3);
+    lftl_transaction_abort(&ctx);
+    lftl_read(&ctx, got, flash, size); ok &= !memcmp(got, want, size);
+    ok &= lftl_check_data(&ctx);
+    lftl_read_unchecked(&ctx, got, flash, size); ok &= !memcmp(got, want, size);
+    lftl_repair_checksum(&ctx);
+    ctx.data = LFTL_INVALID_POINTER; /* reset */
+    lftl_scan_status_t st; lftl_scan_status(&ctx, &st); lftl_complete_scan(&ctx);
+    lftl_read_unproven(&ctx, got, flash, size); ok &= !memcmp(got, want, size);
+    lftl_erase_all(&ctx); memset(want, 0xFF, size);
+    lftl_read(&ctx, got, flash, size); ok &= !memcmp(got, want, size);
+    printf("  large: %s\n", ok ? "ok" : "MISMATCH");
+    break;
+  }
+  case 15: { /* a pair of a large area whose map names a unit past the pool */
+    if (setjmp(jb)) return 0;
+    init_area(8, flash, 8, 2 * PG - 100, 2);
+    memset(flash, 0xFF, sizeof(flash));
+    /* log unit 1 is page 7; its first pair: marker 8, map 16 (2 units, the
+       head, the checksum of the data: 14 bytes), meta 16, confirm 8 */
+    uint8_t *const pair = flash + 7 * PG;
+    memset(pair, 0, 48);
+    pair[8] = 0x00; pair[9] = 0x01;                  /* chunk 0 in unit 256: past the 6 of the pool */
+    pair[10] = 0xFF; pair[11] = 0xFF;                /* chunk 1 never written */
+    pair[12] = 0xFF; pair[13] = 0xFF;                /* no head */
+    pair[24] = 1; pair[28] = 1;                      /* generation 1, version 1 */
+    const uint64_t crc = ~crc64(crc64(~(uint64_t)0, pair + 8, 14), pair + 24, 8);
+    for (int i = 0; i < 8; i++) pair[32 + i] = (uint8_t)(crc >> (8 * i));
+    printf("T15: large area holding only a pair whose map names unit 256, then lftl_read\n");
+    lftl_read(&ctx, buf, flash, 16);
+    break;
+  }
+  case 16: { /* an unchecked read of a large area whose size wraps */
+    if (setjmp(jb)) return 0;
+    init_area(8, flash, 8, 2 * PG - 100, 2);
+    lftl_format(&ctx);
+    printf("T16: lftl_read_unchecked of a large area, size wrapping around\n");
+    lftl_read_unchecked(&ctx, buf, flash + 8, (uintptr_t)0 - 8);
     break;
   }
   default:

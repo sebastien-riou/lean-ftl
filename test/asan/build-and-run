@@ -3,7 +3,9 @@
 # Builds test/asan/asan_harness.c with lean-ftl under AddressSanitizer and
 # UndefinedBehaviorSanitizer, runs its tests and checks each outcome: no
 # sanitizer report, no callback access outside the area under test, and the
-# expected result (see the header of asan_harness.c).
+# expected result (see the header of asan_harness.c). Twice: the library as
+# it builds by default, then with the bitwise CRC-64 of LFTL_CRC64_BITWISE,
+# which no other test builds.
 #
 # Usage: test/asan/build-and-run [test number]...   (default: all tests)
 
@@ -13,11 +15,20 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUTDIR="$ROOT/build/asan"
 mkdir -p "$OUTDIR"
 
-gcc -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all \
-  -I"$ROOT/liblean-ftl/include" \
-  -DGIT_VERSION=asan -DVERSION_TIMESTAMP=0 -DBUILD_TYPE=asan -DLFTL_EWLF_RESERVED_PAIRS=2 \
-  "$ROOT/test/asan/asan_harness.c" "$ROOT/liblean-ftl/source/ftl.c" \
-  -o "$OUTDIR/asan_harness"
+# the builds of the library under test: name, then its own options
+VARIANTS=(
+  "default"
+  "crc64-bitwise -DLFTL_CRC64_BITWISE"
+)
+for v in "${VARIANTS[@]}"; do
+  read -r name opts <<< "$v"
+  # shellcheck disable=SC2086
+  gcc -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -I"$ROOT/liblean-ftl/include" \
+    -DGIT_VERSION=asan -DVERSION_TIMESTAMP=0 -DBUILD_TYPE=asan -DLFTL_EWLF_RESERVED_PAIRS=2 $opts \
+    "$ROOT/test/asan/asan_harness.c" "$ROOT/liblean-ftl/source/ftl.c" \
+    -o "$OUTDIR/asan_harness-$name"
+done
 
 # a line each test must print, indexed by test number
 EXPECTED=(
@@ -35,6 +46,9 @@ EXPECTED=(
   "matches d1: yes"             # 11 LF-10
   "error_handler(0xc)"          # 12 LF-11: BAD_CONFIG
   "error_handler(0x2)"          # 13 LF-12: NO_VALID_VERSION
+  "large: ok"                   # 14 large areas: every call
+  "error_handler(0x2)"          # 15 large: a map naming a unit past the pool, NO_VALID_VERSION
+  "error_handler(0x4)"          # 16 large: LAST_NOT_IN_DATA
 )
 
 TESTS=("$@")
@@ -48,18 +62,21 @@ export ASAN_OPTIONS=detect_leaks=0
 unset LD_PRELOAD
 
 FAILED=0
-for t in "${TESTS[@]}"; do
-  rc=0
-  out=$("$OUTDIR/asan_harness" "$t" 2>&1) || rc=$?
-  if [ $rc -ne 0 ] \
-     || grep -q -e "outside the area" -e "Sanitizer" -e "runtime error" <<< "$out" \
-     || ! grep -q -F -- "${EXPECTED[$t]:-unknown test}" <<< "$out"; then
-    echo "test $t FAILED (exit code $rc):"
-    echo "$out"
-    FAILED=1
-  else
-    echo "test $t passed"
-  fi
+for v in "${VARIANTS[@]}"; do
+  name=${v%% *}
+  for t in "${TESTS[@]}"; do
+    rc=0
+    out=$("$OUTDIR/asan_harness-$name" "$t" 2>&1) || rc=$?
+    if [ $rc -ne 0 ] \
+       || grep -q -e "outside the area" -e "Sanitizer" -e "runtime error" <<< "$out" \
+       || ! grep -q -F -- "${EXPECTED[$t]:-unknown test}" <<< "$out"; then
+      echo "test $t ($name build) FAILED (exit code $rc):"
+      echo "$out"
+      FAILED=1
+    else
+      echo "test $t ($name build) passed"
+    fi
+  done
 done
 
 if [ $FAILED -ne 0 ]; then

@@ -31,6 +31,11 @@
 //Use a huge size for EWLF data to reduce the number of tests
 #define EWLF_DATA_SIZE (LFTL_PAGE_SIZE / 3)
 
+//A large area of 3 chunks, the last one in part
+#define LARGE_DATA_SIZE (2*LFTL_PAGE_SIZE + LFTL_PAGE_SIZE/2)
+//its pool: the 3 chunks and room for a transaction of the whole data
+#define LARGE_POOL_PAGES 6
+
 typedef struct data_flash_struct {
 
   LFTL_AREA(a,
@@ -67,9 +72,15 @@ typedef struct data_flash_struct {
     ,LFTL_WEAR_LEVELING_FACTOR(2)
   )
 
-  //Pages for the tests that build their own EWLF area: 2 log units, and up
-  //to 4 data units
-  flash_sw_page_t scratch_pages[6];
+  //After area d, which test 37 needs where it is: a large area
+  LFTL_AREA_LARGE(largea,
+    uint64_t data8[SIZE64(LARGE_DATA_SIZE)];
+    ,LARGE_POOL_PAGES
+  )
+
+  //Pages for the tests that build their own EWLF or large area: 2 log
+  //units, and up to 8 data or pool units
+  flash_sw_page_t scratch_pages[10];
 
   union {
   flash_sw_page_t unmanaged_page;

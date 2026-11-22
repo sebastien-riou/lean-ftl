@@ -155,8 +155,8 @@ the pool is kept in RAM beyond the head.
 
 ## The checksum of the data
 
-The map carries one CRC-64/NVME over the whole data: the `n` chunks in order, each taken as a
-whole erase unit, a chunk never written counting as erased bytes. The CRC-64 of the pair
+The map carries one CRC-64/NVME over the whole data: its `data_size` bytes in order, a chunk
+never written counting as erased bytes. The CRC-64 of the pair
 covers the map, hence that checksum: one chain covers the map and the data.
 
 It is not computed again over the whole data at every update. A CRC is linear, so replacing a
@@ -193,8 +193,8 @@ What it gives and what it does not:
   `lftl_erase_all` need no check: they replace the data and compute its checksum afresh.
 
 So no data leaves the area unchecked, and an application that never calls
-`lftl_check_data` only moves the cost to its first read. Either way the check takes 43 ms
-for 64 KB and 0.7 s per megabyte on the STM32U5A5, in one go; calling it explicitly is how an
+`lftl_check_data` only moves the cost to its first read. Either way the check takes 13 ms
+for 64 KB and 0.2 s per megabyte on the STM32U5A5, in one go; calling it explicitly is how an
 application chooses the moment.
 
 After the check the area is *sound* or *corrupt* until the next reset. In a corrupt area
@@ -322,8 +322,8 @@ a ninth unit per slot, a large area does not.
 | | Regular area | Large area |
 |---|---|---|
 | Update of the whole data: flash | 8 units | 8 units and an 80-byte pair |
-| Update of the whole data: time | 556 ms | 580 ms |
-| Update of a few bytes | 8 units, 556 ms | 1 unit, 78 ms |
+| Update of the whole data: time | 556 ms | 551 ms |
+| Update of a few bytes | 8 units, 556 ms | 1 unit, 71 ms |
 | Smallest area | 128 KB | 144 KB |
 | Area for 500 000 updates of the whole data | 3.12 MB | 3.14 MB |
 | Area for 500 000 updates of one unit or less | 3.12 MB | 480 KB |
@@ -331,7 +331,7 @@ a ninth unit per slot, a large area does not.
 | Limit on the number of updates | 10 000 per slot | 1.76 million, set by the log |
 | Start of a transaction | one slot erased, 12.5 ms | nothing |
 | Transaction tracker | 512 bytes | 528 bytes |
-| First access after a reset | the version of every slot, the checksum of half of them on average: about 30 ms with 2 slots, 0.5 s with 50 | 16 KB of log, a fraction of a millisecond; the data is checked apart, once, 43 ms: when the application asks, or else at the first read |
+| First access after a reset | the version of every slot, the checksum of half of them on average: about 30 ms with 2 slots, 0.5 s with 50 | 16 KB of log, a fraction of a millisecond; the data is checked apart, once, 13 ms: when the application asks, or else at the first read |
 | Checksum of the data | CRC-32, 27 bits effective, per slot | CRC-64 over the whole data |
 | A current version that fails its checksum | the previous version is taken, or an error | an error |
 | After a power cut | the old or the new version; a rollback by one version in the cases of the design page | the old or the new content, never taken back |
@@ -339,15 +339,19 @@ a ninth unit per slot, a large area does not.
 | Flash required | any | erased bytes read `0xFF`, refused programs reported (R6 and R9 of the flash page) |
 
 The times are estimates from the figures of the next section. An update of the whole data
-is 4 % slower, and all of it is the checksum: the bitwise CRC-64 of the library is estimated
-at twice the time per byte of its CRC-32. Without the checksum of the data a large area would
-take 538 ms.
+takes the same time within 1 %: the pair costs 10 ms, and the checksum of the data 6 ms
+less, the CRC-64 of the library going through a table of 16 entries where its CRC-32 is
+bitwise. Without the checksum of the data a large area would take 538 ms. Built with
+`LFTL_CRC64_BITWISE`, the library computes the CRC-64 bit by bit, without a table and in a
+time that depends on the length alone: 0.65 us per byte, which makes 580 ms of the update of
+the whole data, 78 ms of the update of a few bytes and 43 ms of the check.
 
 ## Sizing and costs on the STM32U5A5
 
-Estimates, from 128 us per word programmed, 1.56 ms per erase, about 0.65 us per byte of
-CRC-64 and 0.3 us per byte of CRC-32 at 160 MHz. Nothing here is measured. The tables are
-printed by `test/ewlf-model/chunked_sim.py --large`.
+Estimates, from 128 us per word programmed, 1.56 ms per erase, about 0.2 us per byte of
+CRC-64 (27 cycles per byte counted on the Cortex-M33 code of its table form, rounded up) and
+0.3 us per byte of CRC-32 at 160 MHz. Nothing here is measured. The tables are printed by
+`test/ewlf-model/chunked_sim.py --large`.
 
 **Sizing rule.** With `kmax` the number of chunks of the largest update or transaction, and
 `W` the number of chunk writes over the life of the area:
@@ -367,16 +371,16 @@ a pair) positions, 8 of them reserved, after its 32 certificates:
 
 | Data | Chunks | Map | Pair | Regular pairs per log unit | Commits the log endures | Update of one chunk | Update of the whole data | Regular area, any update | Check of the data | Tracker |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 8 KB | 1 | 12 B | 64 B | 112 | 2.24 M | 72.9 ms | 73 ms | 70 ms | 5 ms | 66 B |
-| 16 KB | 2 | 14 B | 64 B | 112 | 2.24 M | 78.3 ms | 145 ms | 139 ms | 11 ms | 132 B |
-| 32 KB | 4 | 18 B | 80 B | 88 | 1.76 M | 78.4 ms | 290 ms | 278 ms | 21 ms | 264 B |
-| 64 KB | 8 | 26 B | 80 B | 88 | 1.76 M | 78.4 ms | 580 ms | 556 ms | 43 ms | 528 B |
-| 128 KB | 16 | 42 B | 96 B | 72 | 1.44 M | 78.6 ms | 1.16 s | 1.11 s | 85 ms | 1056 B |
-| 256 KB | 32 | 74 B | 128 B | 52 | 1.04 M | 78.9 ms | 2.32 s | 2.23 s | 170 ms | 2112 B |
-| 512 KB | 64 | 138 B | 192 B | 32 | 640 k | 79.4 ms | 4.64 s | 4.45 s | 341 ms | 4224 B |
-| 664 KB | 83 | 176 B | 224 B | 26 | 520 k | 79.7 ms | 6.01 s | 5.77 s | 442 ms | 5478 B |
-| 1 MB | 128 | 266 B | 320 B | 16 | 320 k | 80.6 ms | 9.27 s | 8.90 s | 682 ms | 8448 B |
-| 2 MB | 256 | 522 B | 576 B | 5 | 100 k | 83.0 ms | 18.54 s | 17.81 s | 1.36 s | 16896 B |
+| 8 KB | 1 | 12 B | 64 B | 112 | 2.24 M | 69.3 ms | 69 ms | 70 ms | 2 ms | 66 B |
+| 16 KB | 2 | 14 B | 64 B | 112 | 2.24 M | 70.9 ms | 138 ms | 139 ms | 3 ms | 132 B |
+| 32 KB | 4 | 18 B | 80 B | 88 | 1.76 M | 71.0 ms | 276 ms | 278 ms | 7 ms | 264 B |
+| 64 KB | 8 | 26 B | 80 B | 88 | 1.76 M | 71.0 ms | 551 ms | 556 ms | 13 ms | 528 B |
+| 128 KB | 16 | 42 B | 96 B | 72 | 1.44 M | 71.2 ms | 1.10 s | 1.11 s | 26 ms | 1056 B |
+| 256 KB | 32 | 74 B | 128 B | 52 | 1.04 M | 71.4 ms | 2.20 s | 2.23 s | 52 ms | 2112 B |
+| 512 KB | 64 | 138 B | 192 B | 32 | 640 k | 72.0 ms | 4.40 s | 4.45 s | 105 ms | 4224 B |
+| 664 KB | 83 | 176 B | 224 B | 26 | 520 k | 72.3 ms | 5.71 s | 5.77 s | 136 ms | 5478 B |
+| 1 MB | 128 | 266 B | 320 B | 16 | 320 k | 73.1 ms | 8.80 s | 8.90 s | 210 ms | 8448 B |
+| 2 MB | 256 | 522 B | 576 B | 5 | 100 k | 75.4 ms | 17.60 s | 17.81 s | 419 ms | 16896 B |
 
 An update counts its chunks, the erases of their units, its pair, the checksum of the map,
 the checksum of the data (the old and the new content of the chunks, or the whole data) and
@@ -469,6 +473,9 @@ python3 chunked_model.py --protocol c2p --geometry 2,4,1 --warmup w01,w0,w0,w0,w
 | `c2p` | A | format | 1 / 4 | | no violation (8.8 k states, 25 k sessions) |
 | `c2p` | A | warm | 2 / 4 | | no violation (94 k states, 29.9 M sessions, 38 min) |
 | `c2p` | A | warm | 2 / 4 | one regular pair per log unit (`2,4,1,2,2,1,2,2`): a log switch at every commit | no violation (83 k states, 2.4 M sessions) |
+| `c2p` | D | warm | 2 / 4 | | no violation (108 k states, 26.3 M sessions, 37 min) |
+| `c2p` | A | warm, two operations per session | 1 / 3 | | no violation (129 k states, 12.0 M sessions, 23 min) |
+| `c2p` | A | warm | 2 / 5 | | no violation (536 k states, 162.5 M sessions, 3.4 h) |
 | `c2a` | A | format | 2 / 5 | | no violation (107 k states, 304 k sessions) |
 | `c2a` | A | warm | 2 / 5 | | no violation (110 k states, 313 k sessions) |
 | `c2a` | A | warm | 2 / 5 | `--weak-erased` | no violation, the same 313 k sessions: the pool never reads a unit whose erase was cut |
@@ -482,9 +489,6 @@ python3 chunked_model.py --protocol c2p --geometry 2,4,1 --warmup w01,w0,w0,w0,w
 | `c2` | A | warm | 2 / 4 | a rollover of the map units and a log switch at every commit (`2,4,1,2,1,1,2,2`) | no violation (114 k states, 972 k sessions) |
 | `c2` | A | warm, two operations per session | 1 / 3 | | no violation (169 k states, 1.8 M sessions) |
 | `c2` | A | warm | 2 / 5 | | no violation (825 k states, 22.9 M sessions, 31 min) |
-
-Still running when this was written, on `c2p`, and added here as they end: pool A with 2 cuts
-and 5 boots, pool D with 2 cuts and 4 boots, pool A with two operations per session.
 
 Negative controls (`C2_KNOCKOUT=` in the environment), warm, stuck ignored. Each rule,
 removed alone, gives its violation:
@@ -516,7 +520,7 @@ the checksum of the data, which no rule above reads.
 - the pool must be sized for the largest transaction;
 - the first read after a reset pays the check of the whole data, unless the application
   asked for it earlier; the check is not split into steps;
-- an update of a few bytes rewrites one erase unit: 78 ms on the STM32U5A5, where the
+- an update of a few bytes rewrites one erase unit: 71 ms on the STM32U5A5, where the
   several-chunks-per-unit form of CHUNKED.md took 7 ms and paid for it with garbage
   collection.
 
@@ -596,7 +600,7 @@ switch of that form are new code next to the existing ones.
 CHUNKED.md has the detail and the figures of each.
 
 - **Several chunks per erase unit.** A small update then programs a fraction of a unit: 7 ms
-  instead of 78 ms for 64 KB in 496-byte chunks. Its price is a start marker per chunk, units
+  instead of 71 ms for 64 KB in 496-byte chunks. Its price is a start marker per chunk, units
   that are partly garbage, a garbage collection that copies chunks, a reserve, and an update
   time that depends on the state of the pool. Its rules were model checked and simulated.
 - **The map in units of its own**, with the log of EWLF areas as it is in the library: no

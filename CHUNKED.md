@@ -428,7 +428,8 @@ What a regular area keeps:
 
 Estimates, from 128 us per word programmed, 1.56 ms per erase, about 0.65 us per byte of
 CRC-64 and 0.3 us per byte of CRC-32 at 160 MHz. Nothing here is measured. The tables are
-printed by `test/ewlf-model/chunked_sim.py --tables`.
+printed by `test/ewlf-model/chunked_sim.py --tables --crc64-us 0.65`: 0.65 us per byte is the
+bitwise CRC-64 the library had when this study was written, and its table form is at 0.2.
 
 **Sizing rule.** With `kmax` the number of chunks of the largest update or transaction, and
 `W` the number of chunk writes over the life of the area:

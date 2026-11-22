@@ -109,6 +109,15 @@ lftl_ctx_t nvmd = {
   .next = LFTL_INVALID_POINTER
 };
 
+lftl_ctx_t largea = {
+  .nvm_props = &nvm_props,
+  .area = &nvm.largea_pages,
+  .area_size = sizeof(nvm.largea_pages),
+  .data = LFTL_INVALID_POINTER,
+  .data_size = sizeof(nvm.largea_data),
+  .transaction_tracker = LFTL_INVALID_POINTER,
+  .next = LFTL_INVALID_POINTER
+};
 
 //without a command line (firmware), call test_main(0,NULL,NULL)
 int test_main(int argc, const char*argv[], bool consumed[]);

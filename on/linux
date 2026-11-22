@@ -24,6 +24,6 @@ set(LFTL_ACCESSORS_INCLUDES )
 #match STM32L5
 #add_definitions(-DLFTL_PAGE_SIZE=\(2*1024\))
 #add_definitions(-DLFTL_WU_SIZE=8)
-#match CH32V307
+#4 KB pages and 2-byte write units: the smallest write unit the tests cover
 add_definitions(-DLFTL_PAGE_SIZE=\(4*1024\))
 add_definitions(-DLFTL_WU_SIZE=2)

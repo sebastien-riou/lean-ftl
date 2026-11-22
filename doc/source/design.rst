@@ -835,7 +835,7 @@ Without pinning
 
 On a flash not declared with ``zero_overwrite`` (N3 of the flash page: the STM32L5 and STM32U5
 document the all-zero overwrite, the W25Q32RV specifies programming for erased locations only, the
-M5531 and CH32V307 manuals do not say) the library runs without its pins, which only regular
+M5531 manual does not say) the library runs without its pins, which only regular
 areas have: the pin of a partially programmed end marker and the tombstone of a torn slot.
 Everything else stands. What changes:
 

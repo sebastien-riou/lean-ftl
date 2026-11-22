@@ -153,7 +153,7 @@ Regular areas rely on it for one case, their ``checksum2`` read complete at one 
 at a later one (:ref:`design-residual`); EWLF areas do not rely on it at all. Three consequences
 for regular areas. A 32-bit checksum alone does not guarantee the weight (about 16 programmed bits
 on average, often fewer). The zero padding that fills an 8- or 16-byte meta-data item supplies it
-on the STM32L5 and STM32U5; 2-byte write units (CH32V307, the Linux test geometry) do not get it.
+on the STM32L5 and STM32U5; 2-byte write units (the Linux test geometry) do not get it.
 On flash with ECC, "read correctly" includes a corrected single-bit error: the first cell that
 flips is invisible to the software.
 
@@ -202,12 +202,6 @@ Per target
      - 8 bits per 64, NMI on double error
      - Refused, except all zeros
      - No margin read; ECC correction flag, one-sided
-   * - CH32V307 (``target/ch32v307``)
-     - 2 bytes
-     - 4 KB
-     - none documented here
-     - not documented here
-     - not documented here
    * - M5531 (no callbacks yet)
      - 4 bytes (32-bit program)
      - 8 KB

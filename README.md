@@ -26,9 +26,9 @@ The library is independent of any NVM controller, porting it to a new MCU means 
 NOTE: tests are provided to verify the correct implementation of the accessors; what they must guarantee, and what they need not, is on the [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html) page.
 
 This repository provides accessors for the following targets:
-- CH32V307 (testbench is [here](https://github.com/sebastien-riou/lean-ftl-ch32v307))
-- STM32L5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32l5/))
-- STM32U5xx (testbench is [here](https://github.com/sebastien-riou/lean-ftl-stm32u5/))
+- STM32L5xx and STM32U5xx: the test suite runs on the NUCLEO-L552ZE-Q and NUCLEO-U5A5ZJ-Q as a
+  [lean-bsp](https://github.com/sebastien-riou/lean-bsp) application, whose board support packages hold
+  the accessors they run with (`test/HWBRIDGE.md`, "Run the test suite with lean-bsp")
 - Native execution on Linux (for test and development purposes)
 
 Release package contains binaries for the following platforms:
@@ -47,7 +47,6 @@ Release package contains binaries for the following platforms:
     - M85
 - RISC-V:
     - RV32IMC
-        - CH32V307 (includes accessors)
 - Linux (includes RAM based accessors, for test and development purposes)
 
 ## Documentation

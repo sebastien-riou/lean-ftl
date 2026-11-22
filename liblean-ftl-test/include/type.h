@@ -18,13 +18,6 @@
 #define LFTL_PAGE_SIZE (2*1024)
 #define LFTL_WU_SIZE 8
 #endif
-#ifdef LFTL_CH32V307
-#define LFTL_PAGE_SIZE (4*1024)
-#define LFTL_WU_SIZE 2
-//whether the flash accepts a program of all zeros over a programmed write
-//unit is not documented for the CH32V307: off until measured
-#define LFTL_ZERO_OVERWRITE 0
-#endif
 //the STM32L5 and STM32U5 document it, the Linux simulator models it (and
 //--no-pinning turns it off at run time)
 #ifndef LFTL_ZERO_OVERWRITE

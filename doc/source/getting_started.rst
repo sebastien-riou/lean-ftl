@@ -19,9 +19,11 @@ The release package is designed to support cross platform, multi configuration, 
   - ARM Cortex-M55
   - ARM Cortex-M85
   - RISC-V RV32IMC
-  - CH32V307 (include accessors, `testbench is here <https://github.com/sebastien-riou/lean-ftl-ch32v307>`__)
-  - STM32L5 (include accessors, `testbench is here <https://github.com/sebastien-riou/lean-ftl-stm32l5/>`__)
-  - STM32U5 (include accessors, `testbench is here <https://github.com/sebastien-riou/lean-ftl-stm32u5/>`__)
+  - STM32L5 (include accessors)
+  - STM32U5 (include accessors)
+
+The test suite runs on the NUCLEO-L552ZE-Q and NUCLEO-U5A5ZJ-Q boards as a
+`lean-bsp <https://github.com/sebastien-riou/lean-bsp>`__ application (``app.toml``; ``test/HWBRIDGE.md``).
   - Linux (include RAM based accessors, for dev/debug purposes only)
 
 - The following binaries are included:

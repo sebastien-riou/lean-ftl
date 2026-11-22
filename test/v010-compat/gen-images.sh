@@ -22,7 +22,7 @@ gcc -O1 -Wall -Wextra -Wno-unused-parameter -Iliblean-ftl/include \
   test/v010-compat/harness.c liblean-ftl/source/ftl.c -o $TMP/hhead
 
 # The geometries of liblean-ftl-test/include/type.h (write unit, page):
-# STM32U5, STM32L5, CH32V307 and the Linux build. The images are made for
+# STM32U5, STM32L5 and the Linux build. The images are made for
 # the test's nvmd area: data of 4 write units, 2 slots.
 GEOS=("16 8192" "8 2048" "2 4096")
 # name:writes:erase_all. The writes are those of harness.c's do_write():

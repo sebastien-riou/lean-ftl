@@ -22,8 +22,7 @@ things to measure. The documents themselves are not in the repository (`git_igno
 | Pico 2 (RP2350A + Winbond W25Q32RV, 4 MB) | Raspberry Pi Pico 2 datasheet | release 5 | the flash statements, §5.1 |
 | | W25Q32RV_DTR datasheet | Rev H, December 15, 2025 | organization, page program, erases, suspend, reset, power-up, AC characteristics |
 
-Not covered: the CH32V307 (a testbench and `target/ch32v307/` exist, no document in the folder) and
-the RP2350's own QSPI/XIP controller (the RP2350 datasheet is not in the folder; on the Pico 2 the
+Not covered: the RP2350's own QSPI/XIP controller (the RP2350 datasheet is not in the folder; on the Pico 2 the
 SDK does the programming, see §2.4).
 
 ## 1. Summary
@@ -217,8 +216,8 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
 all 0xFF, or when the data is all zeros (lines 121-126, "like STM32U5-class flash"); an erase sets
 0xFF; the tearing simulator in `liblean-ftl-test/source/test.c` (`tearing_sim_nvm_write`) refuses
 the same writes so that tests only build states a real flash can hold. The geometry comes from
-`on/linux` and `testit`, today the CH32V307 values (4 KB pages, 2-byte write units; the STM32 values
-are there, commented out). It models no ECC. In the regular areas a simulated cut lands the whole
+`on/linux` and `testit`: 4 KB pages and 2-byte write units, the smallest write unit the tests cover
+(the STM32 values are there, commented out). It models no ECC. In the regular areas a simulated cut lands the whole
 write, then corrupts the bytes past a write-unit boundary (XOR 0x55) and reports the tear; in the
 EWLF areas it leaves the write unit it lands in *weak*, reading differently at every boot (as
 programmed, all erased, all zeros, or under a random mask: T2 without T3), the units after it
@@ -334,5 +333,4 @@ Two consequences of the ECC rows, now T5 on the page:
    check would give, the number of pulses being set by the slowest cells: a guess, the manual
    does not describe the algorithm. A worst case has to come from the datasheet, not from these
    figures.
-6. **Documents to add.** The CH32V307 reference manual and the RP2350 datasheet, so that the two
-   remaining targets get their rows.
+6. **Documents to add.** The RP2350 datasheet, so that the remaining target gets its row.

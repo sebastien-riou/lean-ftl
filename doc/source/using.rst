@@ -348,8 +348,7 @@ on your target platform:
 - :c:type:`error_handler_t`
 
 You can find an implementation of those callbacks for STM32U5 and STM32L5 in 
-https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, for CH32V307 in
-https://github.com/sebastien-riou/lean-ftl/tree/main/target/ch32v307, and a RAM based
+https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, and a RAM based
 one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
 
 What the callbacks must guarantee is R3 to R5 of :ref:`flash-required`, and what they need not

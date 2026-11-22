@@ -352,7 +352,7 @@ wear-leveling factors they are used with, and their layout stays as it is.
 
 Pinning needs a flash that accepts a program of zeros over a partially programmed word. The
 STM32L5 and STM32U5 document it; the W25Q32RV of the Pico 2 specifies programming for erased
-locations only, and the M5531 and CH32V307 manuals do not say (FLASH.md). On such a device the
+locations only, and the M5531 manual does not say (FLASH.md). On such a device the
 capability is not declared (N3 of the flash page) and the design runs without its three pins: the
 pin of a partially programmed end marker, the tombstone of a torn record, and the pin of the start
 markers the write path skips. Everything else stands: the scan never erases, a unit is erased at
@@ -416,7 +416,7 @@ of section 2, the end marker of the write a power cut interrupted; nothing else 
 | Threat | Consequence | With pinning | Without pinning |
 |---|---|---|---|
 | Marker read partially programmed at one boot, all erased at a later one (T2) | Rollback by one version (O2); no loss | Closed: the first boot that sees it pins it | Open until the next write: LFTL-011 as today |
-| Marker read complete at one boot, all erased at a later one | Rollback by one version (O2); no loss | Excluded by T3 wherever the marker carries 16 programmed bits once read complete: the EWLF zero marker on any geometry (an item is at least 4 bytes), a regular area's `checksum2` on 8- and 16-byte write units (its zero padding). Open for a regular area on 2-byte units (CH32V307), until the next write; the per-boot pin of section 2 closes it everywhere | Same scope; no per-boot pin to close it |
+| Marker read complete at one boot, all erased at a later one | Rollback by one version (O2); no loss | Excluded by T3 wherever the marker carries 16 programmed bits once read complete: the EWLF zero marker on any geometry (an item is at least 4 bytes), a regular area's `checksum2` on 8- and 16-byte write units (its zero padding). Open for a regular area on 2-byte units (the Linux test geometry), until the next write; the per-boot pin of section 2 closes it everywhere | Same scope; no per-boot pin to close it |
 | Marker read all erased at one boot, programmed at a later one | A late new by one version: the data of the interrupted write shows up after B was shown; each boot alone is old-or-new | Closed: T is tombstoned at the first boot | Open until the next write; the numbering rule keeps it from becoming a collision |
 | Power cut at every boot (the attacker of LFTL-010) | Wear, availability (O3) | One word program per boot, on the same word, until one completes; a pinned word is final; never an erase | Nothing is written at boot |
 | Power cut during a pin or tombstone | None by itself | The word is left weak and decided again at the next boot, on a word closer to settled; at worst the row above | n/a |

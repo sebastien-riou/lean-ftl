@@ -205,10 +205,26 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
   tBE2 (64 KB) 120 / 1200 ms; tCE 6 / 40 s; tW (status register) 1.5 / 15 ms.
 - **Endurance and retention.** "Min. 100K Program-Erase cycles", "More than 20-year data
   retention". No ECC.
-- **lean-ftl.** No accessor yet (`lean-bsp-pico2` declares no NVM region). A port would use
-  `erase_size` 4 KB and a `write_size` between 1 (the datasheet's unit) and 256 (the SDK's unit);
-  with the SDK as is, a 4-byte meta-data item costs a 256-byte page program, so a driver doing
-  partial page programs is worth having.
+- **lean-ftl.** Since 2026-11-22 `lean-bsp-pico2` declares an NVM region, the upper 2 MB of the
+  flash, on both its targets, `cortex-m33` and `rv32imcb` (`src/bsp_nvm.c`), through the pico-sdk:
+  `erase_size` 4 KB, `write_size` 8, no `zero_overwrite`. Its callbacks:
+  - write: the whole destination must read 0xFF, or nothing is programmed and the callback
+    returns the refused status (R9): the flash itself does not check. Then one program per write
+    unit, in ascending order, and a read back. One program per unit because a page program puts
+    all its bytes in flight at once: a power cut during a program of several units could leave
+    all of them weak, where the tearing simulation and the models leave one weak unit per cut.
+    The SDK programs whole 256-byte pages, so each program is the unit's page with 0xFF around
+    the unit. That relies on NOR physics, a 1 bit programs nothing, not on a sentence of the
+    datasheet;
+  - erase: sector by sector, each read back as all 0xFF, since the flash reports no failure;
+  - no suspend; interrupts masked during each operation only.
+
+  An 8-byte unit gives each meta-data item of a regular area its zero padding (T3 of the flash
+  page), which units of 2 or 4 bytes do not. The price of the SDK path is a 256-byte page
+  program per write unit; a driver doing partial page programs is still worth having. Tests 1
+  to 45 passed on the board on 2026-11-22, on the Cortex-M33 and on the Hazard3 core: the first
+  board runs without `zero_overwrite`, about 3 minutes each, the v0.1.0 images of test 37 included
+  (added for this geometry that day). The logs are kept under `build/boards/`.
 
 ### 2.5 The Linux simulator
 
@@ -235,18 +251,18 @@ The ids are those of the documentation page
 | Id | Statement | Relied on by | STM32U5 | STM32L5 | M5531 | W25Q32RV |
 |---|---|---|---|---|---|---|
 | R6, N1 | An erase sets the whole erase unit to 0xFF: needed by EWLF areas (R6); regular areas only need a stable erased value (N1) | formatted records read 0xFF; free positions and certificates of EWLF areas | doc | doc | doc | doc |
-| R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum | 1 B minimum |
+| R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum | 1 B minimum; `lean-bsp-pico2` uses 8 B |
 | R3, N3 | Between two erases every write unit is programmed once; the library re-programs a unit only where `zero_overwrite` is declared, and only to all zeros | slot and record layouts; `LFTL_ERROR_TRANSACTION_OVERWRITE` | by construction | by construction | by construction | by construction |
-| N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan of regular areas, only on an NVM declared with `zero_overwrite`; the Linux simulator. EWLF areas program zeros only over units that read erased, and assume that such a program, when it returns over a weak unit, leaves solid zeros | doc; all-zero target open | doc; same | — to measure | — outside the spec |
+| N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan of regular areas, only on an NVM declared with `zero_overwrite`; the Linux simulator. EWLF areas program zeros only over units that read erased, and assume that such a program, when it returns over a weak unit, leaves solid zeros | doc; all-zero target open | doc; same | — to measure | — outside the spec; declared without `zero_overwrite` |
 | N3 (not used) | All zeros can be programmed over a write unit that already reads all zeros | nothing: the library never programs a unit that reads all zeros. The design of EWLF areas takes the refusal into account: no single word of zeros is trusted as a durable mark | no: PROGERR (measured, point 2) | no: PROGERR (measured, point 2) | — | — |
-| R9 | A program the flash refuses is reported as such by the write callback, nothing programmed | EWLF areas, which step over the refused unit (`LFTL_NVM_STATUS_REFUSED`) | yes: PROGERR, the accessor returns the status | same | — to measure | no check: the program lands over the weak word |
+| R9 | A program the flash refuses is reported as such by the write callback, nothing programmed | EWLF areas, which step over the refused unit (`LFTL_NVM_STATUS_REFUSED`) | yes: PROGERR, the accessor returns the status | same | — to measure | the flash does not check; the write callback of `lean-bsp-pico2` does, by reading: a unit that does not read erased is refused, a weak unit that reads erased is programmed over |
 | EWLF | An interrupted erase of a unit whose cells were already erased leaves them erased | the certificates of EWLF areas: without it the model checker finds a loss in two power cuts | measured with a system reset as the cut, 40 of 40 (point 5) | — to measure | — to measure | — to measure |
 | EWLF | All zeros programmed over a partially programmed unit, once the program returns, are solid | markers, confirms and certificates of EWLF areas programmed over a weak unit that read erased | accepted (point 2); solidity inferred | same | — | — |
 | R2, R7 | `write_size` is at least the ECC codeword, so an item is one codeword and a torn program spoils only its own unit | `write_size` doc in `lean-ftl.h`; T1.13 | 16 B = codeword | 8 B = codeword | n/a | n/a |
 | R7, T5 | A double-bit ECC error raises an NMI rather than returning a wrong value; a weak word may do so until it is erased or pinned | T1.13; the integrator guide | doc | doc | n/a | n/a |
 | T1 | A cut during a program or erase leaves only the unit being written undefined; other units keep their content | anti-tearing, O1 and O2 of `THREAT-MODEL.md` | "not guaranteed" for the accessed content; others not stated | same | not stated | "may become corrupted" for the unit; others not stated |
 | T2, T3, T4 | A unit left by a cut may be weak: read differently at different times and drift toward erased; 16 programmed bits once read correctly never read all erased (T3, relied on by regular areas only); a weakly erased unit may read all erased, then show programmed bits | the [anti-tearing page](https://lean-ftl.readthedocs.io/en/latest/design.html#design-residual) | not documented by any vendor; a physics assumption | same | same | same |
-| R5 | Erase and program are blocking and finish; a reset or cut is the only interruption | the accessors poll BSY or ISPGO | doc | doc | doc | suspend exists but a port would not use it |
+| R5 | Erase and program are blocking and finish; a reset or cut is the only interruption | the accessors poll BSY or ISPGO | doc | doc | doc | suspend exists; the callbacks of `lean-bsp-pico2` do not use it |
 | N4 | Endurance used in wear estimates: 10 k cycles per erase unit (a figure the library does not rely on) | T1.5; LFTL-010 | 10 k (100 k on at most 32 pages per bank) | — | — | 100 k |
 
 Two consequences of the ECC rows, now T5 on the page:

@@ -208,11 +208,11 @@ Per target
      - none mentioned
      - not specified
      - None documented
-   * - Pico 2, W25Q32RV (no callbacks yet)
-     - 1 to 256 bytes
+   * - Pico 2, W25Q32RV (``lean-bsp-pico2``)
+     - 8 bytes (the flash programs 1 to 256)
      - 4 KB
      - none
-     - outside the specification
+     - outside the specification; the write callback refuses a unit that does not read erased
      - None: no ECC, no failure status
 
 No target documented here offers a margin read, that is a read against a tighter threshold, so

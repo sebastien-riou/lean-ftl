@@ -168,10 +168,31 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
   address: the TRM neither allows nor refuses programming a word that is already programmed, and
   does not mention an ECC. The OTP has a lock bit after which a word "cannot be programmed again,
   regardless its content is all 1 or not".
-- **Endurance, retention, timings.** Not in the TRM (datasheet, not in the folder).
-- **lean-ftl.** No accessor yet (`lean-bsp-numaker-m5531` declares no NVM region). A port would use
-  `write_size` 4 (or 8 with the 64-bit command) and `erase_size` 8 KB; the all-one verification
-  could back `is_erased()`. The re-programming behaviour must be measured first (§4, point 1).
+- **Endurance, retention, timings.** Not in the TRM (datasheet, not in the folder). Measured on
+  a NuMaker-M5531 on 2026-11-23, at 220 MHz, through the callbacks below: a page erase with its
+  8 KB read back takes 14.2 ms (4 erases); the write of one 8-byte unit, with its erased check,
+  its cache invalidation and its read back, 59 to 60 µs (64 writes). What the erased pages held
+  before is not recorded, and on the STM32U5 the erase time depends on it (§4, point 5). The log
+  and the timing firmware are kept under `build/boards/` (`m5531-nvm-timing-*`).
+- **lean-ftl.** Since 2026-11-23 `lean-bsp-numaker-m5531` declares an NVM region, APROM bank 1
+  (0x00200000, 1 MB), the image being kept in bank 0 (`src/bsp_nvm.c`): `erase_size` 8 KB,
+  `write_size` 8, no `zero_overwrite`, since the re-programming behaviour is not measured (§4,
+  point 1). Its callbacks drive the FMC registers directly:
+  - write: the whole destination must read 0xFF, or nothing is programmed and the callback
+    returns the refused status (R9); that check is the only source of a refusal, since nothing
+    says the controller looks at the target. Then one "Flash 64-bit Program" (0x61) per write
+    unit, in ascending order, so that the value of a meta-data item and its zero padding are
+    programmed by the same operation (T3 of the flash page), and a read back. Whether that
+    command puts its two words in flight together is not documented. The multi-word program is
+    not used;
+  - erase: page by page, each read back as all 0xFF; the all-one verification is not used;
+  - ISPFF is cleared before each command and checked after it: a failure of its own, never a
+    refusal. None was seen;
+  - the flash is cacheable on the Cortex-M55: each erase and program invalidates the data cache
+    over what it changed, before the verification.
+
+  Tests 1 to 45 passed on the board on 2026-11-23, in the variant without `zero_overwrite`, the
+  v0.1.0 images of test 37 included, in under a minute. The log is kept under `build/boards/`.
 
 ### 2.4 Pico 2: RP2350A and W25Q32RV (Pico 2 datasheet release 5, W25Q32RV Rev H)
 
@@ -251,11 +272,11 @@ The ids are those of the documentation page
 | Id | Statement | Relied on by | STM32U5 | STM32L5 | M5531 | W25Q32RV |
 |---|---|---|---|---|---|---|
 | R6, N1 | An erase sets the whole erase unit to 0xFF: needed by EWLF areas (R6); regular areas only need a stable erased value (N1) | formatted records read 0xFF; free positions and certificates of EWLF areas | doc | doc | doc | doc |
-| R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum | 1 B minimum; `lean-bsp-pico2` uses 8 B |
+| R2 | Programming works in aligned write units of `write_size`; nothing smaller is needed (N2) | `lftl_nvm_props_t`, the accessors reject other sizes | 16 B | 8 B | 4 B minimum; `lean-bsp-numaker-m5531` uses 8 B, one 64-bit program | 1 B minimum; `lean-bsp-pico2` uses 8 B |
 | R3, N3 | Between two erases every write unit is programmed once; the library re-programs a unit only where `zero_overwrite` is declared, and only to all zeros | slot and record layouts; `LFTL_ERROR_TRANSACTION_OVERWRITE` | by construction | by construction | by construction | by construction |
-| N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan of regular areas, only on an NVM declared with `zero_overwrite`; the Linux simulator. EWLF areas program zeros only over units that read erased, and assume that such a program, when it returns over a weak unit, leaves solid zeros | doc; all-zero target open | doc; same | — to measure | — outside the spec; declared without `zero_overwrite` |
+| N3 (opt-in) | All zeros can be programmed over a partially programmed write unit | the pins and tombstones of the scan of regular areas, only on an NVM declared with `zero_overwrite`; the Linux simulator. EWLF areas program zeros only over units that read erased, and assume that such a program, when it returns over a weak unit, leaves solid zeros | doc; all-zero target open | doc; same | — to measure; declared without `zero_overwrite` | — outside the spec; declared without `zero_overwrite` |
 | N3 (not used) | All zeros can be programmed over a write unit that already reads all zeros | nothing: the library never programs a unit that reads all zeros. The design of EWLF areas takes the refusal into account: no single word of zeros is trusted as a durable mark | no: PROGERR (measured, point 2) | no: PROGERR (measured, point 2) | — | — |
-| R9 | A program the flash refuses is reported as such by the write callback, nothing programmed | EWLF areas, which step over the refused unit (`LFTL_NVM_STATUS_REFUSED`) | yes: PROGERR, the accessor returns the status | same | — to measure | the flash does not check; the write callback of `lean-bsp-pico2` does, by reading: a unit that does not read erased is refused, a weak unit that reads erased is programmed over |
+| R9 | A program the flash refuses is reported as such by the write callback, nothing programmed | EWLF areas, which step over the refused unit (`LFTL_NVM_STATUS_REFUSED`) | yes: PROGERR, the accessor returns the status | same | the manual names no refusal, to measure; the write callback of `lean-bsp-numaker-m5531` refuses by reading, as on the Pico 2 | the flash does not check; the write callback of `lean-bsp-pico2` does, by reading: a unit that does not read erased is refused, a weak unit that reads erased is programmed over |
 | EWLF | An interrupted erase of a unit whose cells were already erased leaves them erased | the certificates of EWLF areas: without it the model checker finds a loss in two power cuts | measured with a system reset as the cut, 40 of 40 (point 5) | — to measure | — to measure | — to measure |
 | EWLF | All zeros programmed over a partially programmed unit, once the program returns, are solid | markers, confirms and certificates of EWLF areas programmed over a weak unit that read erased | accepted (point 2); solidity inferred | same | — | — |
 | R2, R7 | `write_size` is at least the ECC codeword, so an item is one codeword and a torn program spoils only its own unit | `write_size` doc in `lean-ftl.h`; T1.13 | 16 B = codeword | 8 B = codeword | n/a | n/a |
@@ -278,8 +299,9 @@ Two consequences of the ECC rows, now T5 on the page:
 
 1. **M5531 re-programming.** Program a word twice (expected: the AND of the two values, no ISPFF),
    then all zeros over a partially programmed word; and whether a page that was being programmed at
-   a reset behaves like the STM32 one ("may no longer be writable"). Needed before the M5531 port,
-   and before the pinning of the scan ([documentation](https://lean-ftl.readthedocs.io/en/latest/design.html#design-common)) can claim that target.
+   a reset behaves like the STM32 one ("may no longer be writable"). The M5531 callbacks of
+   2026-11-23 do without it: they declare no `zero_overwrite` and refuse by reading. Needed
+   before the pinning of the scan ([documentation](https://lean-ftl.readthedocs.io/en/latest/design.html#design-common)) can claim that target.
 2. **STM32: all zeros over all zeros. Measured on 2026-11-03: refused on both parts.**
    7.3.7/6.3.7 allow it, the PROGERR bullet lists it as an error, and the error is what the parts
    do. Measured on a NUCLEO-U5A5ZJ-Q (IDCODE 0x30016481) and a NUCLEO-L552ZE-Q (IDCODE

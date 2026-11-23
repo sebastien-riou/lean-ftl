@@ -22,9 +22,10 @@ gcc -O1 -Wall -Wextra -Wno-unused-parameter -Iliblean-ftl/include \
   test/v010-compat/harness.c liblean-ftl/source/ftl.c -o $TMP/hhead
 
 # The geometries the tests run on (write unit, page): STM32U5, STM32L5, the
-# Linux build and the Pico 2 (NVM region of lean-bsp-pico2). The images are
-# made for the test's nvmd area: data of 4 write units, 2 slots.
-GEOS=("16 8192" "8 2048" "2 4096" "8 4096")
+# Linux build, the Pico 2 (NVM region of lean-bsp-pico2) and the M5531 (NVM
+# region of lean-bsp-numaker-m5531). The images are made for the test's nvmd
+# area: data of 4 write units, 2 slots.
+GEOS=("16 8192" "8 2048" "2 4096" "8 4096" "8 8192")
 # name:writes:erase_all. The writes are those of harness.c's do_write():
 # whole, aligned part, transaction, unaligned, whole... With 2 slots, 4
 # writes leave the newest version in slot 0 and 5 in slot 1, the other slot

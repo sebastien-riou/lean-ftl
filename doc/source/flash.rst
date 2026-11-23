@@ -202,11 +202,11 @@ Per target
      - 8 bits per 64, NMI on double error
      - Refused, except all zeros
      - No margin read; ECC correction flag, one-sided
-   * - M5531 (no callbacks yet)
-     - 4 bytes (32-bit program)
+   * - M5531 (``lean-bsp-numaker-m5531``)
+     - 8 bytes (64-bit program; the flash programs 4)
      - 8 KB
      - none mentioned
-     - not specified
+     - not specified; the write callback refuses a unit that does not read erased
      - None documented
    * - Pico 2, W25Q32RV (``lean-bsp-pico2``)
      - 8 bytes (the flash programs 1 to 256)

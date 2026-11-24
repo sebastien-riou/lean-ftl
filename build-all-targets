@@ -20,9 +20,14 @@ if [[ ! -z "$ARM_NONE_EABI" ]]; then
     ./buildit on/cortex-m52 $PRESET
     ./buildit on/cortex-m55 $PRESET
     ./buildit on/cortex-m85 $PRESET
-    #targeted builds for few specific MCUs
-    ./buildit on/stm32u5 $PRESET
-    ./buildit on/stm32l5 $PRESET
+    #device libraries: lean-ftl plus the flash accessors of one device, taken from
+    #its lean-bsp BSP (cmake/device-lib.cmake). Only those whose BSP is there:
+    #./fetch-bsps gets them, and ./build-release requires them all
+    for DEVICE in $(./fetch-bsps --list); do
+        ./buildit on/$DEVICE $PRESET
+        #the library and its header are all an application needs: link an example against them
+        test/device-lib-check build/$DEVICE
+    done
 fi
 
 RISCV_NONE_ELF=`which riscv-none-elf-gcc || true`

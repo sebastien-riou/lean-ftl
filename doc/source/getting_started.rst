@@ -19,12 +19,14 @@ The release package is designed to support cross platform, multi configuration, 
   - ARM Cortex-M55
   - ARM Cortex-M85
   - RISC-V RV32IMC
-  - STM32L5 (include accessors)
-  - STM32U5 (include accessors)
-
-The test suite runs on the NUCLEO-L552ZE-Q and NUCLEO-U5A5ZJ-Q boards as a
-`lean-bsp <https://github.com/sebastien-riou/lean-bsp>`__ application (``app.toml``; ``test/HWBRIDGE.md``).
+  - STM32U5A5xJ, STM32L552xE and M5531H2LJAE: device libraries, which include the accessors of
+    the internal flash (see :ref:`using-device-libraries`)
   - Linux (include RAM based accessors, for dev/debug purposes only)
+
+The test suite runs on the NUCLEO-U5A5ZJ-Q, the NUCLEO-L552ZE-Q, the NuMaker-M5531 and the
+Raspberry Pi Pico 2 as a `lean-bsp <https://github.com/sebastien-riou/lean-bsp>`__ application
+(``app.toml``; ``test/HWBRIDGE.md``). The accessors live in the board support packages of
+lean-bsp; the device libraries are built from them.
 
 - The following binaries are included:
 
@@ -42,10 +44,14 @@ Prerequisites:
 
 .. _CMake: http://cmake.org/
 
-This builds for all supported platforms, result is in "dist" folder:
+This builds for all supported platforms, result is in "dist" folder. The device libraries take
+their accessors from the board support packages of lean-bsp, which ``./fetch-bsps`` clones next to
+the repository at the commits of ``lean-bsp/bsps.lock`` (Python 3.11 or newer is needed to build
+them):
 
 .. code-block:: bash
 
+  ./fetch-bsps
   ./build-release
 
 If you want to build just for linux, result is in "build/linux" folder:

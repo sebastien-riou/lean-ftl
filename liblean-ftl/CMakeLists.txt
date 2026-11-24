@@ -5,6 +5,11 @@ else()
   add_library(${LIB} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/source/ftl.c)
 endif(LFTL_ACCESSORS)
 
+if(LFTL_ACCESSORS_DEFINES)
+  #what the accessors are compiled with, and only them
+  set_source_files_properties(${LFTL_ACCESSORS} PROPERTIES COMPILE_DEFINITIONS "${LFTL_ACCESSORS_DEFINES}")
+endif()
+
 target_include_directories(${LIB}
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -48,3 +53,15 @@ add_custom_command(
   COMMAND ${CMAKE_AR} -x $<TARGET_FILE:lean-ftl>
   COMMAND ${CMAKE_OBJDUMP} -D ${OBJDUMP_OPTIONS} *.${CMAKE_AR_O_EXT} > disassembly.asm
 )
+
+if(LFTL_DEVICE_BSP)
+  #a device library (cmake/device-lib.cmake): the header its users include before lean-ftl.h,
+  #next to the library
+  add_custom_command(
+    TARGET lean-ftl POST_BUILD
+    COMMAND python3 -B ${CMAKE_CURRENT_LIST_DIR}/../lean-bsp/gen-device-header
+            --bsp ${LFTL_DEVICE_BSP_ROOT} --device ${LFTL_DEVICE_NAME}
+            --base ${LFTL_DEVICE_NVM_BASE} --size ${LFTL_DEVICE_NVM_SIZE}
+            --out ${CMAKE_CURRENT_BINARY_DIR}/lftl-device.h
+  )
+endif()

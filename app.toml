@@ -14,7 +14,7 @@ flash_write = true
 
 [app.sources]
 # the library and its test suite, as the CMake build compiles them; lean-bsp/lftl_lean_bsp.c is the
-# board glue the testbench repos used to provide
+# board glue (the retired testbench repos used to provide it)
 files = [
     "liblean-ftl/source/ftl.c",
     "liblean-ftl-test/source/test.c",

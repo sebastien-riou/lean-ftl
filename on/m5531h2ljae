@@ -1,0 +1,18 @@
+# lean-ftl with the accessors of the internal flash of the M5531H2LJAE (2 MB), from
+# lean-bsp-numaker-m5531: APROM bank 1 only (1 MB at 0x00200000), the BSP's own region. Bank 0 is
+# where the code runs, and nothing in the BSP was written or tested for programming it.
+include("${CMAKE_CURRENT_LIST_DIR}/cortex-m55")
+
+set(LFTL_DEVICE_BSP numaker-m5531)
+set(LFTL_DEVICE_BSP_INCLUDES
+  include
+  RTE/_Debug_M5531H2LJAE
+  RTE/Device/M5531H2LJAE
+  Library/Device/Nuvoton/M5531/Include
+  Library/StdDriver/inc
+  CMSIS/Core/Include
+)
+set(LFTL_DEVICE_BSP_DEFINES )
+set(LFTL_DEVICE_NVM_BASE 0x00200000u)
+set(LFTL_DEVICE_NVM_SIZE 0x100000u)
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/device-lib.cmake")

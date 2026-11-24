@@ -59,15 +59,17 @@ lbsp build-load-run --bsp numaker-m5531 --until PASSED --timeout 600
 From a sandboxed session, run `lbsp` as `python3 -m leanbsp` with lean-bsp and lean-hwbridge on
 `PYTHONPATH` and `HWBRIDGE="python3 -m hwbridge"`. Each prints `Callbacks test PASS`, then
 `Tests 1 to 45 PASSED`: in about 30 s on the U5A5 (lean-bsp runs it at 160 MHz), 1 minute on the
-L552 and the M5531, and about 3 minutes on the Pico 2, on either core. The sections below are the testbench-repo route this replaces.
+L552 and the M5531, and about 3 minutes on the Pico 2, on either core.
+The flash accessors a board runs with are those of its BSP (`src/bsp_nvm.c`), the only copy there is.
 
-## Run the test firmware on a board
+## Flash and read by hand
 
-With the prefix above:
+`lbsp build-load-run` does these steps itself; by hand, with the prefix above and the ELF of a
+lean-bsp build:
 
 ```
 hwbridge serial open nucleo-u5a5 --baud 115200
-hwbridge flash nucleo-u5a5 build/boards/lean-ftl-u5a5.elf
+hwbridge flash nucleo-u5a5 <the ELF> --timeout 300
 hwbridge serial cat nucleo-u5a5 --from GEN:0 --until PASSED --timeout 600
 ```
 
@@ -80,9 +82,7 @@ hwbridge serial cat nucleo-u5a5 --from GEN:0 --until PASSED --timeout 600
 - `flash` prints the `serial cat ... --from GEN:OFFSET` that starts at the boot; the same text is
   in `/home/sru/repos/lean-hwbridge/run/serial/<board>/<GEN>.log`.
 - The firmware runs the suite once, in the pinning variant its accessors declare, without a
-  command line, and prints `Tests 1 to N PASSED` at the end. About 7 minutes on the U5, 1 minute on the L5.
-- Without `HAS_PRINTF` the firmware prints nothing: the green LED blinks at about 1 Hz on a pass
-  and fast on an error. Build with `HAS_PRINTF` as below for a readable run.
+  command line, and prints `Tests 1 to N PASSED` at the end.
 - A board run has no tearing simulation. It checks the layout, the pins, the tombstones and the
   record copies on real flash, through callbacks that check the flash's error flags; a torn
   program needs a power cut during one.
@@ -92,98 +92,26 @@ hwbridge serial cat nucleo-u5a5 --from GEN:0 --until PASSED --timeout 600
   firmware that prints at once should wait two seconds first.
 - `flash` and `reset` take `--cat --until TEXT` to print the boot output in the same command.
 
-## Build a test firmware that prints
+## The measurement programs and the retired testbenches
 
-The testbenches [lean-ftl-stm32u5](https://github.com/sebastien-riou/lean-ftl-stm32u5/) and
-[lean-ftl-stm32l5](https://github.com/sebastien-riou/lean-ftl-stm32l5/), cloned beside this
-repository, link the prebuilt `liblean-ftl.a` and `liblean-ftl-test.a` of a release from their
-untracked `lean-ftl-dist/` (`./get-local-lean-ftl` fills it from `../lean-ftl`). Release builds
-have no `HAS_PRINTF`, so `test.c` is silent on serial. For a readable run:
+Until 2026-11-24 the boards were also run through two testbench repositories,
+[lean-ftl-stm32u5](https://github.com/sebastien-riou/lean-ftl-stm32u5/) and
+[lean-ftl-stm32l5](https://github.com/sebastien-riou/lean-ftl-stm32l5/), which linked the
+`stm32u5` and `stm32l5` libraries of a release. Those libraries no longer exist: the accessors
+they held (`target/stm32`) are in the BSPs only, and the route is retired. Its steps are in this
+file as of commit df94e3a (`git show df94e3a:test/HWBRIDGE.md`).
 
-1. Build the two libraries with the define, from this repository. `buildit` names the build
-   directory after the toolchain file, so the file must not sit directly in `build/`:
-
-   ```
-   mkdir -p build/boards
-   printf 'include(%s/on/stm32u5)\nadd_definitions(-DHAS_PRINTF)\n' "$PWD" > build/boards/stm32u5-printf
-   printf 'include(%s/on/stm32l5)\nadd_definitions(-DHAS_PRINTF)\n' "$PWD" > build/boards/stm32l5-printf
-   export PATH=/opt/toolchains/arm-none-eabi-gcc/xpack-arm-none-eabi-gcc-14.2.1-1.1/bin:$PATH
-   ./buildit $PWD/build/boards/stm32u5-printf minSizeRel
-   ./buildit $PWD/build/boards/stm32l5-printf minSizeRel
-   ```
-
-   The libraries are `build/stm32u5-printf/liblean-ftl/liblean-ftl.a` and
-   `build/stm32u5-printf/liblean-ftl-test/liblean-ftl-test.a`, the same under `stm32l5-printf`.
-
-2. Put the headers and libraries where the testbench's makefile looks, build the ELF and stage it
-   under `build/boards/` (ignored by git, visible to the bridge and to a session):
-
-   ```
-   TB=../lean-ftl-stm32u5; T=stm32u5; B=build/stm32u5-printf; ELF=lean-ftl-u5a5.elf
-   D=$TB/lean-ftl-dist
-   mkdir -p $D/minSizeRel/include $D/liblean-ftl-test/include $D/minSizeRel/build/$T/liblean-ftl $D/minSizeRel/build/$T/liblean-ftl-test
-   cp liblean-ftl/include/lean-ftl.h $D/minSizeRel/include/
-   cp liblean-ftl-test/include/*.h $D/liblean-ftl-test/include/
-   cp $B/liblean-ftl/liblean-ftl.a $D/minSizeRel/build/$T/liblean-ftl/
-   cp $B/liblean-ftl-test/liblean-ftl-test.a $D/minSizeRel/build/$T/liblean-ftl-test/
-   make -C $TB/minSizeRel clean all
-   cp $TB/minSizeRel/$ELF build/boards/
-   ```
-
-   For the L552: `TB=../lean-ftl-stm32l5; T=stm32l5; B=build/stm32l5-printf; ELF=lean-ftl-l552.elf`,
-   after step 3.
-   From a session, which stays inside this repository, copy the testbench's tracked files
-   (`git -C $TB ls-files`) to the scratchpad and build that copy; only the ELF goes to
-   `build/boards/`.
-
-3. L552 only: the serial port the bridge sees is the ST-LINK virtual COM port, which on this board
-   is USART3 on PD8/PD9 (solder bridges moved), not the LPUART1 the project initialises at 209700
-   baud; LPUART1 output never reaches the bridge. In `Core/Src/main.c`, which has CRLF line
-   endings, insert this after `/* USER CODE BEGIN 0 */` and its `#include <stdbool.h>`, and call
-   `MX_USART3_UART_Init();` on the line after `MX_LPUART1_UART_Init();`. The weak `_write` in
-   `Core/Src/syscalls.c` calls `__io_putchar`. The U5 project already routes `printf` to COM1
-   (`USE_COM_LOG`).
-
-   ```c
-   /* ST-LINK VCP of this board: USART3 on PD8/PD9 (solder bridges), 115200 8N1 */
-   static UART_HandleTypeDef huart3;
-   static void MX_USART3_UART_Init(void)
-   {
-     __HAL_RCC_USART3_CLK_ENABLE();
-     __HAL_RCC_GPIOD_CLK_ENABLE();
-     GPIO_InitTypeDef pins = {0};
-     pins.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-     pins.Mode = GPIO_MODE_AF_PP;
-     pins.Pull = GPIO_NOPULL;
-     pins.Speed = GPIO_SPEED_FREQ_LOW;
-     pins.Alternate = GPIO_AF7_USART3;
-     HAL_GPIO_Init(GPIOD, &pins);
-     huart3.Instance = USART3;
-     huart3.Init.BaudRate = 115200;
-     huart3.Init.WordLength = UART_WORDLENGTH_8B;
-     huart3.Init.StopBits = UART_STOPBITS_1;
-     huart3.Init.Parity = UART_PARITY_NONE;
-     huart3.Init.Mode = UART_MODE_TX_RX;
-     huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-     huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-     huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-     huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-     huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-     if (HAL_UART_Init(&huart3) != HAL_OK) Error_Handler();
-   }
-   int __io_putchar(int ch)
-   {
-     uint8_t c = (uint8_t)ch;
-     HAL_UART_Transmit(&huart3, &c, 1, HAL_MAX_DELAY);
-     return ch;
-   }
-   ```
+The three measurement programs below were built on that route, each pasted into the `main.c` of a
+copy of a testbench. They drive the flash controller themselves and need nothing of lean-ftl,
+only `printf`, so running one again means building it as a lean-bsp application on `nucleo-u5a5` or
+`nucleo-l552`, as the timing firmware of the M5531 was (FLASH.md, 2.3). The build steps quoted
+below are those of the testbench route, kept as the record of how the figures were obtained.
 
 ## Measure zeros over zeros
 
 [zeros-over-zeros.c](boards/zeros-over-zeros.c) measures whether the flash accepts all zeros
-programmed over a write unit that already reads all zeros (FLASH.md, section 4, point 2). Build it
-as the printing test firmware above, steps 2 and 3, with two more changes to the copy's
+programmed over a write unit that already reads all zeros (FLASH.md, section 4, point 2). It was built
+as the printing test firmware of the testbench route, with two more changes to the copy's
 `Core/Src/main.c`: paste the file just before `/* USER CODE END 0 */`, and replace the lines
 `test_callbacks();` and `test_main(0,NULL,NULL);` with `op2_measure();`. Then:
 
@@ -198,9 +126,9 @@ It erases the last two pages of bank 2 before measuring, so `hwbridge reset nucl
 
 [torn-erase.c](boards/torn-erase.c) measures what a page erase interrupted by a system reset
 leaves on an STM32U5A5, on a programmed page and on a page that was already erased (EWLF.md,
-"Physics the design relies on"). Build it as the printing test firmware above, steps 1 and 2,
-with three more changes to the copy of the testbench: paste the file into `Core/Src/main.c` just
-before `/* USER CODE END 0 */`; replace the lines `test_callbacks();` and
+"Physics the design relies on"). It was built as the printing test firmware of the testbench
+route, with three more changes to the copy of the testbench: paste the file into
+`Core/Src/main.c` just before `/* USER CODE END 0 */`; replace the lines `test_callbacks();` and
 `test_main(0,NULL,NULL);` with `te_measure();`; and in `Core/Src/stm32u5xx_it.c` replace the
 endless loop of `NMI_Handler` with `void te_nmi(void); te_nmi();`, since a read of a weak cell may
 raise the ECC NMI. Then:

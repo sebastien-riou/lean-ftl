@@ -26,6 +26,13 @@ jobs:
         sha256sum package.json
     - name: Satisfy project dependencies
       run: xpm install --no-save 
+    #the device libraries take their flash accessors from the lean-bsp BSPs, cloned
+    #next to the repository at the commits of lean-bsp/bsps.lock
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Fetch the BSPs
+      run: ./fetch-bsps
     - name: build
       shell: bash
       env:

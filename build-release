@@ -7,6 +7,9 @@ NAME=${2:-lean-ftl}
 
 echo "INFO: Creating release archive ${NAME}.tar.gz"
 
+#a release holds every device library, each built from its BSP at the pinned commit
+./fetch-bsps --check
+
 if [ $TEST_ON_LINUX -eq 1 ]; then
     #generic test build and examples
     echo "INFO: Test on Linux."

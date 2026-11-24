@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# The lean-bsp BSPs the device libraries are built from: the flash accessors of a
+# device live in its BSP only (src/bsp_nvm.c), and lean-bsp/bsps.lock names the
+# BSPs and the commit of each a release is built from.
+#
+# Usage: ./fetch-bsps [--check | --pin | --list]
+#   (no option)  clones each BSP that is missing, at its pinned commit, then checks
+#                all of them as --check does. A BSP already there is never modified
+#   --check      succeeds when every BSP is there, at its pinned commit, with no
+#                change to its tracked files: what a release requires
+#   --pin        rewrites the commits of lean-bsp/bsps.lock from the checkouts,
+#                which must have no change to their tracked files
+#   --list       prints the device libraries (on/<name>) whose BSP is there
+#
+# The BSPs are in the directory LEAN_BSP_WORKSPACE names, by default the one that
+# holds this repository, as "lean-bsp-<name>": where lean-bsp looks for them too.
+# There is no timeout: a clone lasts as long as the network makes it.
+
+set -u
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+LOCK="$HERE/lean-bsp/bsps.lock"
+WORKSPACE=${LEAN_BSP_WORKSPACE:-$(dirname "$HERE")}
+MODE=${1:-fetch}
+
+usage(){ sed -n '3,19p' "$0"; exit 2; }
+case "$MODE" in fetch|--check|--pin|--list) ;; *) usage;; esac
+
+#the lines of the lock file, without its comments
+entries(){ grep -v '^[[:space:]]*#' "$LOCK" | grep -v '^[[:space:]]*$'; }
+
+dirty(){ [ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]; }
+
+if [ "$MODE" = --list ]; then
+  entries | while read -r name device url commit; do
+    [ -f "$WORKSPACE/lean-bsp-$name/src/bsp_nvm.c" ] && echo "$device"
+  done
+  exit 0
+fi
+
+if [ "$MODE" = --pin ]; then
+  TMP=$(mktemp)
+  grep '^[[:space:]]*#' "$LOCK" > "$TMP"
+  FAILED=0
+  while read -r name device url commit; do
+    dir="$WORKSPACE/lean-bsp-$name"
+    if [ ! -d "$dir/.git" ]; then echo "ERROR: $dir is not there"; FAILED=1; continue; fi
+    if dirty "$dir"; then echo "ERROR: $dir has uncommitted changes: commit them first"; FAILED=1; continue; fi
+    new=$(git -C "$dir" rev-parse HEAD)
+    [ "$new" = "$commit" ] || echo "$name: $commit -> $new"
+    echo "$name $device $url $new" >> "$TMP"
+  done < <(entries)
+  if [ $FAILED -ne 0 ]; then rm -f "$TMP"; exit 1; fi
+  cat "$TMP" > "$LOCK"
+  rm -f "$TMP"
+  exit 0
+fi
+
+FAILED=0
+while read -r name device url commit; do
+  dir="$WORKSPACE/lean-bsp-$name"
+  if [ ! -d "$dir" ] && [ "$MODE" = fetch ]; then
+    echo "fetch-bsps: cloning $url at $commit"
+    git clone --quiet "$url" "$dir" && git -C "$dir" checkout --quiet --detach "$commit" || { echo "ERROR: could not get $name at $commit"; FAILED=1; continue; }
+  fi
+  if [ ! -d "$dir/.git" ]; then echo "ERROR: $dir is not there: run ./fetch-bsps"; FAILED=1; continue; fi
+  head=$(git -C "$dir" rev-parse HEAD)
+  if [ "$head" != "$commit" ]; then
+    echo "ERROR: $dir is at $head, lean-bsp/bsps.lock pins $commit (\"./fetch-bsps --pin\" pins what is checked out)"
+    FAILED=1
+  elif dirty "$dir"; then
+    echo "ERROR: $dir has uncommitted changes"
+    FAILED=1
+  else
+    echo "fetch-bsps: $name at $commit"
+  fi
+done < <(entries)
+exit $FAILED

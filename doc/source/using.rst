@@ -347,16 +347,84 @@ on your target platform:
 - :c:type:`nvm_read_t`
 - :c:type:`error_handler_t`
 
-You can find an implementation of those callbacks for STM32U5 and STM32L5 in 
-https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, and a RAM based
-one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
+The callbacks of the devices the test suite runs on are part of
+`lean-bsp <https://github.com/sebastien-riou/lean-bsp>`__: each board support package holds those
+of its flash, in ``src/bsp_nvm.c`` (``lean-bsp-nucleo-u5a5``, ``lean-bsp-nucleo-l552``,
+``lean-bsp-numaker-m5531``, ``lean-bsp-pico2``). A RAM based implementation for Linux is in
+https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
+
+.. _using-device-libraries:
+
+Device libraries
+^^^^^^^^^^^^^^^^
+
+For some devices the release holds a *device library*: *lean-ftl* with the callbacks of that
+device's flash already in it, built from the board support package above. Next to the library,
+``lftl-device.h`` gives the geometry and declares the callbacks, so that the integration is one
+header and one archive:
+
+.. code-block:: c
+  :linenos:
+  :caption: Example: Using the device library of the STM32U5A5xJ
+  :name: Example: Using the device library of the STM32U5A5xJ
+
+  #include "lftl-device.h" //LFTL_PAGE_SIZE, LFTL_WU_SIZE, nvm_erase, nvm_write, nvm_read
+  #include "lean-ftl.h"
+
+  lftl_nvm_props_t nvm_props = {
+    .base = &nvm,
+    .size = sizeof(nvm),
+    .write_size = LFTL_WU_SIZE,
+    .erase_size = LFTL_PAGE_SIZE,
+    .zero_overwrite = LFTL_ZERO_OVERWRITE,
+    .erase = nvm_erase,
+    .write = nvm_write,
+    .read = nvm_read,
+    .error_handler = throw_exception,
+  };
+
+.. list-table::
+   :header-rows: 1
+
+   * - Library
+     - Flash
+     - Range the callbacks accept
+     - What the application provides
+   * - ``stm32u5a5xj``
+     - internal flash of the STM32U5A5xJ, 4 MB
+     - the whole flash, ``0x08000000`` to ``0x083FFFFF``
+     - a ``.RamFunc`` section in RAM (the erase and the program run from it)
+   * - ``stm32l552xe``
+     - internal flash of the STM32L552xE, 512 KB, dual-bank mode
+     - the whole flash, ``0x08000000`` to ``0x0807FFFF``
+     - a ``.RamFunc`` section in RAM
+   * - ``m5531h2ljae``
+     - internal flash of the M5531H2LJAE, 2 MB
+     - APROM bank 1 only, ``0x00200000`` to ``0x002FFFFF``: programming the bank the code runs
+       from was never tested
+     - CMSIS's ``SystemCoreClock``
+
+A library is named after the part number of the MCU, down to what sets the size of its flash, when
+the flash is internal, and after the board when the flash is a separate chip. Its callbacks refuse
+any address outside their range, and they are weak symbols: an application can replace one. The
+bank size is built in, so a part of the same family with another flash size needs its own build
+(``on/stm32u5a5xj`` in the repository is the model). On the test boards the suite runs in the
+board support package's own region, a part of that range.
+
+The Raspberry Pi Pico 2 has no device library: its callbacks go through pico-sdk
+(``hardware_flash``), which a project for that board builds anyway, so they are taken as source.
+Add ``src/bsp_nvm.c`` of ``lean-bsp-pico2`` to the project, with the BSP's ``include/bsp_api.h``
+and ``src/bsp_nvm.h``, define ``BSP_NVM0_BASE`` and ``BSP_NVM0_SIZE`` to the range given to
+*lean-ftl* (both, or neither for the upper 2 MB of the flash), and point the callbacks of
+:c:type:`lftl_nvm_props_t` to the region's ``erase``, ``write`` and ``read``, as
+``lean-bsp/lftl_device_nvm.c`` in the repository does.
 
 What the callbacks must guarantee is R3 to R5 and R10 of :ref:`flash-required`, and what they
 need not provide is in :ref:`flash-not-relied-on`: *lean-ftl* programs each write unit at most once
 between two erases, whole units only, and never overwrites; a write of several units programs them
 one at a time, from the lowest address up (R10). For EWLF areas the write callback returns
 :c:macro:`LFTL_NVM_STATUS_REFUSED` when the flash refused a program and programmed nothing (R9):
-the STM32 callbacks above do.
+the callbacks above do.
 
 .. note:: On flash with ECC that raises an NMI on a double-bit error (STM32L5, STM32U5),
   a program or erase interrupted by a power cut can leave a word that faults when read,

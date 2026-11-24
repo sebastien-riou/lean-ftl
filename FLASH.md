@@ -54,7 +54,7 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
 | Program time | measured on one board: 128 µs per quad-word | measured on one board: 85 µs per double word | — | tPP 0.25 ms typ., 2 ms max (page) |
 | Erase time | measured on one board: 0.88 ms for an 8 KB page already erased, 1.56 ms (sometimes 1.79 ms) once 8 write units or more are programmed, in steps of 0.23 ms between | measured on one board: 22 ms per 2 KB page | — | tSE 30 ms typ., 240 ms max (4 KB sector) |
 | Errata read | ES0553 2.2.12: programming stuck after a sequence error while WDW is set | none in the folder | none in the folder | none |
-| lean-ftl today | `write_size` 16, `erase_size` 8 KB, `target/stm32/stm32u5-accessors.c` | `write_size` 8, `erase_size` 2 KB, `target/stm32/stm32l5-accessors.c` | no accessor yet | no accessor yet |
+| lean-ftl today | `write_size` 16, `erase_size` 8 KB, accessors in `lean-bsp-nucleo-u5a5` | `write_size` 8, `erase_size` 2 KB, accessors in `lean-bsp-nucleo-l552` | `write_size` 8, `erase_size` 8 KB, accessors in `lean-bsp-numaker-m5531` | `write_size` 8, `erase_size` 4 KB, accessors in `lean-bsp-pico2` |
 
 ## 2. Per target
 
@@ -111,10 +111,11 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
   Workaround: write the next word. The lean-ftl accessor writes complete quad-words with interrupts
   masked and never starts an erase while a program is pending, so it does not reach this state; a
   second flash driver running from an interrupt could.
-- **lean-ftl.** `target/stm32/stm32u5-accessors.c` with `LFTL_WU_SIZE` 16 and 8 KB pages
-  (`liblean-ftl-test/include/type.h`): `nvm_ll_write` feeds the write buffer 32-bit word by word
-  and waits for BSY, interrupts disabled, nonsecure registers, then verifies by reading back
-  (`memcmp`); `nvm_erase` erases page by page.
+- **lean-ftl.** The accessors are in `lean-bsp-nucleo-u5a5` (`src/bsp_nvm.c`), 16-byte write units
+  and 8 KB pages, and nowhere else since 2026-11-24; the device library `stm32u5a5xj` of a release
+  is built from them, for the whole 4 MB. The program feeds the write buffer 32-bit word by word,
+  one quad-word at a time, and waits for BSY, interrupts disabled, nonsecure registers, then
+  verifies by reading back (`memcmp`); the erase goes page by page.
 
 ### 2.2 STM32L5 (RM0438 Rev 8, §6)
 
@@ -141,8 +142,10 @@ feature. Details and quotes in §2, what lean-ftl makes of it in §3.
   device reset occurs during a flash memory program or erase operation." No operation status
   register. Erase and program need voltage scaling range 0 or 1 (range 2 is the reset default).
 - **Endurance, retention, timings.** Not in RM0438 (datasheet, not in the folder).
-- **lean-ftl.** `target/stm32/stm32l5-accessors.c`, `LFTL_WU_SIZE` 8, 2 KB pages, same structure
-  as the STM32U5 accessor.
+- **lean-ftl.** The accessors are in `lean-bsp-nucleo-l552` (`src/bsp_nvm.c`), 8-byte write units
+  and 2 KB pages (dual-bank mode; they refuse to work in single-bank mode), same structure as the
+  STM32U5 ones; the device library `stm32l552xe` of a release is built from them, for the whole
+  512 KB.
 
 ### 2.3 M5531 (TRM Rev 1.02, §6.8)
 

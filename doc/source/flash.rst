@@ -53,7 +53,7 @@ the content.
 A program or an erase that returned success reads its value until the next erase of its unit and
 is not disturbed by operations on other units. Failures are reported by the return code of the
 callback: *lean-ftl* does not retry, verify or time out. Where the hardware does not verify, the
-callback should (the STM32 callbacks of the repository check the flash's error flags after each
+callback should (the STM32 callbacks of the lean-bsp BSPs check the flash's error flags after each
 operation, clearing them before it so that a refused one cannot poison the next, and read back
 what they programmed).
 
@@ -203,13 +203,13 @@ Per target
      - ECC
      - Programming a non-erased unit
      - Detecting a weak word
-   * - STM32U5 (``target/stm32``)
+   * - STM32U5 (``lean-bsp-nucleo-u5a5``)
      - 16 bytes
      - 8 KB
      - 9 bits per 128, NMI on double error
      - Refused, except all zeros
      - No margin read; ECC correction flag, one-sided
-   * - STM32L5 (``target/stm32``)
+   * - STM32L5 (``lean-bsp-nucleo-l552``)
      - 8 bytes
      - 2 KB (dual-bank mode)
      - 8 bits per 64, NMI on double error

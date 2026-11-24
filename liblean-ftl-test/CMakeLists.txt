@@ -1,4 +1,4 @@
-if(LFTL_ACCESSORS) #build test lib only if we have accessors because we need to know page size and write size
+if(BUILD_TEST) #the CMake build runs the tests on Linux only; a board builds them through lean-bsp (app.toml)
 set(LIB lean-ftl-test)
 add_library(${LIB} STATIC ${CMAKE_CURRENT_SOURCE_DIR}/source/test.c)
 
@@ -44,4 +44,4 @@ add_custom_command(
   COMMAND ${CMAKE_AR} -x $<TARGET_FILE:lean-ftl-test>
   COMMAND ${CMAKE_OBJDUMP} -D ${OBJDUMP_OPTIONS} *.${CMAKE_AR_O_EXT} > disassembly.asm
 )
-endif(LFTL_ACCESSORS)
+endif(BUILD_TEST)

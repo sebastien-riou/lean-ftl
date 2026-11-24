@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# Link check of a device library (cmake/device-lib.cmake): examples/device/main.c
+# is compiled with the library's lftl-device.h and linked against the library
+# alone, without startup code nor linker script, so that a symbol the library
+# should hold and does not fails the link.
+#
+# Usage: test/device-lib-check <build dir of the device library, e.g. build/stm32u5a5xj>
+#
+# What the application must provide is given here, and is what the documentation
+# says it must provide: SystemCoreClock for m5531h2ljae (the .RamFunc section of
+# the STM32 libraries needs nothing to link). The compiler is the one of the
+# build (the one its compile_commands.json names), with its CPU flags.
+
+set -eu
+
+[ $# -eq 1 ] || { sed -n '3,13p' "$0"; exit 2; }
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+BDIR=$(cd "$1" && pwd)
+DEVICE=$(basename "$BDIR")
+LIB="$BDIR/liblean-ftl"
+[ -f "$LIB/lftl-device.h" ] || { echo "ERROR: $LIB/lftl-device.h not found: $DEVICE is not a device library"; exit 2; }
+
+CC=$(sed -n 's/^ *"command": "\([^ ]*\) .*/\1/p' "$BDIR/compile_commands.json" | head -1)
+[ -n "$CC" ] || { echo "ERROR: no compiler found in $BDIR/compile_commands.json"; exit 2; }
+CPU=$(grep -o -- '-mcpu=[a-z0-9+-]*' "$BDIR/compile_commands.json" | head -1)
+case "$DEVICE" in
+  m5531h2ljae) PROVIDED='unsigned int SystemCoreClock;';;
+  *) PROVIDED='';;
+esac
+
+OUT="$BDIR/device-lib-check"
+mkdir -p "$OUT"
+echo "$PROVIDED" > "$OUT/provided.c"
+"$CC" $CPU -mthumb -Os -Wall -Wextra -Werror -Wno-unused-parameter \
+  -I"$LIB" -I"$HERE/liblean-ftl/include" \
+  "$HERE/examples/device/main.c" "$OUT/provided.c" \
+  -nostartfiles -Wl,-e,main -Wl,--no-warn-rwx-segments --specs=nosys.specs \
+  -L"$LIB" -llean-ftl -o "$OUT/device-example.elf" > "$OUT/link.log" 2>&1 || { cat "$OUT/link.log"; echo "device-lib-check: $DEVICE FAILED"; exit 1; }
+echo "device-lib-check: $DEVICE links (examples/device/main.c, lftl-device.h and liblean-ftl.a alone)"

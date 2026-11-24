@@ -25,11 +25,27 @@ The library is independent of any NVM controller, porting it to a new MCU means 
 
 NOTE: tests are provided to verify the correct implementation of the accessors; what they must guarantee, and what they need not, is on the [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html) page.
 
-This repository provides accessors for the following targets:
-- STM32L5xx and STM32U5xx: the test suite runs on the NUCLEO-L552ZE-Q and NUCLEO-U5A5ZJ-Q as a
-  [lean-bsp](https://github.com/sebastien-riou/lean-bsp) application, whose board support packages hold
-  the accessors they run with (`test/HWBRIDGE.md`, "Run the test suite with lean-bsp")
-- Native execution on Linux (for test and development purposes)
+## Tested devices
+
+The whole test suite passes on the devices below. On a board it runs as a
+[lean-bsp](https://github.com/sebastien-riou/lean-bsp) application, and the accessors are provided
+by lean-bsp: each board support package holds the ones of its flash, in `src/bsp_nvm.c`, ready to
+be used as they are or as a starting point for another board.
+
+| Device | Board | Core | Flash the tests run in | Write unit / erase unit | Accessors |
+|---|---|---|---|---|---|
+| STM32U5xx | NUCLEO-U5A5ZJ-Q | Cortex-M33 | internal flash, bank 2 | 16 B / 8 KB | [lean-bsp-nucleo-u5a5](https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5) |
+| STM32L5xx | NUCLEO-L552ZE-Q | Cortex-M33 | internal flash, bank 2 | 8 B / 2 KB | [lean-bsp-nucleo-l552](https://github.com/sebastien-riou/lean-bsp-nucleo-l552) |
+| RP2350 | Raspberry Pi Pico 2 | Cortex-M33 and Hazard3 (RISC-V), each tested | W25Q32RV serial flash, upper 2 MB | 8 B / 4 KB | [lean-bsp-pico2](https://github.com/sebastien-riou/lean-bsp-pico2) |
+| M5531 | NuMaker-M5531 | Cortex-M55 | internal flash, APROM bank 1 | 8 B / 8 KB | [lean-bsp-numaker-m5531](https://github.com/sebastien-riou/lean-bsp-numaker-m5531) |
+| Linux | none: native execution | host | RAM, with simulated power cuts | set at build time | `target/linux`, in this repository |
+
+- The power cuts are simulated on Linux only; a board runs the same suite without cutting its power.
+- How to run the suite on a board is in `test/HWBRIDGE.md` ("Run the test suite with lean-bsp"); what each
+  flash provides, read from its vendor documentation, is in [FLASH.md](FLASH.md).
+- The release package holds *device libraries* built from those accessors, for the parts whose flash is
+  internal: lean-ftl and the accessors in one archive, with a header that gives the geometry (see
+  [Device libraries](https://lean-ftl.readthedocs.io/en/latest/using.html#using-device-libraries)).
 
 Release package contains binaries for the following platforms:
 - ARM Cortex-M:
@@ -39,11 +55,12 @@ Release package contains binaries for the following platforms:
     - M7
     - M23
     - M33
-        - STM32L5xx (includes accessors)
-        - STM32U5xx (includes accessors)
+        - STM32U5A5xJ (`stm32u5a5xj`, includes accessors for the whole 4 MB of internal flash)
+        - STM32L552xE (`stm32l552xe`, includes accessors for the whole 512 KB of internal flash)
     - M35P
     - M52
     - M55
+        - M5531H2LJAE (`m5531h2ljae`, includes accessors for APROM bank 1)
     - M85
 - RISC-V:
     - RV32IMC
@@ -102,7 +119,7 @@ Notes:
 ./testit on/linux debug
 ```
 
-Note: this does not work with embedded targets (each is tested via a dedicated repository).
+Note: this does not work with embedded targets: they run the test suite through lean-bsp, see [Tested devices](#tested-devices).
 
 ### Make a new release
 Release are created for each tag formatted as `v*.*.*`

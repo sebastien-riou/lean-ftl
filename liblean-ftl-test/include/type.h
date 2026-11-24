@@ -10,16 +10,9 @@
 #define LFTL_WU_SIZE LEAN_BSP_NVM0_WRITE_SIZE
 #define LFTL_ZERO_OVERWRITE LEAN_BSP_NVM0_ZERO_OVERWRITE
 #endif
-#ifdef LFTL_STM32U5
-#define LFTL_PAGE_SIZE (8*1024)
-#define LFTL_WU_SIZE 16
-#endif
-#ifdef LFTL_STM32L5
-#define LFTL_PAGE_SIZE (2*1024)
-#define LFTL_WU_SIZE 8
-#endif
-//the STM32L5 and STM32U5 document it, the Linux simulator models it (and
-//--no-pinning turns it off at run time)
+//the Linux build gives the geometry on its command line (on/linux, on/linux-u5);
+//its simulator models the all-zero overwrite (and --no-pinning turns it off at
+//run time)
 #ifndef LFTL_ZERO_OVERWRITE
 #define LFTL_ZERO_OVERWRITE 1
 #endif

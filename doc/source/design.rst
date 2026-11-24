@@ -10,7 +10,7 @@ data can be updated many more times than one page endures. This page describes h
 for the three kinds of areas, regular, EWLF and large: the layout on the flash, how an update is written, how the first
 access after a reset locates the current data (the *scan*), what a power cut can leave behind and
 what the scan does about it, and what each update costs in wear. What the library relies on from
-the flash is on the :ref:`flash` page, whose statements R1 to R8, N1 to N5 and T1 to T5 are cited
+the flash is on the :ref:`flash` page, whose statements R1 to R10, N1 to N5 and T1 to T5 are cited
 below; what an attacker can do with all this is in the
 `threat model <https://github.com/sebastien-riou/lean-ftl/blob/main/THREAT-MODEL.md>`_ of the
 repository, whose objectives O1 to O5 and threats T1.5 to T1.13 are cited too.
@@ -664,18 +664,56 @@ EWLF area needs: R6 and R9 of the flash page.
 Layout
 ^^^^^^
 
-.. code-block:: text
+The pool units come first, then the two log units:
 
-   area = U pool units, then 2 log units
+.. graphviz::
+   :align: center
 
-   +---------+---------+-------+---------+---------+---------+
-   |   P0    |   P1    |  ...  | P(U-1)  |   L0    |   L1    |
-   |  chunk  |  chunk  |       |  chunk  |  pairs  |  pairs  |
-   +---------+---------+-------+---------+---------+---------+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="0" cellspacing="0" cellpadding="0"><tr><td colspan="9" align="left"><b>one area</b>, U pool units and 2 log units</td></tr><tr><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">P0<br/><font point-size="9">one chunk</font></td></tr></table></td><td border="0" width="16"></td><td>...</td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">P(U-1)<br/><font point-size="9">one chunk</font></td></tr></table></td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">L0<br/><font point-size="9">pairs</font></td></tr></table></td><td border="0" width="16"></td><td><table border="0" cellborder="1" cellspacing="0" cellpadding="5"><tr><td width="90" height="36">L1<br/><font point-size="9">pairs</font></td></tr></table></td></tr><tr><td align="left"><font point-size="9">area base</font></td><td colspan="8"></td></tr></table>>];
+   }
 
-   pair = marker | map | meta | confirm
-   map  = the unit of each chunk (16 bits each) | head unit (16 bits) | CRC-64 of the data
-   meta = generation (16 bits) | 0 (16 bits) | version (32 bits) | CRC-64 of the map and meta
+A pair of the log is four parts; the second row gives the size of each, the last one the order
+in which a commit programs them:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="4" align="left"><b>one pair</b></td></tr><tr><td width="90" height="42">marker<br/><font point-size="9">all zeros</font></td><td width="250" height="42">map<br/><font point-size="9">unit of each chunk, head unit, checksum of the data</font></td><td width="170" height="42">meta field<br/><font point-size="9">generation, version, CRC</font></td><td width="90" height="42">confirm<br/><font point-size="9">all zeros</font></td></tr><tr><td border="0"><font point-size="9">one write unit</font></td><td border="0"><font point-size="9">2 B per chunk + 10 B, rounded up to whole write units</font></td><td border="0"><font point-size="9">16 B, rounded up to whole write units</font></td><td border="0"><font point-size="9">one write unit</font></td></tr><tr><td border="0">1</td><td border="0">2</td><td border="0">3</td><td border="0">4</td></tr></table>>];
+   }
+
+The *map* says where each chunk is, and carries the checksum of the whole data:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="5" align="left"><b>one map</b>, n chunks</td></tr><tr><td width="110" height="36">unit of chunk 0</td><td width="28">...</td><td width="110">unit of chunk n-1</td><td width="90">head unit</td><td width="170">CRC-64/NVME of the data</td></tr><tr><td border="0" colspan="3"><font point-size="9">16 bits each, 0xFFFF: chunk never written</font></td><td border="0"><font point-size="9">16 bits</font></td><td border="0"><font point-size="9">64 bits</font></td></tr></table>>];
+   }
+
+The *meta field* orders the maps and validates one:
+
+.. graphviz::
+   :align: center
+
+   digraph {
+     graph [pad="0.05" margin="0"];
+     node [shape=plaintext fontname="Helvetica" fontsize=11];
+     d [label=<
+       <table border="0" cellborder="1" cellspacing="0" cellpadding="6"><tr><td border="0" colspan="4" align="left"><b>one meta field</b></td></tr><tr><td width="90" height="36">generation</td><td width="90">zeros</td><td width="110">version</td><td width="250">CRC-64/NVME of the map and of these 8 bytes</td></tr><tr><td border="0"><font point-size="9">16 bits</font></td><td border="0"><font point-size="9">16 bits</font></td><td border="0"><font point-size="9">32 bits</font></td><td border="0"><font point-size="9">64 bits</font></td></tr></table>>];
+   }
+
+The map and the meta field are little endian, each padded with zeros up to whole write units.
 
 A pool unit holds one chunk, which fills it: no marker, no flag, no checksum, and nothing says
 which chunk it is; only the map says. The last chunk may hold less than a unit. A map entry of

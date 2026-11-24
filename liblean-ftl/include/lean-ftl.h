@@ -141,6 +141,12 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
  * between two erases, so it never needs to overwrite programmed cells
  * (R3 and N3 of the "Flash requirements and assumptions" page).
  *
+ * When `size` covers several write units it shall program them one at a time,
+ * from the lowest address up, each by a program operation of its own which
+ * has ended before the next one starts (R10 of the same page): a power cut
+ * then leaves at most one weak write unit, the ones below it programmed and
+ * the ones above it untouched, the only case the anti-tearing results cover.
+ *
  * When the flash refuses a program because a target write unit is not erased,
  * and programs nothing, it shall return ::LFTL_NVM_STATUS_REFUSED: a write
  * unit that a power cut left weak can read erased and still be refused, and

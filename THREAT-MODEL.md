@@ -44,7 +44,7 @@ Both cases rest on the same baseline: the code, the configuration and the callba
 **Assumed in both cases**
 
 - Firmware, the lean-ftl configuration (`lftl_nvm_props_t`, every `lftl_ctx_t`) and the callbacks are trusted and correct. `write_size`, `erase_size`, `area` and `data_size` are compile-time constants, never derived at runtime from the NVM (for example from SFDP tables). Registration checks that the configuration is consistent, but cannot tell whether it matches the hardware.
-- The flash behaves as stated on the [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html) page: requirements R1 to R8, and the tearing model T1 to T5 the anti-tearing argument below rests on (a cut affects only the unit being written; a weak word may read anything, and may read all erased later).
+- The flash behaves as stated on the [Flash requirements and assumptions](https://lean-ftl.readthedocs.io/en/latest/flash.html) page: requirements R1 to R10, and the tearing model T1 to T5 the anti-tearing argument below rests on (a cut affects only the unit being written; a weak word may read anything, and may read all erased later).
 - `error_handler` never returns: it resets, or `longjmp`s to a recovery point. The library loops forever if it does return, so a returning handler costs availability instead of turning each check into a no-op.
 - An error aborts the transaction of the area it happened on, and only that one.
 - lean-ftl is called from one execution context per area. It is not thread-safe or reentrant, and its registration lists (`first_area`, `first_area_ewlf`, `first_nvm`) are global.

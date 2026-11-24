@@ -351,9 +351,10 @@ You can find an implementation of those callbacks for STM32U5 and STM32L5 in
 https://github.com/sebastien-riou/lean-ftl/tree/main/target/stm32, and a RAM based
 one for Linux in https://github.com/sebastien-riou/lean-ftl/tree/main/target/linux
 
-What the callbacks must guarantee is R3 to R5 of :ref:`flash-required`, and what they need not
-provide is in :ref:`flash-not-relied-on`: *lean-ftl* programs each write unit at most once between
-two erases, whole units only, and never overwrites. For EWLF areas the write callback returns
+What the callbacks must guarantee is R3 to R5 and R10 of :ref:`flash-required`, and what they
+need not provide is in :ref:`flash-not-relied-on`: *lean-ftl* programs each write unit at most once
+between two erases, whole units only, and never overwrites; a write of several units programs them
+one at a time, from the lowest address up (R10). For EWLF areas the write callback returns
 :c:macro:`LFTL_NVM_STATUS_REFUSED` when the flash refused a program and programmed nothing (R9):
 the STM32 callbacks above do.
 

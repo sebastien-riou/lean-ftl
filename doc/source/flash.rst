@@ -40,7 +40,7 @@ whole. Enforced by registration (:c:macro:`LFTL_ERROR_BAD_CONFIG`,
 
 **R3. An erased write unit accepts one program of any value.**
 *lean-ftl* programs each write unit at most once between two erases, whole units only, aligned,
-possibly several units per call, with one exception that only a flash declared with
+possibly several units per call (R10), with one exception that only a flash declared with
 ``zero_overwrite`` gets, in regular areas: a program of all zeros over a word a power cut left
 weak, or over the version of a slot the scan tombstones (N3). The source may be unaligned RAM, or NVM that does
 not overlap the destination (:c:type:`nvm_write_t`).
@@ -83,6 +83,19 @@ before it programs (PROGERR on the STM32L5 and STM32U5). The write callback then
 Any other failure is fatal, as everywhere. A flash that does not check programs over the weak
 word, which for the words of zeros an EWLF area writes there is harmless.
 
+**R10. The write units of one call are programmed one at a time, in ascending order.**
+When :c:type:`nvm_write_t` is asked for several write units, it programs them from the lowest
+address up, each write unit by a program operation of its own, which has ended before the next one
+starts. A power cut during the call then leaves the units below the one being programmed with
+their value for good, that one unit weak, and the units above it untouched (T1). This is the only
+outcome the tearing simulation of the tests and the model checker produce, so it is the only one
+the anti-tearing results cover. A program operation that takes several write units at once, such
+as the page program of a serial flash or a multi-word program, has all of them in flight together:
+a cut could leave every one of them weak, in no particular order. Not checkable by the library.
+The callbacks of the four targets below program one write unit per operation: a quad-word on the
+STM32U5, a double word on the STM32L5, one 64-bit program on the M5531, one page program of 8
+bytes on the Pico 2.
+
 .. _flash-not-relied-on:
 
 Not relied on
@@ -124,7 +137,7 @@ chooses.
 
 **N5. The data value and the order of operations across units.**
 All-``0xFF`` data is written like any other value. Nothing depends on the order in which units
-are erased or programmed beyond R5.
+are erased or programmed beyond R5, and R10 within one write call.
 
 .. _flash-tearing:
 
@@ -137,8 +150,8 @@ vendor documentation: the four manuals read for ``FLASH.md`` say only that the c
 accessed is "not guaranteed" (STM32), "may become corrupted" (W25Q32RV) or nothing (M5531).
 
 **T1. A cut affects only the unit being written.**
-The write unit(s) being programmed or the erase unit being erased at that instant may end in any
-state; every other unit keeps its content.
+The write unit being programmed, one at a time (R10), or the erase unit being erased at that
+instant may end in any state; every other unit keeps its content.
 
 **T2. A weak write unit may read anything, and may read all erased later.**
 Its cells got about the same partial charge, so the unit sits near the read threshold as a whole.

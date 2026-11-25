@@ -4,7 +4,7 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        {
+        { // did not launched correctly ? typically that's because you have 2 STM32 boards connected
             "name": "Debug NUCLEO-U5A5ZJ-Q (lean-bsp)",
             "cwd": "${workspaceFolder}",
             "type": "cortex-debug",
@@ -14,7 +14,8 @@
             "servertype": "stlink",
             "device": "STM32U5A5ZJTxQ",
             "interface": "swd",
-            "serialNumber": "",        //Set ST-Link ID if you use multiple at the same time
+            //Set ST-Link ID if you use multiple at the same time
+            "serialNumber": "${env:LFTL_STLINK_NUCLEO_U5A5}",   // ST-LINK serial; unset = first probe found
             "runToEntryPoint": "app_main",
             "svdFile": "${config:STM32VSCodeExtension.cubeCLT.path}/STMicroelectronics_CMSIS_SVD/STM32U5A5.svd",
             "v1": false,
@@ -25,7 +26,7 @@
             "gdbPath": "${config:STM32VSCodeExtension.cubeCLT.path}/GNU-tools-for-STM32/bin/arm-none-eabi-gdb",
             "serverArgs": ["-m", "0"]
         },
-        {
+        { // did not launched correctly ? typically that's because you have 2 STM32 boards connected
             "name": "Debug NUCLEO-L552ZE-Q (lean-bsp)",
             "cwd": "${workspaceFolder}",
             "type": "cortex-debug",
@@ -35,7 +36,8 @@
             "servertype": "stlink",
             "device": "STM32L552ZETxQ",
             "interface": "swd",
-            "serialNumber": "",
+            //Set ST-Link ID if you use multiple at the same time
+            "serialNumber": "${env:LFTL_STLINK_NUCLEO_L552}",   // ST-LINK serial; unset = first probe found
             "runToEntryPoint": "app_main",
             "svdFile": "${config:STM32VSCodeExtension.cubeCLT.path}/STMicroelectronics_CMSIS_SVD/STM32L552.svd",
             "v1": false,

@@ -2970,6 +2970,23 @@ void large_api_test(){
 //until a write of the whole data, an erase of all of it, or the repair of
 //the checksum; the unchecked read reads it all the same; a repair is one
 //commit, and none when the checksum matches.
+//A read callback that fills the bytes of [faulty_lo, faulty_hi) with 0xA5,
+//as R7 lets one fill a write unit whose read raised an ECC fault, and reads
+//nothing outside [checked_area_lo, checked_area_hi): it notes the attempt
+static const uint8_t*faulty_lo;
+static const uint8_t*faulty_hi;
+static uint8_t faulty_nvm_read(void* dst, const void*const src_nvm_addr, uintptr_t size){
+  const uint8_t*const src8 = (const uint8_t*)src_nvm_addr;
+  if((src8 < checked_area_lo) || (src8 > checked_area_hi) || (size > (uintptr_t)(checked_area_hi - src8))){
+    out_of_area_read = 1;
+    memset(dst,0xFF,size);
+    return 0;
+  }
+  const uint8_t status = nvm_read(dst,src_nvm_addr,size);
+  for(uintptr_t i=0;i<size;i++) if((src8 + i >= faulty_lo) && (src8 + i < faulty_hi)) ((uint8_t*)dst)[i] = 0xA5;
+  return status;
+}
+
 void large_checksum_test(){
   DEBUG_PRINTLN(__func__);
   const uintptr_t page = LFTL_PAGE_SIZE;
@@ -3037,6 +3054,30 @@ void large_checksum_test(){
   large_check_whole(&ctx);
   ctx.data = LFTL_INVALID_POINTER;
   LARGE_CHECK(lftl_check_data(&ctx));
+  //after the scan, the write units of the map holding the units of chunks 0
+  //and 1 read 0xA5 bytes, as a read the callback filled after an ECC fault
+  //reads (R7): both units are outside the pool. Every use of them raises
+  //NO_VALID_VERSION, and nothing is read outside the area
+  stateful_prng_fill(large_expected,size);
+  lftl_write(&ctx,area,large_expected,size);
+  ctx.data = LFTL_INVALID_POINTER;
+  large_check_whole(&ctx); //scanned and checked: ctx.data is the decision's map
+  faulty_lo = (const uint8_t*)ctx.data;
+  faulty_hi = faulty_lo + ((4 + props.write_size - 1) / props.write_size) * props.write_size;
+  checked_area_lo = area;
+  checked_area_hi = area + ctx.area_size;
+  out_of_area_read = 0;
+  const nvm_read_t plain_read = props.read;
+  props.read = faulty_nvm_read;
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read(&ctx,buf,area,sizeof(buf)));
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_read_unchecked(&ctx,buf,area+page,sizeof(buf)));
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_check_data(&ctx));
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_write(&ctx,area+1,buf,4));
+  LARGE_CHECK(!out_of_area_read);
+  //the flash still holds the map: after a reset, the data as written
+  props.read = plain_read;
+  ctx.data = LFTL_INVALID_POINTER;
+  large_check_whole(&ctx);
   SANITY_CHECK();
 }
 

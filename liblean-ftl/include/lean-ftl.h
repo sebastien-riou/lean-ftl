@@ -51,7 +51,7 @@
 #define LFTL_SUCCESS 0x00
 /// Internal error / corruption: area contains two or more valid slots with the same version
 #define LFTL_ERROR_VERSION_COLLISION 0x01
-/// Internal error / corruption: area does not contains any valid slot
+/// Internal error / corruption: area does not contains any valid slot; on a large area, also a map entry that reads outside the pool after the scan (the flash changed behind the library)
 #define LFTL_ERROR_NO_VALID_VERSION 0x02
 /// Error: base address is not within the valid data address range for this area
 #define LFTL_ERROR_FIRST_NOT_IN_DATA 0x03

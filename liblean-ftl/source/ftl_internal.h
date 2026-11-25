@@ -1564,13 +1564,22 @@ static const uint8_t*large_map(lftl_ctx_t*ctx){
  * The map of a pair whose meta field reads valid is solid: every word of it
  * returned before the meta field was started.
  *
+ * The scan checked every value against the pool. One that reads outside it
+ * now changed since, behind the library: a write unit the read callback
+ * filled after a fault (R7), or a program by someone else. It names no unit
+ * of the area, and raises ::LFTL_ERROR_NO_VALID_VERSION rather than letting
+ * a read or a copy go that many units past the area.
+ *
  * \param ctx Context of the large area
  * \param i Index of the value
+ * \returns A pool unit, or ::LARGE_NO_UNIT
  */
 static uint16_t large_map_entry(lftl_ctx_t*ctx, unsigned int i){
   uint8_t b[2];
   nvm_read(ctx,ctx->nvm_props,b,large_map(ctx)+2*i,2);
-  return large_get16(b);
+  const uint16_t u = large_get16(b);
+  if((LARGE_NO_UNIT != u) && (u >= large_n_pool(ctx))) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
+  return u;
 }
 
 /**

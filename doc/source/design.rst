@@ -717,11 +717,15 @@ The map and the meta field are little endian, each padded with zeros up to whole
 
 A pool unit holds one chunk, which fills it: no marker, no flag, no checksum, and nothing says
 which chunk it is; only the map says. The last chunk may hold less than a unit. A map entry of
-``0xFFFF`` is a chunk never written, which reads erased. The *head* is the pool unit the update
-that wrote the map filled last. The log units are those of an EWLF area, pairs then certificates;
-a pair is the marker, the map, the meta field and the confirm, each programmed only after the one
-before it returned, so that a meta field that reads valid proves its map solid. The map of 64 KB
-on the STM32U5 is 26 bytes, its pair 80 bytes; that of 1 MB is 266 bytes, its pair 320 bytes.
+``0xFFFF`` is a chunk never written, which reads erased. The scan rejects a map that names a unit
+outside the pool, and an entry read again after the scan is checked the same way: one outside
+the pool, which only a change behind the library can make, raises
+:c:macro:`LFTL_ERROR_NO_VALID_VERSION` rather than leading a read past the area. The *head* is
+the pool unit the update that wrote the map filled last. The log units are those of an EWLF area,
+pairs then certificates; a pair is the marker, the map, the meta field and the confirm, each
+programmed only after the one before it returned, so that a meta field that reads valid proves
+its map solid. The map of 64 KB on the STM32U5 is 26 bytes, its pair 80 bytes; that of 1 MB is
+266 bytes, its pair 320 bytes.
 
 Update
 ^^^^^^
@@ -960,6 +964,12 @@ word of the record or of the pair the cut interrupted, or a word of a repair or 
      - Not a power cut: detected once per reset by the checksum of the data,
        :c:macro:`LFTL_ERROR_DATA_CHECKSUM`, never a fallback to older data
      - The application reads what it can with :c:func:`lftl_read_unchecked` and repairs
+     - Same
+   * - Large area: a map entry that reads outside the pool after the scan (the flash changed, or
+       the read callback filled a write unit after a fault, R7)
+     - Not a power cut: :c:macro:`LFTL_ERROR_NO_VALID_VERSION` at each use of that entry, never
+       a read or a copy outside the area
+     - The next scan checks the map again
      - Same
    * - Power cut at every boot
      - Wear, availability (O3)

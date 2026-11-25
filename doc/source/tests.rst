@@ -142,7 +142,9 @@ fails the run as an error:
 - test 44 loses a chunk behind the library's back, by erasing its unit: the check finds it at the
   first use after a reset, every use raises :c:macro:`LFTL_ERROR_DATA_CHECKSUM` until a repair of
   the checksum, a write of the whole data or an erase of all of it, the unchecked read reads it,
-  and a repair that finds nothing to do programs nothing;
+  and a repair that finds nothing to do programs nothing. Then two map entries read 0xA5 bytes
+  after the scan, as a read the callback filled after a fault does (R7): every use of them raises
+  :c:macro:`LFTL_ERROR_NO_VALID_VERSION`, and nothing is read outside the area;
 - test 45 is test 40 for a large area: random writes, erases of all the data and transactions,
   cut at random programs, then boots with random weak readings and cut repairs, on a geometry that
   switches its log every few operations and on one with a single certificate that gets stuck.

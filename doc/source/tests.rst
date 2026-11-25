@@ -144,7 +144,10 @@ fails the run as an error:
   the checksum, a write of the whole data or an erase of all of it, the unchecked read reads it,
   and a repair that finds nothing to do programs nothing. Then two map entries read 0xA5 bytes
   after the scan, as a read the callback filled after a fault does (R7): every use of them raises
-  :c:macro:`LFTL_ERROR_NO_VALID_VERSION`, and nothing is read outside the area;
+  :c:macro:`LFTL_ERROR_NO_VALID_VERSION`, and nothing is read outside the area. Then the entry of
+  chunk 1 alone, read by updates of chunk 0: from the start of a write, it raises before anything
+  is erased or programmed; from the commit of a transaction, or from the first program of a
+  write, it raises before the new map is valid, and after a reset the previous version stands;
 - test 45 is test 40 for a large area: random writes, erases of all the data and transactions,
   cut at random programs, then boots with random weak readings and cut repairs, on a geometry that
   switches its log every few operations and on one with a single certificate that gets stuck.

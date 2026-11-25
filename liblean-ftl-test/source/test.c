@@ -2963,13 +2963,6 @@ void large_api_test(){
   SANITY_CHECK();
 }
 
-//The checksum of the data: a chunk the flash loses after its write (its
-//unit erased behind the library's back, which any flash can do, here by
-//the raw callback) is found, lazily, at the first use of the data after a
-//reset; every call that uses the data then raises LFTL_ERROR_DATA_CHECKSUM,
-//until a write of the whole data, an erase of all of it, or the repair of
-//the checksum; the unchecked read reads it all the same; a repair is one
-//commit, and none when the checksum matches.
 //A read callback that fills the bytes of [faulty_lo, faulty_hi) with 0xA5,
 //as R7 lets one fill a write unit whose read raised an ECC fault, and reads
 //nothing outside [checked_area_lo, checked_area_hi): it notes the attempt
@@ -2986,7 +2979,24 @@ static uint8_t faulty_nvm_read(void* dst, const void*const src_nvm_addr, uintptr
   for(uintptr_t i=0;i<size;i++) if((src8 + i >= faulty_lo) && (src8 + i < faulty_hi)) ((uint8_t*)dst)[i] = 0xA5;
   return status;
 }
+//A write callback that makes faulty_nvm_read fill [arm_lo, arm_hi) from its
+//first call on: the reads before the first program are sound
+static const uint8_t*arm_lo;
+static const uint8_t*arm_hi;
+static uint8_t arming_nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
+  faulty_lo = arm_lo;
+  faulty_hi = arm_hi;
+  return counting_nvm_write(dst_nvm_addr,src,size);
+}
 
+//The checksum of the data: a chunk the flash loses after its write (its
+//unit erased behind the library's back, which any flash can do, here by
+//the raw callback) is found, lazily, at the first use of the data after a
+//reset; every call that uses the data then raises LFTL_ERROR_DATA_CHECKSUM,
+//until a write of the whole data, an erase of all of it, or the repair of
+//the checksum; the unchecked read reads it all the same; a repair is one
+//commit, and none when the checksum matches. Then map entries that read
+//outside the pool after the scan.
 void large_checksum_test(){
   DEBUG_PRINTLN(__func__);
   const uintptr_t page = LFTL_PAGE_SIZE;
@@ -3077,6 +3087,59 @@ void large_checksum_test(){
   //the flash still holds the map: after a reset, the data as written
   props.read = plain_read;
   ctx.data = LFTL_INVALID_POINTER;
+  large_check_whole(&ctx);
+  //the unit of chunk 1 alone reads outside the pool, and an update of chunk
+  //0 reads it as it counts its room: it raises before it erases or programs
+  //anything, rather than take the unit of chunk 1 for a free one
+  faulty_lo = (const uint8_t*)ctx.data + 2;
+  faulty_hi = faulty_lo + 2;
+  out_of_area_read = 0;
+  counted_writes = 0;
+  counted_erases = 0;
+  const nvm_erase_t plain_erase = props.erase;
+  props.erase = counting_nvm_erase;
+  props.read = faulty_nvm_read;
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_write(&ctx,area+1,buf,4));
+  LARGE_CHECK((0 == counted_writes) && (0 == counted_erases));
+  //a transaction, the fault coming before its commit: the commit copies the
+  //unit of chunk 1 from the map into the new one, and raises before
+  //programming it, so no pair names that map, and after a reset the
+  //previous version stands
+  faulty_lo = 0;
+  faulty_hi = 0;
+  counted_writes = 0;
+  {
+    uint8_t tracker[LFTL_TRANSACTION_TRACKER_SIZE(&ctx)];
+    lftl_transaction_start(&ctx,tracker);
+    lftl_transaction_write_any(&ctx,area+1,buf,4);
+    LARGE_CHECK(0 != counted_writes);
+    faulty_lo = (const uint8_t*)ctx.data + 2;
+    faulty_hi = faulty_lo + 2;
+    EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_transaction_commit(&ctx));
+  }
+  props.read = plain_read;
+  ctx.data = LFTL_INVALID_POINTER;
+  lftl_complete_scan(&ctx);
+  large_check_whole(&ctx);
+  //a plain write, the fault coming at its first program: chunk 0 goes into
+  //a free unit, then the update raises before the meta field of its new map
+  //(which names the units of the run again by a search of the free ones,
+  //reading the unit of chunk 1), and the previous version stands
+  arm_lo = (const uint8_t*)ctx.data + 2;
+  arm_hi = arm_lo + 2;
+  faulty_lo = 0;
+  faulty_hi = 0;
+  counted_writes = 0;
+  props.read = faulty_nvm_read;
+  props.write = arming_nvm_write;
+  EXPECT_ERROR(LFTL_ERROR_NO_VALID_VERSION, lftl_write(&ctx,area+1,buf,4));
+  LARGE_CHECK(0 != counted_writes);
+  LARGE_CHECK(!out_of_area_read);
+  props.read = plain_read;
+  props.write = counting_nvm_write;
+  props.erase = plain_erase;
+  ctx.data = LFTL_INVALID_POINTER;
+  lftl_complete_scan(&ctx);
   large_check_whole(&ctx);
   SANITY_CHECK();
 }

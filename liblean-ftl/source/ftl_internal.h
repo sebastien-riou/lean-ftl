@@ -1558,17 +1558,31 @@ static const uint8_t*large_map(lftl_ctx_t*ctx){
 }
 
 /**
- * \brief One 16-bit value of the decision's map: the unit of chunk `i`, or the
- * head unit for `i` = the number of chunks.
- *
- * The map of a pair whose meta field reads valid is solid: every word of it
- * returned before the meta field was started.
+ * \brief Raise ::LFTL_ERROR_NO_VALID_VERSION for a unit of the decision's
+ * map, read after the scan, that is outside the pool.
  *
  * The scan checked every value against the pool. One that reads outside it
  * now changed since, behind the library: a write unit the read callback
  * filled after a fault (R7), or a program by someone else. It names no unit
- * of the area, and raises ::LFTL_ERROR_NO_VALID_VERSION rather than letting
- * a read or a copy go that many units past the area.
+ * of the area. Every read of the map checks it before using it, so that
+ * nothing reads that many units past the area, takes a unit the map holds
+ * for a free one, or copies it into a new map that the next scan would
+ * reject, losing the update.
+ *
+ * \param ctx Context of the large area
+ * \param u The value read
+ * \param n_pool Number of pool units, see ::large_n_pool
+ */
+static void large_check_unit(lftl_ctx_t*ctx, uint16_t u, unsigned int n_pool){
+  if((LARGE_NO_UNIT != u) && (u >= n_pool)) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
+}
+
+/**
+ * \brief One 16-bit value of the decision's map: the unit of chunk `i`, or the
+ * head unit for `i` = the number of chunks, checked by ::large_check_unit.
+ *
+ * The map of a pair whose meta field reads valid is solid: every word of it
+ * returned before the meta field was started.
  *
  * \param ctx Context of the large area
  * \param i Index of the value
@@ -1578,7 +1592,7 @@ static uint16_t large_map_entry(lftl_ctx_t*ctx, unsigned int i){
   uint8_t b[2];
   nvm_read(ctx,ctx->nvm_props,b,large_map(ctx)+2*i,2);
   const uint16_t u = large_get16(b);
-  if((LARGE_NO_UNIT != u) && (u >= large_n_pool(ctx))) raise_error(ctx,LFTL_ERROR_NO_VALID_VERSION);
+  large_check_unit(ctx,u,large_n_pool(ctx));
   return u;
 }
 
@@ -1617,13 +1631,18 @@ static uint8_t*large_txn_units(lftl_ctx_t*ctx){
  */
 static bool large_unit_held(lftl_ctx_t*ctx, unsigned int u){
   const unsigned int n = large_n_chunks(ctx);
+  const unsigned int n_pool = large_n_pool(ctx);
   const uint8_t*const map = large_map(ctx);
   uint64_t buf64[SIZE64(LARGE_BLOCK)];
   uint8_t*const buf = (uint8_t*)buf64;
   for(unsigned int i=0;i<n;){
     const unsigned int k = (n - i) > LARGE_BLOCK/2 ? LARGE_BLOCK/2 : (n - i);
     nvm_read(ctx,ctx->nvm_props,buf,map+2*i,2*k);
-    for(unsigned int j=0;j<k;j++) if(large_get16(buf+2*j) == u) return true;
+    for(unsigned int j=0;j<k;j++){
+      const uint16_t v = large_get16(buf+2*j);
+      large_check_unit(ctx,v,n_pool);
+      if(v == u) return true;
+    }
     i += k;
   }
   const uint8_t*const units = large_txn_units(ctx);
@@ -1662,6 +1681,7 @@ static uint16_t large_next_free(lftl_ctx_t*ctx, uint16_t from){
  */
 static unsigned int large_count_free(lftl_ctx_t*ctx){
   const unsigned int n = large_n_chunks(ctx);
+  const unsigned int n_pool = large_n_pool(ctx);
   const uint8_t*const map = large_map(ctx);
   uint64_t buf64[SIZE64(LARGE_BLOCK)];
   uint8_t*const buf = (uint8_t*)buf64;
@@ -1669,14 +1689,17 @@ static unsigned int large_count_free(lftl_ctx_t*ctx){
   for(unsigned int i=0;i<n;){
     const unsigned int k = (n - i) > LARGE_BLOCK/2 ? LARGE_BLOCK/2 : (n - i);
     nvm_read(ctx,ctx->nvm_props,buf,map+2*i,2*k);
-    for(unsigned int j=0;j<k;j++) if(LARGE_NO_UNIT != large_get16(buf+2*j)) used++;
+    for(unsigned int j=0;j<k;j++){
+      const uint16_t v = large_get16(buf+2*j);
+      large_check_unit(ctx,v,n_pool);
+      if(LARGE_NO_UNIT != v) used++;
+    }
     i += k;
   }
   const uint8_t*const units = large_txn_units(ctx);
   if(units){
     for(unsigned int i=0;i<n;i++) if(LARGE_NO_UNIT != large_get16(units+2*i)) used++;
   }
-  const unsigned int n_pool = large_n_pool(ctx);
   return used >= n_pool ? 0 : n_pool - used;
 }
 
@@ -1693,6 +1716,11 @@ static unsigned int large_count_free(lftl_ctx_t*ctx){
  * data, and a pair that has to be tried again at the next position makes
  * the same map.
  *
+ * Every unit of a block is checked before the block is programmed
+ * (::large_check_unit): one copied from the decision's map may have changed
+ * since the scan, and a map naming it would be rejected by the next scan.
+ * The error comes before the meta field, so the pair never reads valid.
+ *
  * \param ctx Context of the large area
  * \param dst Physical address of the map in the pair
  * \param src What the map holds
@@ -1701,6 +1729,7 @@ static unsigned int large_count_free(lftl_ctx_t*ctx){
  */
 static bool large_program_map(lftl_ctx_t*ctx, uint8_t*dst, const large_map_src_t*src, uint64_t*crc){
   const unsigned int n = large_n_chunks(ctx);
+  const unsigned int n_pool = large_n_pool(ctx);
   const uintptr_t map_size = large_map_size(ctx);
   const uintptr_t phy_size = large_map_phy_size(ctx);
   const uint8_t*const old = large_map(ctx);
@@ -1736,6 +1765,8 @@ static bool large_program_map(lftl_ctx_t*ctx, uint8_t*dst, const large_map_src_t
         large_put16(buf+b,v);
       }
     }
+    //the units and the head, then the checksum of the data
+    for(uintptr_t b=0;(b < valued) && ((off + b)/2 <= n);b+=2) large_check_unit(ctx,large_get16(buf+b),n_pool);
     *crc = crc64_update(*crc,buf,valued);
     if(!ewlf_try_write(ctx,dst+off,buf,len)) return false;
   }

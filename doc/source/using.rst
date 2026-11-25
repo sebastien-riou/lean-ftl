@@ -436,6 +436,14 @@ the callbacks above do.
   See the integrator section of ``THREAT-MODEL.md`` in the repository, and R7 and T5 of
   the :ref:`flash` page.
 
+.. note:: Nothing but *lean-ftl* may program inside an area. A tool that writes an image of the
+  flash back, such as the restore of a snapshot, the production programming of a pre-built
+  image or a firmware update that copies pages, must erase the pages first, then program only
+  the write units that are not all ``0xFF``. A plain download programs every byte: on the
+  STM32U5 a write unit programmed with all ``0xFF`` reads erased but refuses the next program,
+  and an EWLF area fails at its next update with :c:macro:`LFTL_ERROR_LOW_LEVEL_WRITE`. See R3
+  of the :ref:`flash` page.
+
 Declaring LFTL areas 
 ----------------------
 Each LFTL area has its volatile context maintained in a

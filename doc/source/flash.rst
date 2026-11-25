@@ -45,6 +45,14 @@ possibly several units per call (R10), with one exception that only a flash decl
 weak, or over the version of a slot the scan tombstones (N3). The source may be unaligned RAM, or NVM that does
 not overlap the destination (:c:type:`nvm_write_t`).
 
+Erased means that nothing programmed the unit since its erase, whatever it reads. A unit that
+another tool programmed with all ``0xFF`` reads erased but is not: on a NUCLEO-U5A5ZJ-Q it
+refused every later program but all zeros, and the next update of an EWLF area failed with
+:c:macro:`LFTL_ERROR_LOW_LEVEL_WRITE`. So nothing but *lean-ftl* programs inside an area, and
+anything that writes an image of one back (the restore of a snapshot, the production programming
+of a pre-built image, a firmware update that copies pages) erases its pages first, then programs
+only the write units that are not all ``0xFF``.
+
 **R4. Reads of any byte range.**
 Any size at any alignment, through the memory map or :c:type:`nvm_read_t`, without side effect on
 the content.

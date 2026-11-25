@@ -4,5 +4,12 @@ set -ex
 
 TAG=$1
 
-git tag $TAG 
-git push origin --tags
+#without a tag, "git tag" would list the tags and "git push origin" push the branch
+if [ -z "$TAG" ]; then
+    echo "usage: $0 vX.Y.Z"
+    exit 1
+fi
+
+git tag $TAG
+#this tag only: "git push origin --tags" would publish every local tag
+git push origin $TAG

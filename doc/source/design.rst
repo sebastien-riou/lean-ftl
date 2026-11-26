@@ -249,7 +249,7 @@ the same short window, and which the area reports before it happens.
 The area is at least 4 erase units, 2 for the log and from 2 to 256 for the data; at least 2
 records must fit in a unit; the erased bytes of the flash must read ``0xFF`` (R6 of the flash
 page); and the write callback must tell a program the flash refused from any other failure
-(:c:macro:`LFTL_NVM_STATUS_REFUSED`, N3). EWLF areas do not use ``zero_overwrite``: they only
+(:c:macro:`LFTL_NVM_STATUS_REFUSED`, R9). EWLF areas do not use ``zero_overwrite``: they only
 program write units that read erased.
 
 **The principle: a reading proves nothing, a returned program does.** A word a power cut left

@@ -2588,6 +2588,21 @@ void tearing_sim_self_test(){
   }
   tearing_sim_weak_self_test(page);
   tearing_sim_init();
+  //a write refused at its second unit, which is not erased: the first unit
+  //is programmed, the refused one and the one above it are left as they
+  //were, the worst R9 allows
+  {
+    const uintptr_t ws = nvm_write_size;
+    uint8_t before[ws], three[3*ws], got[3*ws];
+    memset(before,0x3C,ws);
+    stateful_prng_fill(three,sizeof(three));
+    memset(three+ws,0x5A,ws);
+    if(nvm_erase(page,1)) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(nvm_write(page+ws,before,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(LFTL_NVM_STATUS_REFUSED != nvm_write(page,three,sizeof(three))) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(nvm_read(got,page,sizeof(got))) throw_exception(ERROR_VERIFICATION_FAIL);
+    if(memcmp(got,three,ws) || memcmp(got+ws,before,ws) || !buf_is_all(got+2*ws,0xFF,ws)) throw_exception(ERROR_VERIFICATION_FAIL);
+  }
   format_func(&nvmd); //resync nvm_ref with nvmd's pages
   SANITY_CHECK();
 }

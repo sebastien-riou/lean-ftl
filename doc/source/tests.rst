@@ -87,7 +87,8 @@ or under a random mask, for ever, until a program or an erase makes it solid aga
 the operation the cut never reached stay as they were, and an interrupted erase leaves every
 write unit of its pages weak. A weak unit is not erased, whatever it reads: the simulator
 refuses a program over it with :c:macro:`LFTL_NVM_STATUS_REFUSED`, zeros excepted where the
-flash has the all-zero overwrite. The model is on in every mode; ``--no-weak-words`` turns it
+flash has the all-zero overwrite, after programming the units of the call below it, the worst R9
+allows. The model is on in every mode; ``--no-weak-words`` turns it
 off, ``--weak-seed=N`` seeds its readings, which are reproducible from the seed and the cut.
 With it, every cut is followed by two boots, and an area that reads the new state at one boot and
 the old one at a later boot fails the run as a rollback; and when the boots that recover from a cut

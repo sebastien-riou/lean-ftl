@@ -1,6 +1,6 @@
 # The lean-bsp BSPs the device libraries take their flash accessors from (src/bsp_nvm.c), and the
 # commit of each a release is built from. Read by ./fetch-bsps; "./fetch-bsps --pin" rewrites the
 # commits from the checkouts. One line per BSP: name, device library (on/<name>), URL, commit.
-nucleo-u5a5 stm32u5a5xj https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5.git f1e32b21bd2b4b112a022b34600588a74d438f68
-nucleo-l552 stm32l552xe https://github.com/sebastien-riou/lean-bsp-nucleo-l552.git 0ce7ee11272302ca19db7763ad609021c2e4ba78
+nucleo-u5a5 stm32u5a5xj https://github.com/sebastien-riou/lean-bsp-nucleo-u5a5.git 18fd8e89875f13acc9f2909b44621dca68bd6e4e
+nucleo-l552 stm32l552xe https://github.com/sebastien-riou/lean-bsp-nucleo-l552.git 4f4fe05d3b006682af5cba1d894b2bfde89ffeed
 numaker-m5531 m5531h2ljae https://github.com/sebastien-riou/lean-bsp-numaker-m5531.git 87f0e78393a7852ab5ef94647f8ad3e4110ddfec

@@ -86,10 +86,12 @@ true.
 
 **R9. EWLF and large areas only: a refused program is reported as such.**
 A write unit a power cut left weak can read erased and still be refused by a flash that checks
-before it programs (PROGERR on the STM32L5 and STM32U5). The write callback then returns
-:c:macro:`LFTL_NVM_STATUS_REFUSED`, having programmed nothing, and the area steps over that unit.
-Any other failure is fatal, as everywhere. A flash that does not check programs over the weak
-word, which for the words of zeros an EWLF area writes there is harmless.
+before it programs (PROGERR on the STM32L5 and STM32U5). The write callback then stops and
+returns :c:macro:`LFTL_NVM_STATUS_REFUSED`, having programmed nothing at or above the refused
+unit: the units of the call below it may be programmed (R10), as a power cut at the refused unit
+would have left them, and the area steps over the position that holds it. Any other failure is
+fatal, as everywhere. A flash that does not check programs over the weak word, which for the
+words of zeros an EWLF area writes there is harmless.
 
 **R10. The write units of one call are programmed one at a time, in ascending order.**
 When :c:type:`nvm_write_t` is asked for several write units, it programs them from the lowest

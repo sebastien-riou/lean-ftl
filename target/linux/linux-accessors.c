@@ -341,11 +341,18 @@ uint8_t nvm_write(void*dst_nvm_addr, const void*const src, uintptr_t size){
   //and N3 of doc/source/flash.rst: the library needs the exception only to
   //pin a word a power cut left weak, and only on a flash that declares it).
   //A weak unit is not erased, whatever it reads.
+  //A refused unit stops the write, as the STM32 callbacks of the lean-bsp BSPs
+  //do: the units below it are programmed first, the worst R9 allows, and
+  //nothing at or above it.
   for(uintptr_t i=0;i<size;i+=nvm_write_size){
     const uint8_t*const dst8 = (const uint8_t*)dst_nvm_addr + i;
     const uint8_t*const src8 = (const uint8_t*)src + i;
     const bool erased = is_all(dst8,0xFF,nvm_write_size) && !tearing_sim_is_weak(dst8,nvm_write_size);
-    if(!erased && !(nvm_zero_overwrite && is_all(src8,0x00,nvm_write_size))) return 6; //LFTL_NVM_STATUS_REFUSED: nothing is programmed
+    if(!erased && !(nvm_zero_overwrite && is_all(src8,0x00,nvm_write_size))){
+      if(0 == i) return 6; //LFTL_NVM_STATUS_REFUSED, nothing programmed
+      const uint8_t status = nvm_write(dst_nvm_addr,src,i);
+      return status ? status : 6;
+    }
   }
   const uint32_t tsize = cut_size(size);
   if(tsize && weak_active(dst_nvm_addr)){

@@ -91,11 +91,12 @@
 #define LFTL_INTERNAL_ERROR -1
 /// @}
 
-/// Status the ::nvm_write_t callback returns when the flash refused a program
-/// and programmed nothing, because a target write unit is not erased (PROGERR
-/// on the STM32L5 and STM32U5). An EWLF area steps over the write unit it was
-/// refused; everywhere else, and for any other non-zero status, the error is
-/// fatal (::LFTL_ERROR_LOW_LEVEL_WRITE).
+/// Status the ::nvm_write_t callback returns when the flash refused to program
+/// a write unit because it is not erased (PROGERR on the STM32L5 and STM32U5),
+/// the callback having programmed nothing at or above that unit (the units
+/// below it may be programmed). An EWLF or a large area steps over the
+/// position that holds the unit; everywhere else, and for any other non-zero
+/// status, the error is fatal (::LFTL_ERROR_LOW_LEVEL_WRITE).
 #define LFTL_NVM_STATUS_REFUSED 6
 
 #ifndef LFTL_EWLF_CERTIFICATES
@@ -147,10 +148,11 @@ typedef uint8_t (*nvm_erase_t)(void*base_address, unsigned int n_pages);
  * then leaves at most one weak write unit, the ones below it programmed and
  * the ones above it untouched, the only case the anti-tearing results cover.
  *
- * When the flash refuses a program because a target write unit is not erased,
- * and programs nothing, it shall return ::LFTL_NVM_STATUS_REFUSED: a write
- * unit that a power cut left weak can read erased and still be refused, and
- * an EWLF area then steps over it.
+ * When the flash refuses to program a write unit because it is not erased,
+ * the callback shall stop there, programming nothing at or above that unit,
+ * and return ::LFTL_NVM_STATUS_REFUSED: a write unit that a power cut left
+ * weak can read erased and still be refused, and an EWLF or a large area
+ * then steps over the position that holds it (R9 of the same page).
  *
  * The destination range may cross multiple physical page boundaries.
  * 

@@ -422,9 +422,9 @@ and ``src/bsp_nvm.h``, define ``BSP_NVM0_BASE`` and ``BSP_NVM0_SIZE`` to the ran
 What the callbacks must guarantee is R3 to R5 and R10 of :ref:`flash-required`, and what they
 need not provide is in :ref:`flash-not-relied-on`: *lean-ftl* programs each write unit at most once
 between two erases, whole units only, and never overwrites; a write of several units programs them
-one at a time, from the lowest address up (R10). For EWLF areas the write callback returns
-:c:macro:`LFTL_NVM_STATUS_REFUSED` when the flash refused a program and programmed nothing (R9):
-the callbacks above do.
+one at a time, from the lowest address up (R10). For EWLF and large areas the write callback
+stops at a write unit the flash refuses and returns :c:macro:`LFTL_NVM_STATUS_REFUSED`, having
+programmed nothing at or above it (R9): the callbacks above do.
 
 .. note:: On flash with ECC that raises an NMI on a double-bit error (STM32L5, STM32U5),
   a program or erase interrupted by a power cut can leave a word that faults when read,
